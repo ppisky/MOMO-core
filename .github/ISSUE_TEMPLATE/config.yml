@@ -1,2 +1,5 @@
 blank_issues_enabled: false
-contact_links: []
+contact_links:
+  - name: Issue submission rules / Issue 提交规则
+    url: https://github.com/ppisky/MOMO-core/blob/main/CONTRIBUTING.md#issues
+    about: Read the bilingual rules before opening an Issue. / 创建 Issue 前请阅读中英双语规则。

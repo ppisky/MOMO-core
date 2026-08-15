@@ -9,7 +9,9 @@ body:
       value: |
         Start with the user or implementation problem, not only a preferred solution.
 
-        请先说明要解决的用户问题或实现问题，不要只描述期望采用的方案。
+        Keep this Issue to one independent proposal. Start with the user or implementation problem, not only a preferred solution.
+
+        每个 Issue 请只描述一个独立建议。请先说明要解决的用户问题或实现问题，不要只描述期望采用的方案。
 
   - type: dropdown
     id: area
@@ -65,6 +67,10 @@ body:
       label: Confirmation / 确认
       options:
         - label: I searched existing issues and documentation first. / 我已经先搜索现有 Issue 和文档。
+          required: true
+        - label: This Issue contains one independent proposal. / 本 Issue 只描述一个独立建议。
+          required: true
+        - label: I described compatibility or data impact, including when there is none. / 我已说明兼容性或数据影响，包括确认没有影响的情况。
           required: true
         - label: This proposal does not contain credentials or private user data. / 本建议不包含凭据或私有用户数据。
           required: true
