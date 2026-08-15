@@ -49,6 +49,11 @@ cargo doc --workspace --all-features --no-deps
 参见 [Core 0.3 状态](docs/core_progress_0_3.md)与
 [开发指南](docs/development.en.md)。
 
+## 参与方式
+
+Issues 用于反馈可复现问题和具体建议。Pull Request 暂时关闭。提交 Issue 前请阅读
+[CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## 许可证
 
 Apache License 2.0。参见 [LICENSE](LICENSE) 与

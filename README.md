@@ -53,6 +53,12 @@ cargo doc --workspace --all-features --no-deps
 See [Core 0.3 status](docs/core_progress_0_3.md) and the
 [development guide](docs/development.en.md).
 
+## Contributing
+
+Issues are open for reproducible problems and concrete proposals. Pull requests
+are temporarily paused. Read [CONTRIBUTING.md](CONTRIBUTING.md) before reporting
+an issue.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) and

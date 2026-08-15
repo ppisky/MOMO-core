@@ -1,0 +1,70 @@
+name: Proposal / 功能建议
+description: Propose a Core capability or specification change / 提议 Core 能力或规范变更
+title: "[Proposal] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the user or implementation problem, not only a preferred solution.
+
+        请先说明要解决的用户问题或实现问题，不要只描述期望采用的方案。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 范围
+      options:
+        - Core API
+        - Storage and vector database
+        - DMW memory
+        - NSG semantic graph
+        - MO State
+        - Character Card
+        - MOC container
+        - Encryption
+        - Model gateway
+        - Local HTTP server
+        - Documentation or specification
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case / 问题或使用场景
+      description: Who needs this, and what cannot be done today? / 谁需要它，目前什么事情无法完成？
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior / 建议行为
+      description: Describe observable behavior, inputs, outputs, and boundaries. / 请描述可观察行为、输入、输出和边界。
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and data impact / 兼容性与数据影响
+      description: Note effects on stored data, MOC, public APIs, specifications, or existing clients. / 请说明对存储数据、MOC、公开 API、规范或现有调用方的影响。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered / 考虑过的替代方案
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation / 确认
+      options:
+        - label: I searched existing issues and documentation first. / 我已经先搜索现有 Issue 和文档。
+          required: true
+        - label: This proposal does not contain credentials or private user data. / 本建议不包含凭据或私有用户数据。
+          required: true
