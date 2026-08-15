@@ -1,0 +1,14 @@
+/target
+/.tools/
+/dist/
+/.codex-tmp/
+/.claude/
+
+# Local runtime data and secrets
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+*.moc
+!tests/fixtures/*.moc

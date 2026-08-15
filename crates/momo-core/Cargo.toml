@@ -1,0 +1,37 @@
+[package]
+name = "momo_core"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+
+[dependencies]
+futures-util.workspace = true
+chrono.workspace = true
+language-tags.workspace = true
+momo-config = { path = "../momo-config" }
+momo-crypto = { path = "../momo-crypto" }
+momo-domain = { path = "../momo-domain" }
+momo-memory = { path = "../momo-memory" }
+momo-moc = { path = "../momo-moc" }
+momo-storage = { path = "../momo-storage" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tiktoken-rs.workspace = true
+tokio.workspace = true
+toml.workspace = true
+url.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+wuff.workspace = true
+yaml_serde.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

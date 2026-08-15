@@ -1,0 +1,22 @@
+[package]
+name = "momo-memory"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+momo-domain = { path = "../momo-domain" }
+serde.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+yaml_serde.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
