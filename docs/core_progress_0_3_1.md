@@ -1,10 +1,27 @@
-# MOMO Core 0.3 Status
+# MOMO Core 0.3.1 Status
 
 **Status:** public implementation baseline  
 **Updated:** 2026-08-16
 
-MOMO Core 0.3 consolidates the current Rust workspace without changing the
-runtime behavior established by its test suite.
+MOMO Core 0.3.1 standardizes scope identity and reduces parameter density at
+the public orchestration boundary.
+
+## 0.3.1 changes
+
+- `scope_id` replaces `owner_id` in domain models, SQLite storage, vector
+  records, patch reviews, portable operations, and internal APIs;
+- SQLite migration `0013_scope_identity.sql` converts persisted columns and
+  indexes instead of retaining legacy fields;
+- `memory/users` is converted once to `memory/scopes`; subsequent operation
+  uses only the new directory;
+- chat, context preparation, scoped retrieval, and MOC export JSON facades now
+  accept one structured request document rather than long positional argument
+  lists;
+- the Rust context API uses `ContextRequest` and `ContextSections` and no
+  longer exposes a parallel state-specific function.
+
+The removed names and positional APIs are not retained as compatibility
+wrappers.
 
 ## Included systems
 
@@ -26,7 +43,7 @@ or deployment repository boundaries.
 ## Vector storage status
 
 Turso refers to the standalone database library selected for the vector
-database backend and fits behind `NsgVectorStore`. The current 0.3 source also
+database backend and fits behind `NsgVectorStore`. The current 0.3.1 source also
 contains a deterministic exact-ranking implementation used for local
 verification.
 
@@ -35,7 +52,7 @@ verification.
 - MOC v2 remains the native portable format.
 - Existing local persistence and retrieval behavior is unchanged.
 - The HTTP/SSE request and event shapes covered by the regression suite remain
-  stable for 0.3.
+  stable for 0.3.1 except for the intentionally replaced request shapes above.
 - Compatibility entry points that are disabled continue to fail closed.
 
 ## Verification
@@ -47,5 +64,5 @@ cargo test --workspace --all-features
 cargo doc --workspace --all-features --no-deps
 ```
 
-The public `v0.3.0` release is cut only from a revision that passes these checks
+The public `v0.3.1` release is cut only from a revision that passes these checks
 in GitHub Actions.

@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "momo-config"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "momo-domain",
  "tempfile",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "momo-crypto"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "momo-domain"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "momo-memory"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "hex",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "momo-moc"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "hex",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "momo-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "momo_core",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "momo-storage"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "hex",
@@ -1496,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "momo_core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "futures-util",

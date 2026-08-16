@@ -21,6 +21,23 @@
 消息数据只以本地 SQLite 和 `.moc` 导入导出为主线。模型端点不可用时，
 本地历史不会丢失；不存在后台 outbox、账号同步或服务端重试队列。
 
+0.3.1 的 JSON facade 使用结构化请求对象，不再把 endpoint、messages、预算等拆成
+大量位置参数。`chat_complete_json` 接收一个 JSON 文档；流式请求在相同结构上增加
+`request_id`。上下文准备同样通过一个对象传递 sections、messages 和预算：
+
+```json
+{
+  "character_markdown": "...",
+  "user_markdown": "...",
+  "memory_markdown": "...",
+  "state_context": "...",
+  "nsg_markdown": "...",
+  "messages": [],
+  "context_window": 8192,
+  "reserve_output_tokens": 1024
+}
+```
+
 ## 2. 上下文顺序与预算
 
 请求消息顺序固定为：

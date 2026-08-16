@@ -1,4 +1,4 @@
-# MOMO Core 0.3
+# MOMO Core 0.3.1
 
 [简体中文](README.zh-CN.md)
 
@@ -39,7 +39,14 @@ loopback HTTP/SSE interface for local applications.
 `NsgVectorStore` defines the vector-storage boundary. In MOMO documentation,
 Turso always means the standalone database library selected for the vector
 database backend. The current source tree also contains a deterministic local
-exact-ranking implementation used by the 0.3 test suite.
+exact-ranking implementation used by the 0.3.1 test suite.
+
+## Scope identity
+
+`scope_id` is the only namespace identifier used by public models, APIs,
+storage, vector records, patch reviews, and MOC operations. A scope is an
+opaque UUID whose meaning and access policy belong to the host application.
+Core stores each memory workspace under `memory/scopes/<scope_id>`.
 
 ## Validate
 
@@ -50,14 +57,14 @@ cargo test --workspace --all-features
 cargo doc --workspace --all-features --no-deps
 ```
 
-See [Core 0.3 status](docs/core_progress_0_3.md) and the
+See [Core 0.3.1 status](docs/core_progress_0_3_1.md) and the
 [development guide](docs/development.en.md).
 
 ## Contributing
 
 Issues are open for reproducible problems and concrete proposals. Pull requests
-are temporarily paused. Read [CONTRIBUTING.md](CONTRIBUTING.md) before reporting
-an issue.
+are also open; substantial changes should preferably begin with an Issue. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before participating.
 
 ## License
 

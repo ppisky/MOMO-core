@@ -1,4 +1,4 @@
-# MOMO Core 0.3
+# MOMO Core 0.3.1
 
 [English](README.md)
 
@@ -35,7 +35,13 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 ## 向量存储
 
 `NsgVectorStore` 定义向量存储边界。MOMO 文档中的 Turso 始终指选作向量数据库后端的
-独立数据库库。当前源码同时保留 0.3 测试使用的确定性本地精确排序实现。
+独立数据库库。当前源码同时保留 0.3.1 测试使用的确定性本地精确排序实现。
+
+## Scope 标识
+
+`scope_id` 是公开领域模型、API、存储、向量记录、Patch Review 与 MOC 操作使用的
+唯一命名空间标识。Scope 是一个不透明 UUID，其业务含义和访问策略由宿主应用决定。
+Core 将每个记忆 workspace 存储在 `memory/scopes/<scope_id>` 下。
 
 ## 验证
 
@@ -46,13 +52,13 @@ cargo test --workspace --all-features
 cargo doc --workspace --all-features --no-deps
 ```
 
-参见 [Core 0.3 状态](docs/core_progress_0_3.md)与
+参见 [Core 0.3.1 状态](docs/core_progress_0_3_1.md)与
 [开发指南](docs/development.en.md)。
 
 ## 参与方式
 
-Issues 用于反馈可复现问题和具体建议。Pull Request 暂时关闭。提交 Issue 前请阅读
-[CONTRIBUTING.md](CONTRIBUTING.md)。
+Issues 用于反馈可复现问题和具体建议，Pull Request 同样开放；较大改动建议先创建
+Issue 讨论。参与前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

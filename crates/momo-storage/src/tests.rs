@@ -1,15 +1,36 @@
 use super::*;
+
+#[tokio::test]
+async fn migrated_schema_uses_scope_id_exclusively() {
+    let store = LocalStore::in_memory().await.expect("store");
+    for table_info_sql in [
+        "PRAGMA table_info(character_cards)",
+        "PRAGMA table_info(conversations)",
+        "PRAGMA table_info(memory_patch_reviews)",
+        "PRAGMA table_info(nsg_vectors)",
+    ] {
+        let columns = sqlx::query(table_info_sql)
+            .fetch_all(&store.pool)
+            .await
+            .expect("table info")
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect::<Vec<_>>();
+        assert!(columns.iter().any(|column| column == "scope_id"));
+        assert!(!columns.iter().any(|column| column == "owner_id"));
+    }
+}
 use momo_domain::new_id;
 
 #[tokio::test]
-async fn memory_patch_reviews_are_owner_scoped_and_auditable() {
+async fn memory_patch_reviews_are_scope_isolated_and_auditable() {
     let store = LocalStore::in_memory().await.expect("store");
-    let owner_id = new_id();
-    let other_owner_id = new_id();
+    let scope_id = new_id();
+    let other_scope_id = new_id();
     let targets = vec!["events/arrival.md".to_owned()];
     let review = store
         .create_memory_patch_review(
-            owner_id,
+            scope_id,
             "conversation-1",
             "patches: []",
             &targets,
@@ -21,35 +42,35 @@ async fn memory_patch_reviews_are_owner_scoped_and_auditable() {
 
     assert_eq!(
         store
-            .list_memory_patch_reviews(owner_id, false)
+            .list_memory_patch_reviews(scope_id, false)
             .await
             .expect("pending"),
         vec![review.clone()]
     );
     assert!(
         store
-            .list_memory_patch_reviews(other_owner_id, true)
+            .list_memory_patch_reviews(other_scope_id, true)
             .await
-            .expect("other owner")
+            .expect("other scope")
             .is_empty()
     );
     assert!(
         store
             .resolve_memory_patch_review(
-                other_owner_id,
+                other_scope_id,
                 review.id,
                 MemoryPatchReviewStatus::Rejected,
                 None,
                 None,
             )
             .await
-            .expect("owner scoped decision")
+            .expect("scope-isolated decision")
             .is_none()
     );
 
     let approved = store
         .resolve_memory_patch_review(
-            owner_id,
+            scope_id,
             review.id,
             MemoryPatchReviewStatus::Approved,
             Some("ok"),
@@ -62,14 +83,14 @@ async fn memory_patch_reviews_are_owner_scoped_and_auditable() {
     assert_eq!(approved.result.as_deref(), Some("ok"));
     assert!(
         store
-            .list_memory_patch_reviews(owner_id, false)
+            .list_memory_patch_reviews(scope_id, false)
             .await
             .expect("no pending")
             .is_empty()
     );
     assert_eq!(
         store
-            .list_memory_patch_reviews(owner_id, true)
+            .list_memory_patch_reviews(scope_id, true)
             .await
             .expect("history"),
         vec![approved]
@@ -77,7 +98,7 @@ async fn memory_patch_reviews_are_owner_scoped_and_auditable() {
     assert!(
         store
             .resolve_memory_patch_review(
-                owner_id,
+                scope_id,
                 review.id,
                 MemoryPatchReviewStatus::Rejected,
                 None,
@@ -95,7 +116,7 @@ async fn persists_conversation_messages() {
     let now = Utc::now();
     let conversation = Conversation {
         id: new_id(),
-        owner_id: new_id(),
+        scope_id: new_id(),
         character_id: None,
         title: "测试会话".to_owned(),
         created_at: now,
@@ -146,7 +167,7 @@ async fn message_edits_deletes_and_restores_are_local_only() {
     let now = Utc::now();
     let conversation = Conversation {
         id: new_id(),
-        owner_id: new_id(),
+        scope_id: new_id(),
         character_id: None,
         title: "Editable messages".to_owned(),
         created_at: now,
@@ -202,14 +223,14 @@ async fn message_edits_deletes_and_restores_are_local_only() {
 }
 
 #[tokio::test]
-async fn messages_are_immutable_idempotent_and_owner_scoped() {
+async fn messages_are_immutable_idempotent_and_scope_isolated() {
     let store = LocalStore::in_memory().await.expect("store");
-    let owner_id = new_id();
-    let other_owner_id = new_id();
+    let scope_id = new_id();
+    let other_scope_id = new_id();
     let now = Utc::now();
     let conversation = Conversation {
         id: new_id(),
-        owner_id,
+        scope_id,
         character_id: None,
         title: "Immutable messages".to_owned(),
         created_at: now,
@@ -234,16 +255,16 @@ async fn messages_are_immutable_idempotent_and_owner_scoped() {
         .expect("identical append");
     assert_eq!(
         store
-            .list_messages_for_owner(owner_id, conversation.id)
+            .list_messages_for_scope(scope_id, conversation.id)
             .await
-            .expect("owner messages"),
+            .expect("scope messages"),
         vec![message.clone()]
     );
     assert!(
         store
-            .list_messages_for_owner(other_owner_id, conversation.id)
+            .list_messages_for_scope(other_scope_id, conversation.id)
             .await
-            .expect("other owner messages")
+            .expect("other scope messages")
             .is_empty()
     );
 
@@ -263,7 +284,7 @@ async fn messages_are_immutable_idempotent_and_owner_scoped() {
     store.stage_message(&message).await.expect("identical save");
     assert_eq!(
         store
-            .list_messages_for_owner(owner_id, conversation.id)
+            .list_messages_for_scope(scope_id, conversation.id)
             .await
             .expect("unchanged messages"),
         vec![message]
@@ -275,10 +296,10 @@ async fn conversation_updates_cannot_replace_the_bound_character() {
     let store = LocalStore::in_memory().await.expect("store");
     let now = Utc::now();
     let original_character_id = new_id();
-    let owner_id = new_id();
+    let scope_id = new_id();
     let card = CharacterCard {
         id: original_character_id,
-        owner_id,
+        scope_id,
         name: "Original character".to_owned(),
         version: "1.0.0".to_owned(),
         author_name: "Owner".to_owned(),
@@ -292,7 +313,7 @@ async fn conversation_updates_cannot_replace_the_bound_character() {
     store.save_character(&card).await.expect("save character");
     let conversation = Conversation {
         id: new_id(),
-        owner_id,
+        scope_id,
         character_id: Some(original_character_id),
         title: "Original".to_owned(),
         created_at: now,
@@ -327,10 +348,10 @@ async fn conversation_updates_cannot_replace_the_bound_character() {
 async fn stages_character_and_conversation_as_local_operations() {
     let store = LocalStore::in_memory().await.expect("store");
     let now = Utc::now();
-    let owner_id = new_id();
+    let scope_id = new_id();
     let card = CharacterCard {
         id: new_id(),
-        owner_id,
+        scope_id,
         name: "Offline".to_owned(),
         version: "1.0.0".to_owned(),
         author_name: "Owner".to_owned(),
@@ -344,7 +365,7 @@ async fn stages_character_and_conversation_as_local_operations() {
     store.stage_character(&card).await.expect("stage card");
     let conversation = Conversation {
         id: new_id(),
-        owner_id,
+        scope_id,
         character_id: Some(card.id),
         title: "Offline conversation".to_owned(),
         created_at: now,
@@ -439,10 +460,10 @@ async fn stages_character_and_conversation_as_local_operations() {
 async fn purging_recent_delete_hides_snapshot_but_keeps_tombstone() {
     let store = LocalStore::in_memory().await.expect("store");
     let now = Utc::now();
-    let owner_id = new_id();
+    let scope_id = new_id();
     let card = CharacterCard {
         id: new_id(),
-        owner_id,
+        scope_id,
         name: "Disposable".to_owned(),
         version: "1.0.0".to_owned(),
         author_name: "Owner".to_owned(),
@@ -495,10 +516,10 @@ async fn purging_recent_delete_hides_snapshot_but_keeps_tombstone() {
 async fn forgetting_recent_delete_removes_guest_tombstone() {
     let store = LocalStore::in_memory().await.expect("store");
     let now = Utc::now();
-    let owner_id = new_id();
+    let scope_id = new_id();
     let card = CharacterCard {
         id: new_id(),
-        owner_id,
+        scope_id,
         name: "Guest disposable".to_owned(),
         version: "1.0.0".to_owned(),
         author_name: "Guest".to_owned(),
@@ -539,14 +560,14 @@ async fn forgetting_recent_delete_removes_guest_tombstone() {
 }
 
 #[tokio::test]
-async fn staged_objects_can_move_from_guest_to_account_owner() {
+async fn staged_objects_can_move_from_guest_to_account_scope() {
     let store = LocalStore::in_memory().await.expect("store");
     let now = Utc::now();
-    let guest_owner = new_id();
-    let account_owner = new_id();
+    let guest_scope = new_id();
+    let account_scope = new_id();
     let mut card = CharacterCard {
         id: new_id(),
-        owner_id: guest_owner,
+        scope_id: guest_scope,
         name: "Guest card".to_owned(),
         version: "1.0.0".to_owned(),
         author_name: "Guest".to_owned(),
@@ -558,16 +579,16 @@ async fn staged_objects_can_move_from_guest_to_account_owner() {
         updated_at: now,
     };
     store.stage_character(&card).await.expect("guest card");
-    card.owner_id = account_owner;
+    card.scope_id = account_scope;
     card.author_name = "Account".to_owned();
     store.stage_character(&card).await.expect("move card");
 
     let guest_cards = store
-        .list_characters_for_owner(guest_owner)
+        .list_characters_for_scope(guest_scope)
         .await
         .expect("guest cards");
     let account_cards = store
-        .list_characters_for_owner(account_owner)
+        .list_characters_for_scope(account_scope)
         .await
         .expect("account cards");
     assert!(guest_cards.is_empty());
@@ -575,11 +596,11 @@ async fn staged_objects_can_move_from_guest_to_account_owner() {
 }
 
 #[tokio::test]
-async fn nsg_vectors_are_owner_and_space_scoped_and_validate_input() {
+async fn nsg_vectors_are_scope_and_space_isolated_and_validate_input() {
     let store = LocalStore::in_memory().await.expect("store");
-    let owner = new_id();
+    let scope = new_id();
     let record = NsgVectorRecord {
-        owner_id: owner,
+        scope_id: scope,
         node_id: "lore_lake".to_owned(),
         source_hash: "a".repeat(64),
         vector_space_id: "provider|model|3".to_owned(),
@@ -590,7 +611,7 @@ async fn nsg_vectors_are_owner_and_space_scoped_and_validate_input() {
     store.upsert_nsg_vector(&record).await.expect("save vector");
     assert_eq!(
         store
-            .list_nsg_vectors(owner, "provider|model|3")
+            .list_nsg_vectors(scope, "provider|model|3")
             .await
             .expect("load")
             .len(),
@@ -600,7 +621,7 @@ async fn nsg_vectors_are_owner_and_space_scoped_and_validate_input() {
         store
             .list_nsg_vectors(new_id(), "provider|model|3")
             .await
-            .expect("other owner")
+            .expect("other scope")
             .is_empty()
     );
     let invalid = NsgVectorRecord {
@@ -617,11 +638,11 @@ async fn nsg_vectors_are_owner_and_space_scoped_and_validate_input() {
 #[tokio::test]
 async fn exact_vector_ranking_filters_stale_records_and_is_deterministic() {
     let store = LocalStore::in_memory().await.expect("store");
-    let owner = new_id();
+    let scope = new_id();
     let now = Utc::now();
     let records = [
         NsgVectorRecord {
-            owner_id: owner,
+            scope_id: scope,
             node_id: "node_a".to_owned(),
             source_hash: "a".repeat(64),
             vector_space_id: "provider|embedding-small|3".to_owned(),
@@ -630,7 +651,7 @@ async fn exact_vector_ranking_filters_stale_records_and_is_deterministic() {
             created_at: now,
         },
         NsgVectorRecord {
-            owner_id: owner,
+            scope_id: scope,
             node_id: "node_b".to_owned(),
             source_hash: "b".repeat(64),
             vector_space_id: "provider|embedding-small|3".to_owned(),
@@ -639,7 +660,7 @@ async fn exact_vector_ranking_filters_stale_records_and_is_deterministic() {
             created_at: now,
         },
         NsgVectorRecord {
-            owner_id: owner,
+            scope_id: scope,
             node_id: "node_stale".to_owned(),
             source_hash: "c".repeat(64),
             vector_space_id: "provider|embedding-small|3".to_owned(),
@@ -661,7 +682,7 @@ async fn exact_vector_ranking_filters_stale_records_and_is_deterministic() {
 
     let ranked = store
         .rank_nsg_vectors(
-            owner,
+            scope,
             "provider|embedding-small|3",
             &[1.0, 0.0, 0.0],
             &current_hashes,
@@ -672,7 +693,7 @@ async fn exact_vector_ranking_filters_stale_records_and_is_deterministic() {
     assert_eq!(ranked, vec!["node_a", "node_b"]);
 
     let status = store
-        .nsg_vector_status(owner, "provider|embedding-small|3", &current_hashes)
+        .nsg_vector_status(scope, "provider|embedding-small|3", &current_hashes)
         .await
         .expect("vector status");
     assert_eq!(status.indexed_count, 2);
@@ -682,7 +703,7 @@ async fn exact_vector_ranking_filters_stale_records_and_is_deterministic() {
     assert!(matches!(
         store
             .rank_nsg_vectors(
-                owner,
+                scope,
                 "provider|embedding-small|3",
                 &[0.0, 0.0, 0.0],
                 &current_hashes,

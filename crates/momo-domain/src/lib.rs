@@ -27,7 +27,7 @@ pub struct User {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CharacterCard {
     pub id: Uuid,
-    pub owner_id: Uuid,
+    pub scope_id: Uuid,
     pub name: String,
     pub version: String,
     #[serde(alias = "author_display_name")]
@@ -77,7 +77,7 @@ impl TryFrom<&str> for MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Conversation {
     pub id: Uuid,
-    pub owner_id: Uuid,
+    pub scope_id: Uuid,
     pub character_id: Option<Uuid>,
     pub title: String,
     pub created_at: DateTime<Utc>,

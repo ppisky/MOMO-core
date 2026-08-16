@@ -35,15 +35,15 @@ impl LocalStore {
         validate_nsg_vector(record).map_err(StorageError::InvalidNsgVector)?;
         sqlx::query(
             r#"INSERT INTO nsg_vectors
-              (owner_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at)
+              (scope_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at)
               VALUES (?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(owner_id, node_id, vector_space_id) DO UPDATE SET
+              ON CONFLICT(scope_id, node_id, vector_space_id) DO UPDATE SET
                 source_hash=excluded.source_hash,
                 dimension=excluded.dimension,
                 vector_json=excluded.vector_json,
                 created_at=excluded.created_at"#,
         )
-        .bind(record.owner_id.to_string())
+        .bind(record.scope_id.to_string())
         .bind(&record.node_id)
         .bind(&record.source_hash)
         .bind(&record.vector_space_id)
@@ -57,14 +57,14 @@ impl LocalStore {
 
     pub async fn list_nsg_vectors(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         vector_space_id: &str,
     ) -> Result<Vec<NsgVectorRecord>, StorageError> {
         let rows = sqlx::query(
-            "SELECT owner_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at \
-             FROM nsg_vectors WHERE owner_id=? AND vector_space_id=?",
+            "SELECT scope_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at \
+             FROM nsg_vectors WHERE scope_id=? AND vector_space_id=?",
         )
-        .bind(owner_id.to_string())
+        .bind(scope_id.to_string())
         .bind(vector_space_id)
         .fetch_all(&self.pool)
         .await?;
@@ -73,18 +73,18 @@ impl LocalStore {
 
     pub async fn remove_nsg_vectors(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         vector_space_id: Option<&str>,
     ) -> Result<u64, StorageError> {
         let result = if let Some(vector_space_id) = vector_space_id {
-            sqlx::query("DELETE FROM nsg_vectors WHERE owner_id=? AND vector_space_id=?")
-                .bind(owner_id.to_string())
+            sqlx::query("DELETE FROM nsg_vectors WHERE scope_id=? AND vector_space_id=?")
+                .bind(scope_id.to_string())
                 .bind(vector_space_id)
                 .execute(&self.pool)
                 .await?
         } else {
-            sqlx::query("DELETE FROM nsg_vectors WHERE owner_id=?")
-                .bind(owner_id.to_string())
+            sqlx::query("DELETE FROM nsg_vectors WHERE scope_id=?")
+                .bind(scope_id.to_string())
                 .execute(&self.pool)
                 .await?
         };
@@ -93,7 +93,7 @@ impl LocalStore {
 
     pub async fn rank_nsg_vectors(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         vector_space_id: &str,
         query_vector: &[f64],
         current_hashes: &HashMap<String, String>,
@@ -101,7 +101,7 @@ impl LocalStore {
     ) -> Result<Vec<String>, StorageError> {
         <Self as NsgVectorStore>::rank_nsg_vectors(
             self,
-            owner_id,
+            scope_id,
             vector_space_id,
             query_vector,
             current_hashes,
@@ -112,11 +112,11 @@ impl LocalStore {
 
     pub async fn nsg_vector_status(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         vector_space_id: &str,
         current_hashes: &HashMap<String, String>,
     ) -> Result<NsgVectorStatus, StorageError> {
-        <Self as NsgVectorStore>::nsg_vector_status(self, owner_id, vector_space_id, current_hashes)
+        <Self as NsgVectorStore>::nsg_vector_status(self, scope_id, vector_space_id, current_hashes)
             .await
     }
 
@@ -126,12 +126,12 @@ impl LocalStore {
         }
         sqlx::query(
             r#"INSERT INTO character_cards
-            (id, owner_id, name, version, description, language, tags, author_uid,
+            (id, scope_id, name, version, description, language, tags, author_uid,
              author_display_name, author_name, author_url, character_markdown, user_markdown,
              opening_markdown, created_at, updated_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
-              owner_id=excluded.owner_id, name=excluded.name, version=excluded.version,
+              scope_id=excluded.scope_id, name=excluded.name, version=excluded.version,
               author_display_name=excluded.author_display_name,
               author_name=excluded.author_name, author_url=excluded.author_url,
               character_markdown=excluded.character_markdown, user_markdown=excluded.user_markdown,
@@ -139,7 +139,7 @@ impl LocalStore {
               updated_at=excluded.updated_at"#,
         )
         .bind(card.id.to_string())
-        .bind(card.owner_id.to_string())
+        .bind(card.scope_id.to_string())
         .bind(&card.name)
         .bind(&card.version)
         .bind("")
@@ -166,14 +166,14 @@ impl LocalStore {
         rows.iter().map(character_from_row).collect()
     }
 
-    pub async fn list_characters_for_owner(
+    pub async fn list_characters_for_scope(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
     ) -> Result<Vec<CharacterCard>, StorageError> {
         let rows = sqlx::query(
-            "SELECT * FROM character_cards WHERE owner_id=? ORDER BY updated_at DESC, id",
+            "SELECT * FROM character_cards WHERE scope_id=? ORDER BY updated_at DESC, id",
         )
-        .bind(owner_id.to_string())
+        .bind(scope_id.to_string())
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(character_from_row).collect()
@@ -197,14 +197,14 @@ impl LocalStore {
         }
         sqlx::query(
             r#"INSERT INTO conversations
-            (id, owner_id, character_id, title, created_at, updated_at)
+            (id, scope_id, character_id, title, created_at, updated_at)
             VALUES (?,?,?,?,?,?)
-            ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id,
+            ON CONFLICT(id) DO UPDATE SET scope_id=excluded.scope_id,
               character_id=excluded.character_id, title=excluded.title,
               updated_at=excluded.updated_at"#,
         )
         .bind(conversation.id.to_string())
-        .bind(conversation.owner_id.to_string())
+        .bind(conversation.scope_id.to_string())
         .bind(conversation.character_id.map(|id| id.to_string()))
         .bind(&conversation.title)
         .bind(conversation.created_at.to_rfc3339())
@@ -221,14 +221,14 @@ impl LocalStore {
         rows.iter().map(conversation_from_row).collect()
     }
 
-    pub async fn list_conversations_for_owner(
+    pub async fn list_conversations_for_scope(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
     ) -> Result<Vec<Conversation>, StorageError> {
         let rows = sqlx::query(
-            "SELECT * FROM conversations WHERE owner_id=? ORDER BY updated_at DESC, id",
+            "SELECT * FROM conversations WHERE scope_id=? ORDER BY updated_at DESC, id",
         )
-        .bind(owner_id.to_string())
+        .bind(scope_id.to_string())
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(conversation_from_row).collect()
@@ -247,20 +247,20 @@ impl LocalStore {
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
         let character_id: Option<String> =
-            sqlx::query_scalar("SELECT character_id FROM conversations WHERE id=? AND owner_id=?")
+            sqlx::query_scalar("SELECT character_id FROM conversations WHERE id=? AND scope_id=?")
                 .bind(conversation.id.to_string())
-                .bind(conversation.owner_id.to_string())
+                .bind(conversation.scope_id.to_string())
                 .fetch_one(&mut *transaction)
                 .await?;
         let mut updated = conversation.clone();
         updated.character_id = character_id
             .map(|value| Uuid::parse_str(&value))
             .transpose()?;
-        sqlx::query("UPDATE conversations SET title=?, updated_at=? WHERE id=? AND owner_id=?")
+        sqlx::query("UPDATE conversations SET title=?, updated_at=? WHERE id=? AND scope_id=?")
             .bind(&updated.title)
             .bind(updated.updated_at.to_rfc3339())
             .bind(updated.id.to_string())
-            .bind(updated.owner_id.to_string())
+            .bind(updated.scope_id.to_string())
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -362,19 +362,19 @@ impl LocalStore {
         rows.iter().map(message_from_row).collect()
     }
 
-    pub async fn list_messages_for_owner(
+    pub async fn list_messages_for_scope(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         conversation_id: Uuid,
     ) -> Result<Vec<Message>, StorageError> {
         let rows = sqlx::query(
             r#"SELECT messages.* FROM messages
             INNER JOIN conversations ON conversations.id = messages.conversation_id
-            WHERE messages.conversation_id=? AND conversations.owner_id=?
+            WHERE messages.conversation_id=? AND conversations.scope_id=?
             ORDER BY messages.created_at, messages.id"#,
         )
         .bind(conversation_id.to_string())
-        .bind(owner_id.to_string())
+        .bind(scope_id.to_string())
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(message_from_row).collect()
@@ -426,11 +426,11 @@ impl LocalStore {
                 let card = snapshot.character;
                 sqlx::query(
                     r#"INSERT INTO character_cards
-                    (id, owner_id, name, version, description, language, tags, author_uid,
+                    (id, scope_id, name, version, description, language, tags, author_uid,
                      author_display_name, author_name, author_url, character_markdown, user_markdown,
                      opening_markdown, created_at, updated_at)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id,
+                    ON CONFLICT(id) DO UPDATE SET scope_id=excluded.scope_id,
                       name=excluded.name, version=excluded.version,
                       author_display_name=excluded.author_display_name,
                       author_name=excluded.author_name, author_url=excluded.author_url,
@@ -440,7 +440,7 @@ impl LocalStore {
                       created_at=excluded.created_at, updated_at=excluded.updated_at"#,
                 )
                 .bind(card.id.to_string())
-                .bind(card.owner_id.to_string())
+                .bind(card.scope_id.to_string())
                 .bind(&card.name)
                 .bind(&card.version)
                 .bind("")
@@ -472,14 +472,14 @@ impl LocalStore {
                 let conversation = snapshot.conversation;
                 sqlx::query(
                     r#"INSERT INTO conversations
-                    (id, owner_id, character_id, title, created_at, updated_at)
+                    (id, scope_id, character_id, title, created_at, updated_at)
                     VALUES (?,?,?,?,?,?)
-                    ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id,
+                    ON CONFLICT(id) DO UPDATE SET scope_id=excluded.scope_id,
                       character_id=excluded.character_id, title=excluded.title,
                       created_at=excluded.created_at, updated_at=excluded.updated_at"#,
                 )
                 .bind(conversation.id.to_string())
-                .bind(conversation.owner_id.to_string())
+                .bind(conversation.scope_id.to_string())
                 .bind(conversation.character_id.map(|id| id.to_string()))
                 .bind(&conversation.title)
                 .bind(conversation.created_at.to_rfc3339())
@@ -606,7 +606,7 @@ impl LocalStore {
 
     pub async fn create_memory_patch_review(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         conversation_id: &str,
         patch_yaml: &str,
         targets: &[String],
@@ -615,7 +615,7 @@ impl LocalStore {
     ) -> Result<MemoryPatchReview, StorageError> {
         let review = MemoryPatchReview {
             id: Uuid::now_v7(),
-            owner_id,
+            scope_id,
             conversation_id: conversation_id.to_owned(),
             patch_yaml: patch_yaml.to_owned(),
             targets: targets.to_vec(),
@@ -629,12 +629,12 @@ impl LocalStore {
         };
         sqlx::query(
             r#"INSERT INTO memory_patch_reviews
-            (id, owner_id, conversation_id, patch_yaml, targets, operation_count,
+            (id, scope_id, conversation_id, patch_yaml, targets, operation_count,
              review_mode, status, created_at)
             VALUES (?,?,?,?,?,?,?,?,?)"#,
         )
         .bind(review.id.to_string())
-        .bind(review.owner_id.to_string())
+        .bind(review.scope_id.to_string())
         .bind(&review.conversation_id)
         .bind(&review.patch_yaml)
         .bind(serde_json::to_string(&review.targets)?)
@@ -649,11 +649,11 @@ impl LocalStore {
 
     pub async fn memory_patch_review(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         review_id: Uuid,
     ) -> Result<Option<MemoryPatchReview>, StorageError> {
-        let row = sqlx::query("SELECT * FROM memory_patch_reviews WHERE owner_id=? AND id=?")
-            .bind(owner_id.to_string())
+        let row = sqlx::query("SELECT * FROM memory_patch_reviews WHERE scope_id=? AND id=?")
+            .bind(scope_id.to_string())
             .bind(review_id.to_string())
             .fetch_optional(&self.pool)
             .await?;
@@ -662,24 +662,24 @@ impl LocalStore {
 
     pub async fn list_memory_patch_reviews(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         include_resolved: bool,
     ) -> Result<Vec<MemoryPatchReview>, StorageError> {
         let rows = if include_resolved {
             sqlx::query(
                 r#"SELECT * FROM memory_patch_reviews
-                WHERE owner_id=? ORDER BY created_at DESC, id DESC LIMIT 200"#,
+                WHERE scope_id=? ORDER BY created_at DESC, id DESC LIMIT 200"#,
             )
-            .bind(owner_id.to_string())
+            .bind(scope_id.to_string())
             .fetch_all(&self.pool)
             .await?
         } else {
             sqlx::query(
                 r#"SELECT * FROM memory_patch_reviews
-                WHERE owner_id=? AND status='pending'
+                WHERE scope_id=? AND status='pending'
                 ORDER BY created_at DESC, id DESC LIMIT 200"#,
             )
-            .bind(owner_id.to_string())
+            .bind(scope_id.to_string())
             .fetch_all(&self.pool)
             .await?
         };
@@ -688,7 +688,7 @@ impl LocalStore {
 
     pub async fn resolve_memory_patch_review(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         review_id: Uuid,
         status: MemoryPatchReviewStatus,
         result: Option<&str>,
@@ -699,13 +699,13 @@ impl LocalStore {
         let updated = sqlx::query(
             r#"UPDATE memory_patch_reviews
             SET status=?, resolved_at=?, result=?, error=?
-            WHERE owner_id=? AND id=? AND status='pending'"#,
+            WHERE scope_id=? AND id=? AND status='pending'"#,
         )
         .bind(status.as_str())
         .bind(now)
         .bind(result)
         .bind(error)
-        .bind(owner_id.to_string())
+        .bind(scope_id.to_string())
         .bind(review_id.to_string())
         .execute(&self.pool)
         .await?
@@ -713,7 +713,7 @@ impl LocalStore {
         if updated == 0 {
             return Ok(None);
         }
-        self.memory_patch_review(owner_id, review_id).await
+        self.memory_patch_review(scope_id, review_id).await
     }
 
     async fn is_tombstoned(&self, object_type: &str, id: Uuid) -> Result<bool, StorageError> {

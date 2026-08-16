@@ -1,4 +1,4 @@
-//! User-memory retrieval, maintenance, patch review, and document management.
+//! Scoped-memory retrieval, maintenance, patch review, and document management.
 
 use super::*;
 
@@ -15,6 +15,32 @@ pub struct MemoryScopeSource {
     pub weight: usize,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedMemoryJsonRequest {
+    scopes: Vec<MemoryScopeSource>,
+    query: String,
+    max_tokens: usize,
+    include_memory: bool,
+    include_semantic_graph: bool,
+    vector_space_id: Option<String>,
+    query_vector: Option<Vec<f64>>,
+}
+
+struct VectorQuery {
+    space_id: String,
+    vector: Vec<f64>,
+}
+
+struct RetrievalPlan {
+    scope_id: uuid::Uuid,
+    query: String,
+    max_tokens: usize,
+    include_memory: bool,
+    include_semantic_graph: bool,
+    vector: Option<VectorQuery>,
+}
+
 const fn default_scope_weight() -> usize {
     1
 }
@@ -22,65 +48,48 @@ const fn default_scope_weight() -> usize {
 /// Retrieve from several isolated memory workspaces while preserving the
 /// source namespace on every result. The total token budget is divided by
 /// caller-provided weights; platform identity and ACL rules stay in the host.
-pub async fn retrieve_scoped_memory_json(
-    sources_json: String,
-    query: String,
-    max_tokens: usize,
-    include_memory: bool,
-    include_semantic_graph: bool,
-    vector_space_id: Option<String>,
-    query_vector_json: Option<String>,
-) -> Result<String, String> {
-    let sources: Vec<MemoryScopeSource> =
-        serde_json::from_str(&sources_json).map_err(|error| error.to_string())?;
-    validate_memory_scopes(&sources)?;
-    if !include_memory && !include_semantic_graph {
+pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String, String> {
+    let request: ScopedMemoryJsonRequest =
+        serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
+    validate_memory_scopes(&request.scopes)?;
+    if !request.include_memory && !request.include_semantic_graph {
         return Err("at least one retrieval component must be enabled".to_owned());
     }
-    match (&vector_space_id, &query_vector_json) {
+    match (&request.vector_space_id, &request.query_vector) {
         (Some(_), Some(_)) | (None, None) => {}
         _ => {
             return Err("vector_space_id and query_vector must be provided together".to_owned());
         }
     }
-    if !include_semantic_graph && vector_space_id.is_some() {
+    if !request.include_semantic_graph && request.vector_space_id.is_some() {
         return Err("vector retrieval requires semantic graph retrieval".to_owned());
     }
 
-    let budgets = weighted_scope_budgets(&sources, max_tokens);
+    let budgets = weighted_scope_budgets(&request.scopes, request.max_tokens);
     let mut combined = Vec::new();
-    for (source, budget) in sources.into_iter().zip(budgets) {
+    for (source, budget) in request.scopes.into_iter().zip(budgets) {
         if budget == 0 {
             continue;
         }
-        let retrieved = match (&vector_space_id, &query_vector_json) {
-            (Some(space), Some(vector)) => {
-                retrieve_memory_with_vector_json(
-                    source.scope_id.clone(),
-                    query.clone(),
-                    budget,
-                    include_memory,
-                    include_semantic_graph,
-                    space.clone(),
-                    vector.clone(),
-                )
-                .await?
-            }
-            (None, None) => {
-                let scope_id =
-                    uuid::Uuid::parse_str(&source.scope_id).map_err(|error| error.to_string())?;
-                retrieve_memory_with_ranked_nsg(
-                    scope_id,
-                    query.clone(),
-                    budget,
-                    Vec::new(),
-                    include_memory,
-                    include_semantic_graph,
-                )
-                .await?
-            }
-            _ => unreachable!("validated vector arguments"),
-        };
+        let scope_id =
+            uuid::Uuid::parse_str(&source.scope_id).map_err(|error| error.to_string())?;
+        let vector = request
+            .vector_space_id
+            .as_ref()
+            .zip(request.query_vector.as_ref())
+            .map(|(space_id, vector)| VectorQuery {
+                space_id: space_id.clone(),
+                vector: vector.clone(),
+            });
+        let retrieved = retrieve_memory(RetrievalPlan {
+            scope_id,
+            query: request.query.clone(),
+            max_tokens: budget,
+            include_memory: request.include_memory,
+            include_semantic_graph: request.include_semantic_graph,
+            vector,
+        })
+        .await?;
         let values: Vec<serde_json::Value> =
             serde_json::from_str(&retrieved).map_err(|error| error.to_string())?;
         for mut value in values {
@@ -144,29 +153,54 @@ pub async fn retrieve_memory_json(
     max_tokens: usize,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
-    retrieve_memory_with_ranked_nsg(scope_id, query, max_tokens, Vec::new(), true, true).await
+    retrieve_memory(RetrievalPlan {
+        scope_id,
+        query,
+        max_tokens,
+        include_memory: true,
+        include_semantic_graph: true,
+        vector: None,
+    })
+    .await
 }
 
-async fn retrieve_memory_with_ranked_nsg(
-    scope_id: uuid::Uuid,
-    query: String,
-    max_tokens: usize,
-    vector_ranked_ids: Vec<String>,
-    include_memory: bool,
-    include_semantic_graph: bool,
-) -> Result<String, String> {
+async fn retrieve_memory(plan: RetrievalPlan) -> Result<String, String> {
     let workspace = core()?
-        .memory_for(scope_id)
+        .memory_for_scope(plan.scope_id)
         .map_err(|error| error.to_string())?;
-    let memory_budget = match (include_memory, include_semantic_graph) {
-        (true, true) => max_tokens.saturating_mul(3) / 4,
-        (true, false) => max_tokens,
+    let vector_ranked_ids = if let Some(vector_query) = &plan.vector {
+        validate_query_vector(vector_query)?;
+        let nsg = momo_memory::nsg::NsgWorkspace::initialize(workspace.root())
+            .map_err(|error| error.to_string())?;
+        let hashes = nsg
+            .embedding_documents()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|document| (document.node_id, document.source_hash))
+            .collect::<std::collections::HashMap<_, _>>();
+        core()?
+            .vector_store()
+            .rank_nsg_vectors(
+                plan.scope_id,
+                &vector_query.space_id,
+                &vector_query.vector,
+                &hashes,
+                DEFAULT_NSG_VECTOR_TOP_K,
+            )
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
+    let memory_budget = match (plan.include_memory, plan.include_semantic_graph) {
+        (true, true) => plan.max_tokens.saturating_mul(3) / 4,
+        (true, false) => plan.max_tokens,
         (false, _) => 0,
     };
-    let memories = if include_memory {
+    let memories = if plan.include_memory {
         workspace
             .retrieve(
-                &query,
+                &plan.query,
                 memory_budget,
                 &momo_memory::ConservativeTokenCounter,
             )
@@ -178,13 +212,13 @@ async fn retrieve_memory_with_ranked_nsg(
         .iter()
         .map(|item| item.estimated_tokens)
         .sum::<usize>();
-    let nsg = if include_semantic_graph {
+    let nsg = if plan.include_semantic_graph {
         momo_memory::nsg::NsgWorkspace::initialize(workspace.root())
             .map_err(|error| error.to_string())?
             .retrieve(
-                &query,
+                &plan.query,
                 &vector_ranked_ids,
-                max_tokens.saturating_sub(memory_tokens),
+                plan.max_tokens.saturating_sub(memory_tokens),
                 &momo_memory::ConservativeTokenCounter,
             )
             .map_err(|error| error.to_string())?
@@ -218,7 +252,7 @@ pub async fn compile_mo_state_json(
     let retrieved_nsg: Vec<momo_memory::nsg::RetrievedNsg> =
         serde_json::from_str(&retrieved_nsg_json).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for(scope_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?;
     let context = workspace
         .compile_mo_state(
@@ -231,60 +265,16 @@ pub async fn compile_mo_state_json(
     serde_json::to_string(&context).map_err(|error| error.to_string())
 }
 
-pub async fn retrieve_memory_with_vector_json(
-    scope_id: String,
-    query: String,
-    max_tokens: usize,
-    include_memory: bool,
-    include_semantic_graph: bool,
-    vector_space_id: String,
-    query_vector_json: String,
-) -> Result<String, String> {
-    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
-    if !include_semantic_graph {
-        return Err("vector retrieval requires semantic graph retrieval".to_owned());
-    }
-    let query_vector: Vec<f64> =
-        serde_json::from_str(&query_vector_json).map_err(|error| error.to_string())?;
-    if vector_space_id.trim().is_empty()
-        || query_vector.is_empty()
-        || query_vector.len() > 8192
-        || query_vector.iter().any(|value| !value.is_finite())
+fn validate_query_vector(query: &VectorQuery) -> Result<(), String> {
+    if query.space_id.trim().is_empty()
+        || query.vector.is_empty()
+        || query.vector.len() > 8192
+        || query.vector.iter().any(|value| !value.is_finite())
+        || query.vector.iter().all(|value| *value == 0.0)
     {
         return Err("invalid semantic-graph query vector".to_owned());
     }
-    let workspace = core()?
-        .memory_for(scope_id)
-        .map_err(|error| error.to_string())?;
-    let nsg = momo_memory::nsg::NsgWorkspace::initialize(workspace.root())
-        .map_err(|error| error.to_string())?;
-    let documents = nsg
-        .embedding_documents()
-        .map_err(|error| error.to_string())?;
-    let hashes = documents
-        .iter()
-        .map(|document| (document.node_id.clone(), document.source_hash.clone()))
-        .collect::<std::collections::HashMap<_, _>>();
-    let ranked = core()?
-        .vector_store()
-        .rank_nsg_vectors(
-            scope_id,
-            &vector_space_id,
-            &query_vector,
-            &hashes,
-            DEFAULT_NSG_VECTOR_TOP_K,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    retrieve_memory_with_ranked_nsg(
-        scope_id,
-        query,
-        max_tokens,
-        ranked,
-        include_memory,
-        include_semantic_graph,
-    )
-    .await
+    Ok(())
 }
 
 pub async fn apply_memory_patch_json(
@@ -293,7 +283,7 @@ pub async fn apply_memory_patch_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for(scope_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?;
     workspace
         .apply_patch(&patch_yaml)
@@ -303,7 +293,7 @@ pub async fn apply_memory_patch_json(
 }
 
 pub async fn submit_memory_patch_review_json(
-    owner_id: String,
+    scope_id: String,
     conversation_id: String,
     patch_yaml: String,
     review_mode: String,
@@ -316,9 +306,9 @@ pub async fn submit_memory_patch_review_json(
             "unsupported memory patch review mode: {review_mode}"
         ));
     }
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let summary = core()?
-        .memory_for(owner_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?
         .summarize_patch(&patch_yaml)
         .map_err(|error| error.to_string())?;
@@ -327,7 +317,7 @@ pub async fn submit_memory_patch_review_json(
     let review = core()?
         .store()
         .create_memory_patch_review(
-            owner_id,
+            scope_id,
             &conversation_id,
             &patch_yaml,
             &summary.targets,
@@ -338,12 +328,12 @@ pub async fn submit_memory_patch_review_json(
         .map_err(|error| error.to_string())?;
 
     match review_mode.as_str() {
-        "auto_approve" => approve_memory_patch_review(owner_id, review.id).await,
+        "auto_approve" => approve_memory_patch_review(scope_id, review.id).await,
         "reject" => {
             let resolved = core()?
                 .store()
                 .resolve_memory_patch_review(
-                    owner_id,
+                    scope_id,
                     review.id,
                     momo_storage::MemoryPatchReviewStatus::Rejected,
                     Some("rejected_by_policy"),
@@ -359,37 +349,37 @@ pub async fn submit_memory_patch_review_json(
 }
 
 pub async fn list_memory_patch_reviews_json(
-    owner_id: String,
+    scope_id: String,
     include_resolved: bool,
 ) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let reviews = core()?
         .store()
-        .list_memory_patch_reviews(owner_id, include_resolved)
+        .list_memory_patch_reviews(scope_id, include_resolved)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&reviews).map_err(|error| error.to_string())
 }
 
 pub async fn approve_memory_patch_review_json(
-    owner_id: String,
+    scope_id: String,
     review_id: String,
 ) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let review_id = uuid::Uuid::parse_str(&review_id).map_err(|error| error.to_string())?;
-    approve_memory_patch_review(owner_id, review_id).await
+    approve_memory_patch_review(scope_id, review_id).await
 }
 
 pub async fn reject_memory_patch_review_json(
-    owner_id: String,
+    scope_id: String,
     review_id: String,
 ) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let review_id = uuid::Uuid::parse_str(&review_id).map_err(|error| error.to_string())?;
     let _guard = MEMORY_PATCH_REVIEW_LOCK.lock().await;
     let existing = core()?
         .store()
-        .memory_patch_review(owner_id, review_id)
+        .memory_patch_review(scope_id, review_id)
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "memory patch review was not found".to_owned())?;
@@ -399,7 +389,7 @@ pub async fn reject_memory_patch_review_json(
     let resolved = core()?
         .store()
         .resolve_memory_patch_review(
-            owner_id,
+            scope_id,
             review_id,
             momo_storage::MemoryPatchReviewStatus::Rejected,
             Some("rejected_by_user"),
@@ -411,10 +401,10 @@ pub async fn reject_memory_patch_review_json(
     serde_json::to_string(&resolved).map_err(|error| error.to_string())
 }
 
-pub async fn list_memory_documents_json(owner_id: String) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+pub async fn list_memory_documents_json(scope_id: String) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let documents = core()?
-        .memory_for(owner_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?
         .list_documents()
         .map_err(|error| error.to_string())?;
@@ -422,12 +412,12 @@ pub async fn list_memory_documents_json(owner_id: String) -> Result<String, Stri
 }
 
 pub async fn read_memory_document_json(
-    owner_id: String,
+    scope_id: String,
     document_id: String,
 ) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let document = core()?
-        .memory_for(owner_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?
         .read_document_by_id(&document_id)
         .map_err(|error| error.to_string())?;
@@ -449,13 +439,13 @@ pub async fn read_memory_document_json(
 }
 
 pub async fn update_memory_document_json(
-    owner_id: String,
+    scope_id: String,
     document_id: String,
     markdown: String,
 ) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for(owner_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?;
     let _document = workspace
         .read_document_by_id(&document_id)
@@ -463,17 +453,17 @@ pub async fn update_memory_document_json(
     workspace
         .replace_document_body(&document_id, &markdown)
         .map_err(|error| error.to_string())?;
-    stage_memory_snapshot(owner_id).await?;
+    stage_memory_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
 pub async fn archive_memory_document_json(
-    owner_id: String,
+    scope_id: String,
     document_id: String,
 ) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for(owner_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?;
     let _document = workspace
         .read_document_by_id(&document_id)
@@ -490,37 +480,37 @@ pub async fn archive_memory_document_json(
     workspace
         .run_maintenance()
         .map_err(|error| error.to_string())?;
-    stage_memory_snapshot(owner_id).await?;
+    stage_memory_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
 pub async fn restore_memory_document_json(
-    owner_id: String,
+    scope_id: String,
     document_id: String,
 ) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for(owner_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?;
     workspace
         .restore_archived_authorized(&document_id)
         .map_err(|error| error.to_string())?;
-    stage_memory_snapshot(owner_id).await?;
+    stage_memory_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
 pub async fn delete_memory_document_json(
-    owner_id: String,
+    scope_id: String,
     document_id: String,
 ) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for(owner_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?;
     workspace
         .delete_document_authorized(&document_id)
         .map_err(|error| error.to_string())?;
-    stage_memory_snapshot(owner_id).await?;
+    stage_memory_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 

@@ -32,8 +32,8 @@ use tokio::sync::OnceCell;
 
 use crate::{
     CapabilityDiscoveryDocument, CapabilityRegistry, ChatInput, ChatParameters, ContextBudget,
-    GatewayError, MAX_DISCOVERY_TTL_SECONDS, MomoCore, OpenAiGateway, ProviderEndpoint,
-    fetch_capability_document, prepare_context, prepare_context_with_state,
+    ContextRequest, ContextSections, GatewayError, MAX_DISCOVERY_TTL_SECONDS, MomoCore,
+    OpenAiGateway, ProviderEndpoint, fetch_capability_document, prepare_context,
 };
 use momo_storage::{DEFAULT_NSG_VECTOR_TOP_K, NsgVectorStore};
 
@@ -83,24 +83,24 @@ fn core() -> Result<&'static MomoCore, String> {
         .ok_or_else(|| "MOMO Core has not been initialized".to_owned())
 }
 
-async fn stage_memory_snapshot(owner_id: uuid::Uuid) -> Result<(), String> {
-    let _ = owner_id;
+async fn stage_memory_snapshot(scope_id: uuid::Uuid) -> Result<(), String> {
+    let _ = scope_id;
     Ok(())
 }
 
-async fn stage_semantic_graph_snapshot(owner_id: uuid::Uuid) -> Result<(), String> {
-    let _ = owner_id;
+async fn stage_semantic_graph_snapshot(scope_id: uuid::Uuid) -> Result<(), String> {
+    let _ = scope_id;
     Ok(())
 }
 
 async fn approve_memory_patch_review(
-    owner_id: uuid::Uuid,
+    scope_id: uuid::Uuid,
     review_id: uuid::Uuid,
 ) -> Result<String, String> {
     let _guard = MEMORY_PATCH_REVIEW_LOCK.lock().await;
     let existing = core()?
         .store()
-        .memory_patch_review(owner_id, review_id)
+        .memory_patch_review(scope_id, review_id)
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "memory patch review was not found".to_owned())?;
@@ -109,14 +109,14 @@ async fn approve_memory_patch_review(
     }
 
     let workspace = core()?
-        .memory_for(owner_id)
+        .memory_for_scope(scope_id)
         .map_err(|error| error.to_string())?;
     if let Err(error) = workspace.apply_patch(&existing.patch_yaml) {
         let message = error.to_string();
         core()?
             .store()
             .resolve_memory_patch_review(
-                owner_id,
+                scope_id,
                 review_id,
                 momo_storage::MemoryPatchReviewStatus::Failed,
                 None,
@@ -126,11 +126,11 @@ async fn approve_memory_patch_review(
             .map_err(|storage_error| storage_error.to_string())?;
         return Err(message);
     }
-    stage_memory_snapshot(owner_id).await?;
+    stage_memory_snapshot(scope_id).await?;
     let resolved = core()?
         .store()
         .resolve_memory_patch_review(
-            owner_id,
+            scope_id,
             review_id,
             momo_storage::MemoryPatchReviewStatus::Approved,
             Some("ok"),

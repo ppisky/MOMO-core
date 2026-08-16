@@ -153,7 +153,7 @@ pub fn import_runtime_config(
 pub async fn export_moc(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    owner_id: Uuid,
+    scope_id: Uuid,
     settings: &JsonValue,
     selection: ExportSelection,
 ) -> Result<Manifest, PortableError> {
@@ -172,20 +172,20 @@ pub async fn export_moc(
         modules.push(("config".to_owned(), PathBuf::from("config")));
     }
     if selection.characters {
-        export_characters(core, staging.path(), owner_id, selection.character_id).await?;
+        export_characters(core, staging.path(), scope_id, selection.character_id).await?;
         modules.push(("characters".to_owned(), PathBuf::from("characters")));
     }
     if selection.conversations {
-        export_conversations(core, staging.path(), owner_id).await?;
+        export_conversations(core, staging.path(), scope_id).await?;
         modules.push(("conversations".to_owned(), PathBuf::from("conversations")));
     }
     if selection.memory {
-        let memory = core.memory_for(owner_id)?;
+        let memory = core.memory_for_scope(scope_id)?;
         copy_tree_filtered(memory.root(), &staging.path().join("memory"), false)?;
         modules.push(("memory".to_owned(), PathBuf::from("memory")));
     }
     if selection.semantic_graph {
-        let memory = core.memory_for(owner_id)?;
+        let memory = core.memory_for_scope(scope_id)?;
         copy_tree_filtered(memory.root(), &staging.path().join("semantic_graph"), true)?;
         modules.push(("semantic_graph".to_owned(), PathBuf::from("semantic_graph")));
     }
@@ -195,16 +195,16 @@ pub async fn export_moc(
 pub async fn import_moc(
     core: &MomoCore,
     input: impl AsRef<Path>,
-    owner_id: Uuid,
+    scope_id: Uuid,
     conflict_mode: &str,
 ) -> Result<ImportReport, PortableError> {
-    import_moc_with_passphrase(core, input, owner_id, conflict_mode, None).await
+    import_moc_with_passphrase(core, input, scope_id, conflict_mode, None).await
 }
 
 pub async fn export_private_moc(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    owner_id: Uuid,
+    scope_id: Uuid,
     settings: &JsonValue,
     selection: ExportSelection,
     passphrase: &str,
@@ -214,7 +214,7 @@ pub async fn export_private_moc(
     }
     let temporary = TempDir::new()?;
     let inner_path = temporary.path().join("payload.moc");
-    export_moc(core, &inner_path, owner_id, settings, selection).await?;
+    export_moc(core, &inner_path, scope_id, settings, selection).await?;
     let metadata = fs::metadata(&inner_path)?;
     if metadata.len() > PRIVATE_MOC_MAX_BYTES {
         return Err(PortableError::PrivateMocTooLarge);
@@ -249,7 +249,7 @@ pub fn moc_is_encrypted(input: impl AsRef<Path>) -> Result<bool, PortableError> 
 pub async fn import_moc_with_passphrase(
     core: &MomoCore,
     input: impl AsRef<Path>,
-    owner_id: Uuid,
+    scope_id: Uuid,
     conflict_mode: &str,
     passphrase: Option<&str>,
 ) -> Result<ImportReport, PortableError> {
@@ -325,10 +325,10 @@ pub async fn import_moc_with_passphrase(
             report.runtime_config = Some(import_runtime_config(core, path)?);
         }
     }
-    import_characters(core, extracted, owner_id, mode, &mut report).await?;
-    import_conversations(core, extracted, owner_id, mode, &mut report).await?;
-    import_memory(core, extracted, owner_id, mode, &mut report)?;
-    import_semantic_graph(core, extracted, owner_id, mode, &mut report)?;
+    import_characters(core, extracted, scope_id, mode, &mut report).await?;
+    import_conversations(core, extracted, scope_id, mode, &mut report).await?;
+    import_memory(core, extracted, scope_id, mode, &mut report)?;
+    import_semantic_graph(core, extracted, scope_id, mode, &mut report)?;
     Ok(report)
 }
 
@@ -417,10 +417,10 @@ fn reject_credentials(table: &Table, prefix: &str) -> Result<(), PortableError> 
 async fn export_characters(
     core: &MomoCore,
     root: &Path,
-    owner_id: Uuid,
+    scope_id: Uuid,
     character_id: Option<Uuid>,
 ) -> Result<(), PortableError> {
-    let mut characters = core.store().list_characters_for_owner(owner_id).await?;
+    let mut characters = core.store().list_characters_for_scope(scope_id).await?;
     if let Some(character_id) = character_id {
         characters.retain(|card| card.id == character_id);
         if characters.is_empty() {
@@ -503,9 +503,9 @@ async fn export_characters(
 async fn export_conversations(
     core: &MomoCore,
     root: &Path,
-    owner_id: Uuid,
+    scope_id: Uuid,
 ) -> Result<(), PortableError> {
-    let conversations = core.store().list_conversations_for_owner(owner_id).await?;
+    let conversations = core.store().list_conversations_for_scope(scope_id).await?;
     let mut messages = Vec::new();
     for conversation in &conversations {
         messages.extend(core.store().list_messages(conversation.id).await?);
@@ -526,7 +526,7 @@ async fn export_conversations(
 async fn import_characters(
     core: &MomoCore,
     root: &Path,
-    owner_id: Uuid,
+    scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
@@ -604,7 +604,7 @@ async fn import_characters(
         let now = Utc::now();
         let character = CharacterCard {
             id,
-            owner_id,
+            scope_id,
             name: metadata.name,
             version: metadata.version,
             author_name: metadata.author.name,
@@ -631,7 +631,7 @@ async fn import_characters(
 async fn import_conversations(
     core: &MomoCore,
     root: &Path,
-    owner_id: Uuid,
+    scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
@@ -661,7 +661,7 @@ async fn import_conversations(
             report.skipped_conflicts += 1;
             continue;
         }
-        conversation.owner_id = owner_id;
+        conversation.scope_id = scope_id;
         if conversation
             .character_id
             .is_some_and(|character_id| !available_characters.contains(&character_id))
@@ -715,7 +715,7 @@ async fn import_conversations(
 fn import_memory(
     core: &MomoCore,
     root: &Path,
-    owner_id: Uuid,
+    scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
@@ -732,7 +732,7 @@ fn import_memory(
             .path()
             .strip_prefix(&source)
             .map_err(|_| PortableError::InvalidData("invalid memory path".to_owned()))?;
-        let target = core.memory_for(owner_id)?.root().join(relative);
+        let target = core.memory_for_scope(scope_id)?.root().join(relative);
         if target.exists() && mode == ConflictMode::KeepExisting {
             report.skipped_conflicts += 1;
             continue;
@@ -746,7 +746,7 @@ fn import_memory(
 fn import_semantic_graph(
     core: &MomoCore,
     root: &Path,
-    owner_id: Uuid,
+    scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
@@ -754,13 +754,13 @@ fn import_semantic_graph(
     if !source.exists() {
         return Ok(());
     }
-    import_workspace_tree(core, &source, owner_id, mode, report)
+    import_workspace_tree(core, &source, scope_id, mode, report)
 }
 
 fn import_workspace_tree(
     core: &MomoCore,
     source: &Path,
-    owner_id: Uuid,
+    scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
@@ -773,7 +773,7 @@ fn import_workspace_tree(
             .path()
             .strip_prefix(source)
             .map_err(|_| PortableError::InvalidData("invalid workspace path".to_owned()))?;
-        let target = core.memory_for(owner_id)?.root().join(relative);
+        let target = core.memory_for_scope(scope_id)?.root().join(relative);
         if target.exists() && mode == ConflictMode::KeepExisting {
             report.skipped_conflicts += 1;
             continue;
@@ -981,19 +981,19 @@ mod tests {
     use momo_domain::{MessageRole, new_id};
 
     #[tokio::test]
-    async fn round_trips_selected_moc_modules_and_rebinds_owner() {
+    async fn round_trips_selected_moc_modules_and_rebinds_scope() {
         let source_directory = tempfile::tempdir().expect("source directory");
         let source = MomoCore::initialize(source_directory.path())
             .await
             .expect("source core");
-        let original_owner = new_id();
+        let original_scope = new_id();
         let character_id = new_id();
         let now = Utc::now();
         source
             .store()
             .save_character(&CharacterCard {
                 id: character_id,
-                owner_id: original_owner,
+                scope_id: original_scope,
                 name: "雪球".to_owned(),
                 version: "2.0.0".to_owned(),
                 author_name: "Tester".to_owned(),
@@ -1020,7 +1020,7 @@ mod tests {
             .store()
             .save_conversation(&Conversation {
                 id: conversation_id,
-                owner_id: original_owner,
+                scope_id: original_scope,
                 character_id: Some(character_id),
                 title: "Portable".to_owned(),
                 created_at: now,
@@ -1049,7 +1049,7 @@ mod tests {
         let manifest = export_moc(
             &source,
             &output,
-            original_owner,
+            original_scope,
             &settings,
             ExportSelection {
                 config: true,
@@ -1076,8 +1076,8 @@ mod tests {
         let destination = MomoCore::initialize(destination_directory.path())
             .await
             .expect("destination core");
-        let new_owner = new_id();
-        let report = import_moc(&destination, &output, new_owner, "replace")
+        let new_scope = new_id();
+        let report = import_moc(&destination, &output, new_scope, "replace")
             .await
             .expect("import");
         assert_eq!(report.characters_imported, 1);
@@ -1089,14 +1089,14 @@ mod tests {
             true
         );
         let imported_cards = destination.store().list_characters().await.expect("cards");
-        assert_eq!(imported_cards[0].owner_id, new_owner);
+        assert_eq!(imported_cards[0].scope_id, new_scope);
         assert_eq!(imported_cards[0].opening_markdown.as_deref(), Some("Hello"));
 
         let second_output = destination_directory.path().join("restored.moc");
         export_moc(
             &destination,
             &second_output,
-            new_owner,
+            new_scope,
             &settings,
             ExportSelection {
                 config: false,
@@ -1142,7 +1142,7 @@ mod tests {
         export_private_moc(
             &source,
             &private_output,
-            original_owner,
+            original_scope,
             &settings,
             ExportSelection {
                 config: true,
@@ -1161,7 +1161,7 @@ mod tests {
             import_moc_with_passphrase(
                 &destination,
                 &private_output,
-                new_owner,
+                new_scope,
                 "keep_existing",
                 Some("wrong-password")
             )
@@ -1173,7 +1173,7 @@ mod tests {
         let private_report = import_moc_with_passphrase(
             &destination,
             &private_output,
-            new_owner,
+            new_scope,
             "keep_existing",
             Some("private-password"),
         )
@@ -1186,8 +1186,8 @@ mod tests {
                 .list_conversations()
                 .await
                 .expect("conversations")[0]
-                .owner_id,
-            new_owner
+                .scope_id,
+            new_scope
         );
     }
 
@@ -1230,8 +1230,8 @@ name = "Creator"
         let target = MomoCore::initialize(target_directory.path())
             .await
             .expect("target core");
-        let owner_id = new_id();
-        let report = import_moc(&target, &output, owner_id, "replace")
+        let scope_id = new_id();
+        let report = import_moc(&target, &output, scope_id, "replace")
             .await
             .expect("import moc");
 
@@ -1254,7 +1254,7 @@ name = "Creator"
         let source = MomoCore::initialize(source_directory.path())
             .await
             .expect("source core");
-        let owner_id = new_id();
+        let scope_id = new_id();
         let character_id = new_id();
         let conversation_id = new_id();
         let now = Utc::now();
@@ -1262,7 +1262,7 @@ name = "Creator"
             .store()
             .save_character(&CharacterCard {
                 id: character_id,
-                owner_id,
+                scope_id,
                 name: "Parent card".to_owned(),
                 version: "2.0.0".to_owned(),
                 author_name: "Tester".to_owned(),
@@ -1279,7 +1279,7 @@ name = "Creator"
             .store()
             .save_conversation(&Conversation {
                 id: conversation_id,
-                owner_id,
+                scope_id,
                 character_id: Some(character_id),
                 title: "Conversation without exported card".to_owned(),
                 created_at: now,
@@ -1292,7 +1292,7 @@ name = "Creator"
         export_moc(
             &source,
             &output,
-            owner_id,
+            scope_id,
             &serde_json::json!({}),
             ExportSelection {
                 config: false,
@@ -1399,14 +1399,14 @@ name = "Creator"
     async fn character_shortcut_exports_only_the_selected_card() {
         let directory = tempfile::tempdir().expect("directory");
         let core = MomoCore::initialize(directory.path()).await.expect("core");
-        let owner_id = new_id();
+        let scope_id = new_id();
         let selected_id = new_id();
         let now = Utc::now();
         for (id, name) in [(selected_id, "Selected"), (new_id(), "Other")] {
             core.store()
                 .save_character(&CharacterCard {
                     id,
-                    owner_id,
+                    scope_id,
                     name: name.to_owned(),
                     version: "2.0.0".to_owned(),
                     author_name: "Tester".to_owned(),
@@ -1424,7 +1424,7 @@ name = "Creator"
         export_moc(
             &core,
             &output,
-            owner_id,
+            scope_id,
             &serde_json::json!({}),
             ExportSelection {
                 config: false,

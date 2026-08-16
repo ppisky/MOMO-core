@@ -62,29 +62,29 @@ pub async fn local_messages_json(conversation_id: String) -> Result<String, Stri
     serde_json::to_string(&messages).map_err(|error| error.to_string())
 }
 
-pub async fn local_characters_json(owner_id: String) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+pub async fn local_characters_json(scope_id: String) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let characters = core()?
         .store()
-        .list_characters_for_owner(owner_id)
+        .list_characters_for_scope(scope_id)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&characters).map_err(|error| error.to_string())
 }
 
-pub async fn local_conversations_json(owner_id: String) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+pub async fn local_conversations_json(scope_id: String) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let conversations = core()?
         .store()
-        .list_conversations_for_owner(owner_id)
+        .list_conversations_for_scope(scope_id)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&conversations).map_err(|error| error.to_string())
 }
 
 pub async fn migrate_guest_data_json(
-    _guest_owner_id: String,
-    _account_owner_id: String,
+    _guest_scope_id: String,
+    _account_scope_id: String,
     _account_author_name: String,
 ) -> Result<String, String> {
     Err("账号迁移已禁用：当前 MOMO Core 只支持本地单用户数据空间".to_owned())
@@ -134,18 +134,18 @@ pub async fn stage_message_delete(id: String) -> Result<(), String> {
 }
 
 pub async fn stage_character_json(
-    owner_id: String,
+    scope_id: String,
     author_display_name: String,
     name: String,
     _description: String,
     character_markdown: String,
     user_markdown: String,
 ) -> Result<String, String> {
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let now = chrono::Utc::now();
     let card = momo_domain::CharacterCard {
         id: momo_domain::new_id(),
-        owner_id,
+        scope_id,
         name,
         version: "2.0.0".to_owned(),
         author_name: author_display_name,
@@ -187,7 +187,7 @@ pub async fn stage_character_delete(id: String) -> Result<(), String> {
 
 pub async fn stage_conversation_json(
     id: Option<String>,
-    owner_id: String,
+    scope_id: String,
     title: String,
     character_id: Option<String>,
 ) -> Result<String, String> {
@@ -196,7 +196,7 @@ pub async fn stage_conversation_json(
         .transpose()
         .map_err(|error| error.to_string())?
         .unwrap_or_else(momo_domain::new_id);
-    let owner_id = uuid::Uuid::parse_str(&owner_id).map_err(|error| error.to_string())?;
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let character_id = character_id
         .map(|id| uuid::Uuid::parse_str(&id))
         .transpose()
@@ -204,7 +204,7 @@ pub async fn stage_conversation_json(
     let now = chrono::Utc::now();
     let conversation = momo_domain::Conversation {
         id,
-        owner_id,
+        scope_id,
         character_id,
         title,
         created_at: now,

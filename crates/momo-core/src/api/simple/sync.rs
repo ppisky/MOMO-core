@@ -87,11 +87,11 @@ pub async fn sync_revision(remote: String, object_id: String) -> Result<Option<i
 }
 
 pub async fn backfill_sync_outbox_json(
-    owner_id: String,
+    scope_id: String,
     remote: String,
     allowed_categories_json: String,
 ) -> Result<String, String> {
-    let _ = (owner_id, remote, allowed_categories_json);
+    let _ = (scope_id, remote, allowed_categories_json);
     Err("同步已禁用：当前 MOMO Core 只生成本地数据和 .moc".to_owned())
 }
 

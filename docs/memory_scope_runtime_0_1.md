@@ -11,6 +11,11 @@ The public memory contract uses only `scope_id`. Memory retrieval, MO State
 compilation, and DMW/NSG patch requests require it; there is no implicit default
 scope and no `owner_id` compatibility field.
 
+The same identifier is persisted as `scope_id` in SQLite, vector records, and
+patch reviews. Filesystem workspaces live at `memory/scopes/<scope_id>`. The
+0.3.1 migration converts the earlier database columns and directory name; it
+does not keep a second public spelling.
+
 ## Multi-scope retrieval
 
 `POST /v1/memory/retrieve-scoped` accepts one to eight sources:
@@ -38,6 +43,8 @@ and adds this provenance to every returned DMW or NSG item:
 DMW and NSG retrieval are independently selectable. Vector arguments keep the
 all-or-none rule and are valid only when semantic-graph retrieval is enabled.
 The same query vector is used against each scope's isolated vector cache.
+The JSON facade consumes this request as one document rather than seven
+positional arguments.
 
 ## Writes
 

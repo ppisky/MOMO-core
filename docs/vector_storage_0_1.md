@@ -7,7 +7,7 @@
 
 NSG vector storage is accessed through `NsgVectorStore`. The contract covers:
 
-- owner and vector-space isolation;
+- scope and vector-space isolation;
 - dimension and finite-value validation;
 - source-hash freshness checks;
 - deterministic top-k ordering;
@@ -34,7 +34,7 @@ different vector-database product.
 An implementation MUST:
 
 1. reject empty, zero, non-finite, or dimensionally inconsistent vectors;
-2. keep records isolated by owner and vector-space identifier;
+2. keep records isolated by scope and vector-space identifier;
 3. ignore records whose source hash is stale;
 4. return at most the requested bounded top-k;
 5. use a stable tie-breaker after similarity score;
@@ -46,7 +46,7 @@ An index may be rebuilt from those sources and the selected embedding model.
 
 ## Current validation baseline
 
-The exact-ranking tests cover owner isolation, vector-space isolation, input
+The exact-ranking tests cover scope isolation, vector-space isolation, input
 validation, stale hashes, status reporting, cosine ranking, and deterministic
 ties. The included benchmark is a local regression tool, not a product-level
 performance guarantee.

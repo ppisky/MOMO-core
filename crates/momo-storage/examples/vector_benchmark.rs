@@ -17,11 +17,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("node_count must be positive and dimension must be between 1 and 8192".into());
     }
 
-    let owner_id = new_id();
+    let scope_id = new_id();
     let vector_space_id = format!("benchmark|deterministic|{dimension}");
     let records = (0..node_count)
         .map(|node| NsgVectorRecord {
-            owner_id,
+            scope_id,
             node_id: format!("node_{node:08}"),
             source_hash: format!("{:064x}", node + 1),
             vector_space_id: vector_space_id.clone(),
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let search_started = Instant::now();
     let ranked = store
-        .rank_nsg_vectors(owner_id, &vector_space_id, &query, &current_hashes, top_k)
+        .rank_nsg_vectors(scope_id, &vector_space_id, &query, &current_hashes, top_k)
         .await?;
     let search_elapsed = search_started.elapsed();
 

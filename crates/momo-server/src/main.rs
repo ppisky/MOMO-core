@@ -22,13 +22,13 @@ use tower_http::trace::TraceLayer;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8765";
 const DEFAULT_DATA_DIR: &str = ".momo-data";
-const DEFAULT_WORKSPACE_ID: &str = "00000000-0000-4000-8000-000000000001";
+const DEFAULT_SCOPE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const ALLOW_REMOTE_ENV: &str = "MOMO_SERVER_ALLOW_REMOTE";
 
 #[derive(Clone)]
 struct AppState {
     data_dir: String,
-    workspace_id: String,
+    scope_id: String,
 }
 
 #[derive(Serialize)]
@@ -301,14 +301,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = bind.parse()?;
     ensure_bind_allowed(addr, env_flag(ALLOW_REMOTE_ENV))?;
     let data_dir = env::var("MOMO_DATA_DIR").unwrap_or_else(|_| DEFAULT_DATA_DIR.to_owned());
-    let workspace_id =
-        env::var("MOMO_WORKSPACE_ID").unwrap_or_else(|_| DEFAULT_WORKSPACE_ID.to_owned());
+    let scope_id = env::var("MOMO_SCOPE_ID").unwrap_or_else(|_| DEFAULT_SCOPE_ID.to_owned());
     let initialized_dir = simple::initialize_core(data_dir)
         .await
         .map_err(to_io_error)?;
     let state = AppState {
         data_dir: initialized_dir,
-        workspace_id,
+        scope_id,
     };
 
     let app = build_app(state);
@@ -435,7 +434,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn list_characters(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::local_characters_json(state.workspace_id).await)
+    json_result(simple::local_characters_json(state.scope_id).await)
 }
 
 async fn create_character(
@@ -444,7 +443,7 @@ async fn create_character(
 ) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::stage_character_json(
-            state.workspace_id,
+            state.scope_id,
             request.author_name,
             request.name,
             request.description,
@@ -471,7 +470,7 @@ async fn delete_character(Path(id): Path<String>) -> Result<Json<OkResponse>, Ap
 }
 
 async fn list_conversations(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::local_conversations_json(state.workspace_id).await)
+    json_result(simple::local_conversations_json(state.scope_id).await)
 }
 
 async fn create_conversation(
@@ -479,13 +478,8 @@ async fn create_conversation(
     Json(request): Json<CreateConversationRequest>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(
-        simple::stage_conversation_json(
-            None,
-            state.workspace_id,
-            request.title,
-            request.character_id,
-        )
-        .await,
+        simple::stage_conversation_json(None, state.scope_id, request.title, request.character_id)
+            .await,
     )
 }
 
@@ -532,27 +526,32 @@ async fn delete_message(Path(id): Path<String>) -> Result<Json<OkResponse>, ApiE
 }
 
 async fn chat_complete(Json(request): Json<ChatRequest>) -> Result<Json<Value>, ApiError> {
-    let messages_json = to_json_string(&request.messages)?;
-    let request_parameters_json = normalized_request_parameters(&request.request_parameters)?;
-    json_result(
-        simple::chat_complete_json(
-            request.base_url,
-            request.api_key,
-            request.model,
-            messages_json,
-            request.temperature,
-            request_parameters_json,
-        )
-        .await,
-    )
+    let request_json = json!({
+        "base_url": request.base_url,
+        "api_key": request.api_key,
+        "model": request.model,
+        "messages": request.messages,
+        "temperature": request.temperature,
+        "request_parameters": normalized_request_parameters(&request.request_parameters)?,
+    })
+    .to_string();
+    json_result(simple::chat_complete_json(request_json).await)
 }
 
 async fn chat_stream(
     Json(request): Json<ChatRequest>,
 ) -> Result<Sse<UnboundedReceiverStream<Result<Event, Infallible>>>, ApiError> {
-    let messages_json = to_json_string(&request.messages)?;
-    let request_parameters_json = normalized_request_parameters(&request.request_parameters)?;
     let request_id = simple::new_request_id();
+    let request_json = json!({
+        "request_id": request_id,
+        "base_url": request.base_url,
+        "api_key": request.api_key,
+        "model": request.model,
+        "messages": request.messages,
+        "temperature": request.temperature,
+        "request_parameters": normalized_request_parameters(&request.request_parameters)?,
+    })
+    .to_string();
     let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
     let sink_tx = tx.clone();
     let sink = move |event_json: String| {
@@ -567,18 +566,7 @@ async fn chat_stream(
             "request_id": request_id,
         });
         let _ = tx.send(Ok(Event::default().data(start.to_string())));
-        if let Err(error) = simple::chat_stream_json(
-            request_id,
-            request.base_url,
-            request.api_key,
-            request.model,
-            messages_json,
-            request.temperature,
-            request_parameters_json,
-            sink,
-        )
-        .await
-        {
+        if let Err(error) = simple::chat_stream_json(request_json, sink).await {
             let _ = tx.send(Ok(Event::default().data(
                 json!({
                     "type": "error",
@@ -601,16 +589,16 @@ async fn cancel_chat(Path(request_id): Path<String>) -> Json<Value> {
 async fn prepare_context(
     Json(request): Json<PrepareContextRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::prepare_context_with_state_json(
-        request.character_markdown,
-        request.user_markdown,
-        request.memory_markdown,
-        request.state_context,
-        request.nsg_markdown,
-        to_json_string(&request.messages)?,
-        request.context_window,
-        request.reserve_output_tokens,
-    ))
+    json_result(simple::prepare_context_json(to_json_string(&json!({
+        "character_markdown": request.character_markdown,
+        "user_markdown": request.user_markdown,
+        "memory_markdown": request.memory_markdown,
+        "state_context": request.state_context,
+        "nsg_markdown": request.nsg_markdown,
+        "messages": request.messages,
+        "context_window": request.context_window,
+        "reserve_output_tokens": request.reserve_output_tokens,
+    }))?))
 }
 
 async fn resolve_capability(
@@ -637,37 +625,33 @@ async fn compile_mo_state(
 async fn retrieve_scoped_memory(
     Json(request): Json<RetrieveScopedMemoryRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let query_vector_json = request
-        .query_vector
-        .map(|vector| to_json_string(&vector))
-        .transpose()?;
     json_result(
-        simple::retrieve_scoped_memory_json(
-            to_json_string(&request.scopes)?,
-            request.query,
-            request.max_tokens,
-            request.include_memory,
-            request.include_semantic_graph,
-            request.vector_space_id,
-            query_vector_json,
-        )
+        simple::retrieve_scoped_memory_json(to_json_string(&json!({
+            "scopes": request.scopes,
+            "query": request.query,
+            "max_tokens": request.max_tokens,
+            "include_memory": request.include_memory,
+            "include_semantic_graph": request.include_semantic_graph,
+            "vector_space_id": request.vector_space_id,
+            "query_vector": request.query_vector,
+        }))?)
         .await,
     )
 }
 
 async fn run_memory_maintenance(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::run_memory_maintenance_json(state.workspace_id).await)
+    json_result(simple::run_memory_maintenance_json(state.scope_id).await)
 }
 
 async fn list_memory_documents(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::list_memory_documents_json(state.workspace_id).await)
+    json_result(simple::list_memory_documents_json(state.scope_id).await)
 }
 
 async fn read_memory_document(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::read_memory_document_json(state.workspace_id, id).await)
+    json_result(simple::read_memory_document_json(state.scope_id, id).await)
 }
 
 async fn update_memory_document(
@@ -675,28 +659,28 @@ async fn update_memory_document(
     Path(id): Path<String>,
     Json(request): Json<UpdateMemoryDocumentRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::update_memory_document_json(state.workspace_id, id, request.markdown).await)
+    ok_json(simple::update_memory_document_json(state.scope_id, id, request.markdown).await)
 }
 
 async fn archive_memory_document(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::archive_memory_document_json(state.workspace_id, id).await)
+    ok_json(simple::archive_memory_document_json(state.scope_id, id).await)
 }
 
 async fn restore_memory_document(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::restore_memory_document_json(state.workspace_id, id).await)
+    ok_json(simple::restore_memory_document_json(state.scope_id, id).await)
 }
 
 async fn delete_memory_document(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::delete_memory_document_json(state.workspace_id, id).await)
+    ok_json(simple::delete_memory_document_json(state.scope_id, id).await)
 }
 
 async fn apply_memory_patch(
@@ -712,7 +696,7 @@ async fn submit_memory_patch_review(
 ) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::submit_memory_patch_review_json(
-            state.workspace_id,
+            state.scope_id,
             request.conversation_id,
             request.patch_yaml,
             request.review_mode,
@@ -727,7 +711,7 @@ async fn list_memory_patch_reviews(
 ) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::list_memory_patch_reviews_json(
-            state.workspace_id,
+            state.scope_id,
             query.include_resolved.unwrap_or(false),
         )
         .await,
@@ -738,14 +722,14 @@ async fn approve_memory_patch_review(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::approve_memory_patch_review_json(state.workspace_id, id).await)
+    json_result(simple::approve_memory_patch_review_json(state.scope_id, id).await)
 }
 
 async fn reject_memory_patch_review(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::reject_memory_patch_review_json(state.workspace_id, id).await)
+    json_result(simple::reject_memory_patch_review_json(state.scope_id, id).await)
 }
 
 async fn list_nsg_nodes(Json(request): Json<ScopeRequest>) -> Result<Json<Value>, ApiError> {
@@ -759,7 +743,7 @@ async fn write_nsg_node(
 ) -> Result<Json<Value>, ApiError> {
     ok_json(
         simple::write_nsg_node_json(
-            state.workspace_id,
+            state.scope_id,
             request.target_file,
             to_json_string(&request.node)?,
         )
@@ -771,14 +755,14 @@ async fn archive_nsg_node(
     State(state): State<AppState>,
     Json(request): Json<NsgTargetRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::archive_nsg_node_json(state.workspace_id, request.target_file).await)
+    ok_json(simple::archive_nsg_node_json(state.scope_id, request.target_file).await)
 }
 
 async fn delete_nsg_node(
     State(state): State<AppState>,
     Json(request): Json<NsgTargetRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::delete_nsg_node_json(state.workspace_id, request.target_file).await)
+    ok_json(simple::delete_nsg_node_json(state.scope_id, request.target_file).await)
 }
 
 async fn apply_nsg_patch(
@@ -816,11 +800,8 @@ async fn nsg_vector_status(
     Query(query): Query<NsgVectorStatusQuery>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(
-        simple::nsg_vector_status_json(
-            state.workspace_id,
-            query.vector_space_id.unwrap_or_default(),
-        )
-        .await,
+        simple::nsg_vector_status_json(state.scope_id, query.vector_space_id.unwrap_or_default())
+            .await,
     )
 }
 
@@ -844,17 +825,17 @@ async fn export_moc(
     Json(request): Json<MocExportRequest>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(
-        simple::export_moc_json(
-            request.output_path,
-            state.workspace_id,
-            to_json_string(&request.settings)?,
-            request.include_config,
-            request.include_characters,
-            request.include_conversations,
-            request.include_memory,
-            request.include_semantic_graph,
-            request.passphrase,
-        )
+        simple::export_moc_json(to_json_string(&json!({
+            "output_path": request.output_path,
+            "scope_id": state.scope_id,
+            "settings": request.settings,
+            "include_config": request.include_config,
+            "include_characters": request.include_characters,
+            "include_conversations": request.include_conversations,
+            "include_memory": request.include_memory,
+            "include_semantic_graph": request.include_semantic_graph,
+            "passphrase": request.passphrase,
+        }))?)
         .await,
     )
 }
@@ -866,7 +847,7 @@ async fn export_character_moc(
     json_result(
         simple::export_character_moc_json(
             request.output_path,
-            state.workspace_id,
+            state.scope_id,
             request.character_id,
             request.passphrase,
         )
@@ -881,7 +862,7 @@ async fn import_moc(
     json_result(
         simple::import_moc_json(
             request.input_path,
-            state.workspace_id,
+            state.scope_id,
             request.conflict_mode,
             request.passphrase,
         )
@@ -932,10 +913,10 @@ fn validate_scope_id(scope_id: String) -> Result<String, ApiError> {
     Ok(scope_id)
 }
 
-fn normalized_request_parameters(value: &Value) -> Result<String, ApiError> {
+fn normalized_request_parameters(value: &Value) -> Result<Value, ApiError> {
     match value {
-        Value::Object(_) => to_json_string(value),
-        Value::Null => Ok("{}".to_owned()),
+        Value::Object(_) => Ok(value.clone()),
+        Value::Null => Ok(json!({})),
         _ => Err(ApiError::bad_request(
             "request_parameters must be an object",
         )),
@@ -1001,7 +982,7 @@ mod tests {
                 .expect("initialize core");
         let app = build_app(AppState {
             data_dir: initialized_dir,
-            workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
+            scope_id: DEFAULT_SCOPE_ID.to_owned(),
         });
 
         let response = app

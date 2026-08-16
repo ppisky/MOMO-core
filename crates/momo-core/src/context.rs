@@ -30,47 +30,28 @@ pub struct PreparedContext {
     pub truncated_messages: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ContextSections<'a> {
+    pub character: &'a str,
+    pub user: &'a str,
+    pub memory: &'a str,
+    pub state: &'a str,
+    pub semantic_graph: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ContextRequest<'a> {
+    pub sections: ContextSections<'a>,
+    pub messages: &'a [ChatInput],
+    pub budget: ContextBudget,
+}
+
 /// Builds a deterministic prompt and retains the newest complete messages that
 /// fit the configured input budget. The estimator deliberately over-counts CJK
 /// text so an unknown tokenizer is less likely to overflow the provider limit.
 #[must_use]
-pub fn prepare_context(
-    character_markdown: &str,
-    user_markdown: &str,
-    memory_markdown: &str,
-    messages: &[ChatInput],
-    budget: ContextBudget,
-) -> PreparedContext {
-    prepare_context_with_counter(
-        character_markdown,
-        user_markdown,
-        memory_markdown,
-        messages,
-        budget,
-        &estimate_text_tokens,
-    )
-}
-
-#[must_use]
-pub fn prepare_context_with_state(
-    character_markdown: &str,
-    user_markdown: &str,
-    memory_markdown: &str,
-    state_context: &str,
-    nsg_markdown: &str,
-    messages: &[ChatInput],
-    budget: ContextBudget,
-) -> PreparedContext {
-    prepare_context_with_counter_and_state(
-        character_markdown,
-        user_markdown,
-        memory_markdown,
-        state_context,
-        nsg_markdown,
-        messages,
-        budget,
-        &estimate_text_tokens,
-    )
+pub fn prepare_context(request: ContextRequest<'_>) -> PreparedContext {
+    prepare_context_with_counter(request, &estimate_text_tokens)
 }
 
 /// Equivalent to [`prepare_context`] but uses the endpoint's declared exact
@@ -78,66 +59,23 @@ pub fn prepare_context_with_state(
 /// estimator defined by [`TokenizerProfile::count_or_conservative`].
 #[must_use]
 pub fn prepare_context_with_tokenizer(
-    character_markdown: &str,
-    user_markdown: &str,
-    memory_markdown: &str,
-    messages: &[ChatInput],
-    budget: ContextBudget,
+    request: ContextRequest<'_>,
     tokenizer: &TokenizerProfile,
 ) -> PreparedContext {
-    prepare_context_with_counter(
-        character_markdown,
-        user_markdown,
-        memory_markdown,
-        messages,
-        budget,
-        &|text| tokenizer.count_or_conservative(text),
-    )
+    prepare_context_with_counter(request, &|text| tokenizer.count_or_conservative(text))
 }
 
 fn prepare_context_with_counter(
-    character_markdown: &str,
-    user_markdown: &str,
-    memory_markdown: &str,
-    messages: &[ChatInput],
-    budget: ContextBudget,
+    request: ContextRequest<'_>,
     counter: &dyn Fn(&str) -> usize,
 ) -> PreparedContext {
-    prepare_context_with_counter_and_state(
-        character_markdown,
-        user_markdown,
-        memory_markdown,
-        "",
-        "",
-        messages,
-        budget,
-        counter,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_context_with_counter_and_state(
-    character_markdown: &str,
-    user_markdown: &str,
-    memory_markdown: &str,
-    state_context: &str,
-    nsg_markdown: &str,
-    messages: &[ChatInput],
-    budget: ContextBudget,
-    counter: &dyn Fn(&str) -> usize,
-) -> PreparedContext {
-    let input_limit = budget
+    let input_limit = request
+        .budget
         .context_window
-        .saturating_sub(budget.reserve_output_tokens)
+        .saturating_sub(request.budget.reserve_output_tokens)
         .saturating_sub(CONTEXT_SAFETY_MARGIN)
         .max(1);
-    let raw_system_content = system_prompt(
-        character_markdown,
-        user_markdown,
-        memory_markdown,
-        state_context,
-        nsg_markdown,
-    );
+    let raw_system_content = system_prompt(request.sections);
     let mut selected = Vec::new();
     let mut used = 0;
     let mut truncated_messages = 0;
@@ -146,7 +84,8 @@ fn prepare_context_with_counter_and_state(
         // A huge character card must not crowd the newest user turn out of the
         // request entirely.  Reserve its full size when possible and otherwise
         // split the available budget between system context and the newest turn.
-        let newest_reserve = messages
+        let newest_reserve = request
+            .messages
             .last()
             .map(|message| estimate_message_tokens_with(message, counter))
             .unwrap_or_default()
@@ -170,7 +109,7 @@ fn prepare_context_with_counter_and_state(
     let available = input_limit.saturating_sub(used);
     let mut reverse_messages = Vec::new();
     let mut history_tokens = 0_usize;
-    for message in messages.iter().rev() {
+    for message in request.messages.iter().rev() {
         let tokens = estimate_message_tokens_with(message, counter);
         if history_tokens.saturating_add(tokens) > available {
             // Always retain a meaningful part of the newest turn.  Older
@@ -197,7 +136,10 @@ fn prepare_context_with_counter_and_state(
         reverse_messages.push(message.clone());
     }
     reverse_messages.reverse();
-    let omitted_messages = messages.len().saturating_sub(reverse_messages.len());
+    let omitted_messages = request
+        .messages
+        .len()
+        .saturating_sub(reverse_messages.len());
     selected.extend(reverse_messages);
 
     PreparedContext {
@@ -272,30 +214,27 @@ fn truncate_message_content_with(
     (best, true)
 }
 
-fn system_prompt(
-    character_markdown: &str,
-    user_markdown: &str,
-    memory_markdown: &str,
-    state_context: &str,
-    nsg_markdown: &str,
-) -> String {
-    let mut sections = Vec::new();
-    if !character_markdown.trim().is_empty() {
-        sections.push(format!("# Character\n{}", character_markdown.trim()));
+fn system_prompt(sections: ContextSections<'_>) -> String {
+    let mut output = Vec::new();
+    if !sections.character.trim().is_empty() {
+        output.push(format!("# Character\n{}", sections.character.trim()));
     }
-    if !user_markdown.trim().is_empty() {
-        sections.push(format!("# User\n{}", user_markdown.trim()));
+    if !sections.user.trim().is_empty() {
+        output.push(format!("# User\n{}", sections.user.trim()));
     }
-    if !memory_markdown.trim().is_empty() {
-        sections.push(format!("# Relevant Memory\n{}", memory_markdown.trim()));
+    if !sections.memory.trim().is_empty() {
+        output.push(format!("# Relevant Memory\n{}", sections.memory.trim()));
     }
-    if !state_context.trim().is_empty() {
-        sections.push(state_context.trim().to_owned());
+    if !sections.state.trim().is_empty() {
+        output.push(sections.state.trim().to_owned());
     }
-    if !nsg_markdown.trim().is_empty() {
-        sections.push(format!("# Active Lore Context\n{}", nsg_markdown.trim()));
+    if !sections.semantic_graph.trim().is_empty() {
+        output.push(format!(
+            "# Active Lore Context\n{}",
+            sections.semantic_graph.trim()
+        ));
     }
-    sections.join("\n\n")
+    output.join("\n\n")
 }
 
 #[cfg(test)]
@@ -309,15 +248,34 @@ mod tests {
         }
     }
 
+    fn request<'a>(
+        character: &'a str,
+        user: &'a str,
+        memory: &'a str,
+        messages: &'a [ChatInput],
+        budget: ContextBudget,
+    ) -> ContextRequest<'a> {
+        ContextRequest {
+            sections: ContextSections {
+                character,
+                user,
+                memory,
+                ..ContextSections::default()
+            },
+            messages,
+            budget,
+        }
+    }
+
     #[test]
     fn injects_character_and_user_before_history() {
-        let prepared = prepare_context(
+        let prepared = prepare_context(request(
             "温柔的向导",
             "用户喜欢简洁回答",
             "曾经去过海边",
             &[message("你好")],
             ContextBudget::default(),
-        );
+        ));
         assert_eq!(prepared.messages[0].role, MessageRole::System);
         assert!(prepared.messages[0].content.contains("# Character"));
         assert!(prepared.messages[0].content.contains("# User"));
@@ -328,7 +286,7 @@ mod tests {
     #[test]
     fn drops_oldest_messages_when_budget_is_full() {
         let messages = vec![message(&"a".repeat(80)), message("newest")];
-        let prepared = prepare_context(
+        let prepared = prepare_context(request(
             "",
             "",
             "",
@@ -337,7 +295,7 @@ mod tests {
                 context_window: 160,
                 reserve_output_tokens: 8,
             },
-        );
+        ));
         assert_eq!(prepared.messages, vec![message("newest")]);
         assert_eq!(prepared.omitted_messages, 1);
     }
@@ -352,11 +310,7 @@ mod tests {
     fn exact_tokenizer_profile_drives_reported_budget() {
         let messages = [message("hello world")];
         let prepared = prepare_context_with_tokenizer(
-            "",
-            "",
-            "",
-            &messages,
-            ContextBudget::default(),
+            request("", "", "", &messages, ContextBudget::default()),
             &TokenizerProfile::Cl100kBase,
         );
         assert_eq!(prepared.estimated_input_tokens, 8);
@@ -364,7 +318,7 @@ mod tests {
 
     #[test]
     fn oversized_system_context_cannot_evict_the_newest_turn() {
-        let prepared = prepare_context(
+        let prepared = prepare_context(request(
             &"角色设定".repeat(200),
             &"用户设定".repeat(100),
             &"记忆".repeat(200),
@@ -373,7 +327,7 @@ mod tests {
                 context_window: 256,
                 reserve_output_tokens: 32,
             },
-        );
+        ));
         assert_eq!(
             prepared.messages.last().expect("latest").role,
             MessageRole::User
@@ -392,7 +346,7 @@ mod tests {
 
     #[test]
     fn oversized_latest_turn_is_truncated_instead_of_silently_dropped() {
-        let prepared = prepare_context(
+        let prepared = prepare_context(request(
             "",
             "",
             "",
@@ -401,7 +355,7 @@ mod tests {
                 context_window: 180,
                 reserve_output_tokens: 16,
             },
-        );
+        ));
         assert_eq!(prepared.messages.len(), 1);
         assert!(prepared.messages[0].content.starts_with("start"));
         assert!(prepared.messages[0].content.ends_with("end"));

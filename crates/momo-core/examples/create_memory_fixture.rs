@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let directory = tempfile::tempdir()?;
     let core = MomoCore::initialize(directory.path()).await?;
-    let owner_id = Uuid::parse_str("019c0000-0000-7000-8000-000000000101")?;
+    let scope_id = Uuid::parse_str("019c0000-0000-7000-8000-000000000101")?;
     let character_id = Uuid::parse_str("019c0000-0000-7000-8000-000000000102")?;
     let conversation_id = Uuid::parse_str("019c0000-0000-7000-8000-000000000103")?;
     let created_at = Utc
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     core.store()
         .save_character(&CharacterCard {
             id: character_id,
-            owner_id,
+            scope_id,
             name: "艾琳".to_owned(),
             version: "2.0.0".to_owned(),
             author_name: "MOMO Test Fixture".to_owned(),
@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     core.store()
         .save_conversation(&Conversation {
             id: conversation_id,
-            owner_id,
+            scope_id,
             character_id: Some(character_id),
             title: "Dual-Mem 明确关系测试".to_owned(),
             created_at,
@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     export_moc(
         &core,
         &output,
-        owner_id,
+        scope_id,
         &serde_json::json!({"schema_version": 2}),
         ExportSelection {
             config: false,

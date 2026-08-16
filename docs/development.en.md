@@ -38,7 +38,7 @@ Turso means the standalone database library selected for the vector database
 backend.
 
 The local exact-ranking implementation defines deterministic validation
-semantics for owner scope, vector space, dimensions, source hashes, and stable
+semantics for scope identity, vector space, dimensions, source hashes, and stable
 ordering. Another backend must preserve those observable semantics.
 
 ## Runtime data and secrets

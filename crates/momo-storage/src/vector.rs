@@ -13,7 +13,7 @@ impl NsgVectorStore for LocalStore {
 
     async fn rank_nsg_vectors(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         vector_space_id: &str,
         query_vector: &[f64],
         current_hashes: &HashMap<String, String>,
@@ -22,7 +22,7 @@ impl NsgVectorStore for LocalStore {
         validate_query_vector(vector_space_id, query_vector)?;
         let limit = normalize_top_k(limit);
         let mut ranked = self
-            .list_nsg_vectors(owner_id, vector_space_id)
+            .list_nsg_vectors(scope_id, vector_space_id)
             .await?
             .into_iter()
             .filter_map(|record| {
@@ -50,14 +50,14 @@ impl NsgVectorStore for LocalStore {
 
     async fn nsg_vector_status(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         vector_space_id: &str,
         current_hashes: &HashMap<String, String>,
     ) -> Result<NsgVectorStatus, StorageError> {
         let vectors = if vector_space_id.trim().is_empty() {
             Vec::new()
         } else {
-            self.list_nsg_vectors(owner_id, vector_space_id).await?
+            self.list_nsg_vectors(scope_id, vector_space_id).await?
         };
         let indexed = vectors
             .iter()
@@ -92,7 +92,7 @@ pub(super) fn validate_nsg_vector(record: &NsgVectorRecord) -> Result<(), String
         || record.vector.iter().all(|value| *value == 0.0)
     {
         return Err(
-            "owner, node, hash, space, dimension, and finite vector values are required".to_owned(),
+            "scope, node, hash, space, dimension, and finite vector values are required".to_owned(),
         );
     }
     Ok(())
@@ -134,10 +134,10 @@ fn cosine_similarity(left: &[f64], right: &[f64]) -> Option<f64> {
 }
 
 pub(super) fn nsg_vector_from_row(row: &SqliteRow) -> Result<NsgVectorRecord, StorageError> {
-    let owner_id = Uuid::parse_str(row.try_get("owner_id")?)?;
+    let scope_id = Uuid::parse_str(row.try_get("scope_id")?)?;
     let vector: Vec<f64> = serde_json::from_str(row.try_get("vector_json")?)?;
     let record = NsgVectorRecord {
-        owner_id,
+        scope_id,
         node_id: row.try_get("node_id")?,
         source_hash: row.try_get("source_hash")?,
         vector_space_id: row.try_get("vector_space_id")?,

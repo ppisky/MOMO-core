@@ -24,7 +24,7 @@ pub struct RecentlyDeletedItem {
 /// authoritative; callers must compare both hashes and vector space identity.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct NsgVectorRecord {
-    pub owner_id: Uuid,
+    pub scope_id: Uuid,
     pub node_id: String,
     pub source_hash: String,
     pub vector_space_id: String,
@@ -52,7 +52,7 @@ pub trait NsgVectorStore {
 
     async fn rank_nsg_vectors(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         vector_space_id: &str,
         query_vector: &[f64],
         current_hashes: &HashMap<String, String>,
@@ -61,7 +61,7 @@ pub trait NsgVectorStore {
 
     async fn nsg_vector_status(
         &self,
-        owner_id: Uuid,
+        scope_id: Uuid,
         vector_space_id: &str,
         current_hashes: &HashMap<String, String>,
     ) -> Result<NsgVectorStatus, StorageError>;
@@ -90,7 +90,7 @@ impl MemoryPatchReviewStatus {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct MemoryPatchReview {
     pub id: Uuid,
-    pub owner_id: Uuid,
+    pub scope_id: Uuid,
     pub conversation_id: String,
     pub patch_yaml: String,
     pub targets: Vec<String>,
@@ -190,7 +190,7 @@ fn memory_patch_review_from_row(row: &SqliteRow) -> Result<MemoryPatchReview, St
     let resolved_at: Option<String> = row.try_get("resolved_at")?;
     Ok(MemoryPatchReview {
         id: Uuid::parse_str(row.try_get("id")?)?,
-        owner_id: Uuid::parse_str(row.try_get("owner_id")?)?,
+        scope_id: Uuid::parse_str(row.try_get("scope_id")?)?,
         conversation_id: row.try_get("conversation_id")?,
         patch_yaml: row.try_get("patch_yaml")?,
         targets: serde_json::from_str(row.try_get("targets")?)?,
@@ -238,7 +238,7 @@ async fn insert_message_immutable(
 fn character_from_row(row: &SqliteRow) -> Result<CharacterCard, StorageError> {
     Ok(CharacterCard {
         id: Uuid::parse_str(row.try_get("id")?)?,
-        owner_id: Uuid::parse_str(row.try_get("owner_id")?)?,
+        scope_id: Uuid::parse_str(row.try_get("scope_id")?)?,
         name: row.try_get("name")?,
         version: row.try_get("version")?,
         author_name: row.try_get("author_name")?,
@@ -255,7 +255,7 @@ fn conversation_from_row(row: &SqliteRow) -> Result<Conversation, StorageError> 
     let character_id: Option<String> = row.try_get("character_id")?;
     Ok(Conversation {
         id: Uuid::parse_str(row.try_get("id")?)?,
-        owner_id: Uuid::parse_str(row.try_get("owner_id")?)?,
+        scope_id: Uuid::parse_str(row.try_get("scope_id")?)?,
         character_id: character_id.map(|id| Uuid::parse_str(&id)).transpose()?,
         title: row.try_get("title")?,
         created_at: parse_timestamp(row.try_get("created_at")?)?,
