@@ -16,8 +16,8 @@
 - 模块 ID 为 `config`、`characters`、`conversations`、`memory`、
   `semantic_graph`、`encrypted-container`。
 - DMW/NSG 按 `lore/`、`rules/`、`archive/lore/`、`archive/rules/` 前缀分区。
-- Character Card v2 导入导出及可选 `opening.md`。
-- 非 v2 容器、非 v2 角色卡元数据和非规范模块 ID 会被拒绝。
+- MOMO 独立 Character Card v2 导入导出及可选 `opening.md`。
+- 非 v2 容器、非 MOMO v2 角色卡元数据和非规范模块 ID 会被拒绝。
 - 未知模块安全解包并在报告中列出，不写入已知业务数据。
 - 更高格式版本明确拒绝。
 - tar 路径、重复条目、条目类型、摘要、数量和总大小限制保持启用。
@@ -35,4 +35,6 @@
 ## 验证
 
 测试覆盖 v2 创建与解包、格式版本拒绝、非规范模块 ID、未知模块报告、重复路径、路径
-穿越、摘要、资源上限及 Character Card v2 资源验证。
+穿越、摘要、资源上限及 MOMO Character Card v2 资源验证。外部 CCv2/CCv3 的直接
+导入导出不在当前实现范围内，详见
+[`character_card_compatibility.md`](character_card_compatibility.md)。

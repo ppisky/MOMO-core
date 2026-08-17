@@ -8,7 +8,7 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 
 ## 主要能力
 
-- Character Card v2
+- MOMO 独立 Character Card v2（`character.toml` + Markdown）
 - MOC v2 导入与导出
 - Dual-Mem Wiki（DMW）长期记忆
 - Narrative Semantic Graph（NSG）
@@ -20,6 +20,18 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 
 `crates/` 下的 crate 是 MOMO Core 的内部实现模块，不是彼此独立的产品。
 `momo-server` 通过仅限本机的 HTTP/SSE 接口提供同一组 Core 能力。
+
+## 角色卡格式边界
+
+MOMO Character Card v2 是由本仓库定义的独立角色卡格式，规范见
+[`Character_Card_v2.md`](Character_Card_v2.md)。其中的“v2”不表示外部生态的
+`chara_card_v2` JSON/PNG 格式。当前 Core 实现的是 MOMO 格式随 MOC v2 的导入导出；
+尚未实现外部 CCv2 JSON/PNG 或 CCv3 JSON/PNG/CHARX 的直接导入导出。
+
+外部格式兼容设计的规范来源固定为
+[Character Card v2](https://github.com/malfoyslastname/character-card-spec-v2) 与
+[Character Card v3](https://github.com/kwaroran/character-card-spec-v3)。来源快照、术语映射
+和当前实现状态见[角色卡格式与兼容边界](docs/character_card_compatibility.md)。
 
 ## Workspace
 

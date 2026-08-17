@@ -20,6 +20,16 @@ The dependency snapshot in `Cargo.lock` and
   license text at `apps/momo-app/rust_builder/cargokit/LICENSE`;
 - the bundled Sarasa Gothic font files remain under SIL Open Font License 1.1.
   Its license is stored beside the font files.
+- `docs/spec_v1.md` and `docs/spec_v2.md` are unmodified reference snapshots
+  from `malfoyslastname/character-card-spec-v2` at commit
+  `8083fb388615ccbce768e97cbbd49d2b3214632c`. That upstream repository did not
+  declare a license when verified on 2026-08-17; these documents remain
+  upstream material and are not relicensed under MOMO's Apache-2.0 license.
+- `docs/spec_v3.md` is an unmodified reference snapshot from
+  `kwaroran/character-card-spec-v3` at commit
+  `f3a86af019fbd99f788f7a1155f399655b34ab35`. It is distributed under the MIT
+  License; the upstream notice is retained in
+  `docs/character-card-spec-v3.LICENSE`.
 
 This is an engineering audit of the current lockfiles, not legal advice.
 Dependency updates must repeat the audit and retain all required notices.

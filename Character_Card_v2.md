@@ -12,6 +12,8 @@ Status: Implementation Baseline (v2.0.0)
 
 本文档独立定义 MOMO Character Card（角色卡）v2.0.0。角色卡是纯粹、去中心化且适合自由传播的角色身份资产，由 TOML 元数据、角色 Markdown，以及可选的用户上下文与开场消息组成。
 
+本规范是 MOMO 自己的独立角色卡标准。名称中的 v2.0.0 仅表示 MOMO-STD-0001 的版本，**不等同于**外部生态使用 `spec: "chara_card_v2"` 的 JSON/PNG Character Card v2，也不等同于 Character Card v3。
+
 本规范完整规定 v2 的文件结构、字段、身份规则、内容资源、加载安全与外部格式转换。实现方不需要读取其他版本的角色卡规范即可实现 v2。
 
 ---
@@ -348,6 +350,17 @@ MOMO-STD-0001 (Character Card Specification v2.0.0) 确立了一个简单、可�
 ## 附录 A：酒馆格式转换指南 (Tavern Format Conversion Guide)
 
 本附录为参考性（Informative），定义 MOMO 角色卡与常见酒馆（Tavern / SillyTavern）角色卡格式之间的转换规则。
+
+本附录中的外部格式术语与字段只来源于以下两个规范仓库：
+
+- Character Card v2：<https://github.com/malfoyslastname/character-card-spec-v2>
+- Character Card v3：<https://github.com/kwaroran/character-card-spec-v3>
+
+固定来源快照与字段边界见
+[`docs/character_card_compatibility.md`](docs/character_card_compatibility.md)。本附录描述的是
+转换器应遵循的设计规则，不代表当前 `momo-core` 已实现外部格式解析器。当前版本只实现
+MOMO Character Card v2 在 MOC v2 中的导入导出；CCv2 JSON/PNG 与 CCv3
+JSON/PNG/CHARX 的直接导入导出仍未实现。
 
 ### A.1 格式识别
 

@@ -84,9 +84,10 @@ The following workspace prefixes belong to `semantic_graph`:
 Every other workspace file belongs to `memory`. Export and import MUST apply the
 same prefix test; a file cannot be present in both modules.
 
-## 4. Character Card v2 payload
+## 4. MOMO Character Card v2 payload
 
-Each character directory uses Character Card v2:
+Each character directory uses the independent MOMO Character Card v2 format.
+It is not the external `chara_card_v2` JSON/PNG format:
 
 ```text
 characters/<UUID>/

@@ -920,13 +920,13 @@ fn parse_character_metadata(values: &Table) -> Result<ParsedCharacterMetadata, P
         for forbidden in ["description", "language", "tags"] {
             if values.contains_key(forbidden) {
                 return Err(PortableError::InvalidData(format!(
-                    "Character Card v2 forbids {forbidden}"
+                    "MOMO Character Card v2 forbids {forbidden}"
                 )));
             }
         }
         if author.contains_key("uid") || author.contains_key("display_name") {
             return Err(PortableError::InvalidData(
-                "Character Card v2 forbids author uid and display_name".to_owned(),
+                "MOMO Character Card v2 forbids author uid and display_name".to_owned(),
             ));
         }
         let metadata: CharacterMetadata = TomlValue::Table(values.clone())
@@ -938,7 +938,7 @@ fn parse_character_metadata(values: &Table) -> Result<ParsedCharacterMetadata, P
         ));
     }
     Err(PortableError::InvalidData(
-        "native MOC v2 requires Character Card v2 metadata".to_owned(),
+        "native MOC v2 requires MOMO Character Card v2 metadata".to_owned(),
     ))
 }
 

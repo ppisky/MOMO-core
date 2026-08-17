@@ -9,7 +9,7 @@ local HTTP interface in one workspace.
 
 ## Capabilities
 
-- Character Card v2
+- independent MOMO Character Card v2 (`character.toml` + Markdown)
 - MOC v2 import and export
 - Dual-Mem Wiki (DMW) long-term memory
 - Narrative Semantic Graph (NSG)
@@ -22,6 +22,20 @@ local HTTP interface in one workspace.
 The crates under `crates/` are implementation modules of MOMO Core. They are
 not separate products. `momo-server` exposes the same Core capabilities over a
 loopback HTTP/SSE interface for local applications.
+
+## Character-card format boundary
+
+MOMO Character Card v2 is an independent format defined by this repository in
+[`Character_Card_v2.md`](Character_Card_v2.md). Its “v2” does not mean the
+external `chara_card_v2` JSON/PNG format. Core currently imports and exports the
+MOMO format inside MOC v2; direct import or export of external CCv2 JSON/PNG and
+CCv3 JSON/PNG/CHARX is not implemented.
+
+Compatibility design for external formats is based specifically on
+[Character Card v2](https://github.com/malfoyslastname/character-card-spec-v2)
+and [Character Card v3](https://github.com/kwaroran/character-card-spec-v3).
+See [character-card formats and compatibility](docs/character_card_compatibility.md)
+for pinned sources, terminology, and implementation status.
 
 ## Workspace
 

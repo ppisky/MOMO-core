@@ -28,7 +28,8 @@ wrappers.
 - local domain models and UUIDv7 identities;
 - SQLite persistence for characters, conversations, messages, deletion state,
   review records, portable metadata, and vector cache records;
-- Character Card v2 and MOC v2 import/export;
+- independent MOMO Character Card v2 and MOC v2 import/export (external
+  CCv2/CCv3 direct import/export is not implemented);
 - private MOC encryption;
 - DMW, NSG, and MO State;
 - context assembly and OpenAI-compatible completion/streaming;

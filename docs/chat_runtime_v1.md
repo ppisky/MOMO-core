@@ -42,7 +42,8 @@
 
 请求消息顺序固定为：
 
-1. 角色卡 `character_markdown` 与 `user_markdown`；
+1. 已归一化的 MOMO 独立角色卡字段 `character_markdown` 与 `user_markdown`；外部
+   CCv2/CCv3 转换不属于聊天运行时；
 2. 以最新用户消息检索到的 DMW 记忆和一跳关联；
 3. 在预算内保留的最近历史消息。
 
