@@ -127,11 +127,21 @@ pub enum StorageError {
     MemoryPatchReviewStatus(String),
     #[error("invalid semantic-graph vector: {0}")]
     InvalidNsgVector(String),
+    #[error("Turso vector database failed: {0}")]
+    Turso(#[from] turso::Error),
+    #[error("Turso vector database path is not valid UTF-8: {0}")]
+    InvalidTursoPath(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct LocalStore {
     pool: SqlitePool,
+}
+
+/// The standalone Turso database used exclusively for disposable NSG vectors.
+#[derive(Debug, Clone)]
+pub struct TursoVectorStore {
+    database: turso::Database,
 }
 
 mod local;

@@ -23,7 +23,8 @@ cargo doc --workspace --all-features --no-deps
 - `momo-core` assembles storage, memory, context, model access, portable data,
   and client-facing APIs.
 - `momo-domain` defines shared local domain objects.
-- `momo-storage` owns SQLite persistence and `NsgVectorStore`.
+- `momo-storage` owns SQLite application persistence and the Turso-backed
+  `NsgVectorStore`.
 - `momo-memory` implements DMW, NSG, retrieval, lifecycle maintenance, patch
   validation, and MO State.
 - `momo-moc` implements verified MOC containers.
@@ -31,15 +32,17 @@ cargo doc --workspace --all-features --no-deps
 - `momo-config` parses and serializes portable runtime configuration.
 - `momo-server` exposes Core over a loopback HTTP/SSE interface.
 
-## Vector storage
+## Storage layout
 
-`NsgVectorStore` isolates vector persistence and ranking from the rest of Core.
-Turso means the standalone database library selected for the vector database
-backend.
+Runtime state is intentionally split between `momo.sqlite3` (SQLx/SQLite
+application records) and `nsg-vectors.db` (the standalone Turso database used
+for NSG vector indexes). DMW and NSG source documents remain in the filesystem.
 
-The local exact-ranking implementation defines deterministic validation
-semantics for scope identity, vector space, dimensions, source hashes, and stable
-ordering. Another backend must preserve those observable semantics.
+`NsgVectorStore` isolates Turso persistence and exact cosine ranking from the
+rest of Core. Its observable contract covers scope identity, vector space,
+dimensions, source hashes, and stable ordering. The index is disposable: the
+filesystem source documents are authoritative and MOC exports do not include
+the Turso database.
 
 ## Runtime data and secrets
 

@@ -3,6 +3,9 @@ Copyright 2026 ppisky and MOMO Core contributors
 
 This product is licensed under the Apache License, Version 2.0.
 
+This product uses the official Turso Rust database library, distributed under
+the MIT License: https://github.com/tursodatabase/turso
+
 This product includes reference copies and compatibility work based on the
 Character Card specifications maintained at:
 

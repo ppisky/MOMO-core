@@ -1,13 +1,119 @@
 use super::*;
 
-impl NsgVectorStore for LocalStore {
+const VECTOR_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS nsg_vectors (
+    scope_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    vector_space_id TEXT NOT NULL,
+    dimension INTEGER NOT NULL,
+    vector_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (scope_id, node_id, vector_space_id)
+);
+CREATE INDEX IF NOT EXISTS nsg_vectors_scope_space_idx
+    ON nsg_vectors(scope_id, vector_space_id);
+"#;
+
+impl TursoVectorStore {
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let path = path.as_ref();
+        let path = path
+            .to_str()
+            .ok_or_else(|| StorageError::InvalidTursoPath(path.display().to_string()))?;
+        Self::connect(path).await
+    }
+
+    pub async fn in_memory() -> Result<Self, StorageError> {
+        Self::connect(":memory:").await
+    }
+
+    async fn connect(path: &str) -> Result<Self, StorageError> {
+        let database = turso::Builder::new_local(path).build().await?;
+        database.connect()?.execute_batch(VECTOR_SCHEMA).await?;
+        Ok(Self { database })
+    }
+
+    pub async fn list_nsg_vectors(
+        &self,
+        scope_id: Uuid,
+        vector_space_id: &str,
+    ) -> Result<Vec<NsgVectorRecord>, StorageError> {
+        let connection = self.database.connect()?;
+        let mut rows = connection
+            .query(
+                "SELECT scope_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at \
+                 FROM nsg_vectors WHERE scope_id=?1 AND vector_space_id=?2",
+                (scope_id.to_string(), vector_space_id.to_owned()),
+            )
+            .await?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().await? {
+            records.push(nsg_vector_from_row(&row)?);
+        }
+        Ok(records)
+    }
+
+    pub async fn remove_nsg_vectors(
+        &self,
+        scope_id: Uuid,
+        vector_space_id: Option<&str>,
+    ) -> Result<u64, StorageError> {
+        let connection = self.database.connect()?;
+        let removed = if let Some(vector_space_id) = vector_space_id {
+            connection
+                .execute(
+                    "DELETE FROM nsg_vectors WHERE scope_id=?1 AND vector_space_id=?2",
+                    (scope_id.to_string(), vector_space_id.to_owned()),
+                )
+                .await?
+        } else {
+            connection
+                .execute(
+                    "DELETE FROM nsg_vectors WHERE scope_id=?1",
+                    (scope_id.to_string(),),
+                )
+                .await?
+        };
+        Ok(removed)
+    }
+}
+
+impl NsgVectorStore for TursoVectorStore {
     async fn upsert_nsg_vectors(&self, records: &[NsgVectorRecord]) -> Result<(), StorageError> {
         for record in records {
             validate_nsg_vector(record).map_err(StorageError::InvalidNsgVector)?;
         }
+        let connection = self.database.connect()?;
+        connection.execute("BEGIN IMMEDIATE", ()).await?;
         for record in records {
-            self.upsert_nsg_vector(record).await?;
+            let result = connection
+                .execute(
+                    r#"INSERT INTO nsg_vectors
+                      (scope_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at)
+                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                      ON CONFLICT(scope_id, node_id, vector_space_id) DO UPDATE SET
+                        source_hash=excluded.source_hash,
+                        dimension=excluded.dimension,
+                        vector_json=excluded.vector_json,
+                        created_at=excluded.created_at"#,
+                    turso::params![
+                        record.scope_id.to_string(),
+                        record.node_id.clone(),
+                        record.source_hash.clone(),
+                        record.vector_space_id.clone(),
+                        record.dimension as i64,
+                        serde_json::to_string(&record.vector)?,
+                        record.created_at.to_rfc3339(),
+                    ],
+                )
+                .await;
+            if let Err(error) = result {
+                let _ = connection.execute("ROLLBACK", ()).await;
+                return Err(error.into());
+            }
         }
+        connection.execute("COMMIT", ()).await?;
         Ok(())
     }
 
@@ -77,7 +183,7 @@ impl NsgVectorStore for LocalStore {
     }
 }
 
-pub(super) fn validate_nsg_vector(record: &NsgVectorRecord) -> Result<(), String> {
+fn validate_nsg_vector(record: &NsgVectorRecord) -> Result<(), String> {
     if record.node_id.trim().is_empty()
         || record.source_hash.len() != 64
         || !record
@@ -133,20 +239,18 @@ fn cosine_similarity(left: &[f64], right: &[f64]) -> Option<f64> {
     (left_norm > 0.0 && right_norm > 0.0).then(|| dot / (left_norm.sqrt() * right_norm.sqrt()))
 }
 
-pub(super) fn nsg_vector_from_row(row: &SqliteRow) -> Result<NsgVectorRecord, StorageError> {
-    let scope_id = Uuid::parse_str(row.try_get("scope_id")?)?;
-    let vector: Vec<f64> = serde_json::from_str(row.try_get("vector_json")?)?;
+fn nsg_vector_from_row(row: &turso::Row) -> Result<NsgVectorRecord, StorageError> {
+    let vector: Vec<f64> = serde_json::from_str(&row.get::<String>(5)?)?;
+    let dimension = usize::try_from(row.get::<i64>(4)?)
+        .map_err(|_| StorageError::InvalidNsgVector("invalid dimension".to_owned()))?;
     let record = NsgVectorRecord {
-        scope_id,
-        node_id: row.try_get("node_id")?,
-        source_hash: row.try_get("source_hash")?,
-        vector_space_id: row.try_get("vector_space_id")?,
-        dimension: usize::try_from(row.try_get::<i64, _>("dimension")?)
-            .map_err(|_| StorageError::InvalidNsgVector("invalid dimension".to_owned()))?,
+        scope_id: Uuid::parse_str(&row.get::<String>(0)?)?,
+        node_id: row.get(1)?,
+        source_hash: row.get(2)?,
+        vector_space_id: row.get(3)?,
+        dimension,
         vector,
-        created_at: DateTime::parse_from_rfc3339(&row.try_get::<String, _>("created_at")?)
-            .map_err(StorageError::Timestamp)?
-            .with_timezone(&Utc),
+        created_at: DateTime::parse_from_rfc3339(&row.get::<String>(6)?)?.with_timezone(&Utc),
     };
     validate_nsg_vector(&record).map_err(StorageError::InvalidNsgVector)?;
     Ok(record)

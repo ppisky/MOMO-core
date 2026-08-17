@@ -7,7 +7,6 @@ async fn migrated_schema_uses_scope_id_exclusively() {
         "PRAGMA table_info(character_cards)",
         "PRAGMA table_info(conversations)",
         "PRAGMA table_info(memory_patch_reviews)",
-        "PRAGMA table_info(nsg_vectors)",
     ] {
         let columns = sqlx::query(table_info_sql)
             .fetch_all(&store.pool)
@@ -19,6 +18,11 @@ async fn migrated_schema_uses_scope_id_exclusively() {
         assert!(columns.iter().any(|column| column == "scope_id"));
         assert!(!columns.iter().any(|column| column == "owner_id"));
     }
+    let vector_columns = sqlx::query("PRAGMA table_info(nsg_vectors)")
+        .fetch_all(&store.pool)
+        .await
+        .expect("legacy vector table info");
+    assert!(vector_columns.is_empty());
 }
 use momo_domain::new_id;
 
@@ -597,7 +601,7 @@ async fn staged_objects_can_move_from_guest_to_account_scope() {
 
 #[tokio::test]
 async fn nsg_vectors_are_scope_and_space_isolated_and_validate_input() {
-    let store = LocalStore::in_memory().await.expect("store");
+    let store = TursoVectorStore::in_memory().await.expect("store");
     let scope = new_id();
     let record = NsgVectorRecord {
         scope_id: scope,
@@ -608,7 +612,10 @@ async fn nsg_vectors_are_scope_and_space_isolated_and_validate_input() {
         vector: vec![0.1, 0.2, 0.3],
         created_at: Utc::now(),
     };
-    store.upsert_nsg_vector(&record).await.expect("save vector");
+    store
+        .upsert_nsg_vectors(std::slice::from_ref(&record))
+        .await
+        .expect("save vector");
     assert_eq!(
         store
             .list_nsg_vectors(scope, "provider|model|3")
@@ -630,14 +637,14 @@ async fn nsg_vectors_are_scope_and_space_isolated_and_validate_input() {
         ..record
     };
     assert!(matches!(
-        store.upsert_nsg_vector(&invalid).await,
+        store.upsert_nsg_vectors(&[invalid]).await,
         Err(StorageError::InvalidNsgVector(_))
     ));
 }
 
 #[tokio::test]
 async fn exact_vector_ranking_filters_stale_records_and_is_deterministic() {
-    let store = LocalStore::in_memory().await.expect("store");
+    let store = TursoVectorStore::in_memory().await.expect("store");
     let scope = new_id();
     let now = Utc::now();
     let records = [

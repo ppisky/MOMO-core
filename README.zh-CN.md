@@ -16,7 +16,7 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 - Dual-Mem Wiki（DMW）长期记忆
 - Narrative Semantic Graph（NSG）
 - MO State 编译
-- 本地 SQLite 持久化
+- SQLite 业务存储与独立 Turso 向量存储
 - OpenAI-compatible completion 与流式输出
 - capability discovery 与上下文预算
 - 向量存储契约与确定性检索
@@ -41,17 +41,25 @@ CCv2/CCv3 JSON 导出。未映射的外部字段作为来源元数据保留，�
 
 - `momo-core`：编排与面向调用方的 Rust API
 - `momo-domain`：共享领域类型
-- `momo-storage`：本地持久化与向量存储契约
+- `momo-storage`：SQLite 业务持久化与 Turso 向量存储
 - `momo-memory`：DMW、NSG、检索与 MO State
 - `momo-moc`：MOC 容器
 - `momo-crypto`：私有容器加密
 - `momo-config`：可移植运行配置
 - `momo-server`：本地 HTTP/SSE 接口
 
-## 向量存储
+## 数据存储
 
-`NsgVectorStore` 定义向量存储边界。MOMO 文档中的 Turso 始终指选作向量数据库后端的
-独立数据库库。当前源码同时保留测试使用的确定性本地精确排序实现。
+Core 明确使用两个独立数据库，而不是把全部数据放进同一个 SQLite 文件：
+
+- `momo.sqlite3` 由 SQLx/SQLite 管理，保存角色、会话、消息、删除记录、Patch Review
+  与可移植元数据等业务数据；
+- `nsg-vectors.db` 由官方 `turso` Rust 库管理，只保存 NSG 向量索引。
+
+DMW 与 NSG 的 YAML/Markdown 源文档仍位于 `memory/scopes/<scope_id>`，是记忆与语义图
+的可移植事实来源。Turso 中的向量按来源哈希和向量空间校验，是可从源文档重新生成的
+缓存，不进入 MOC。`NsgVectorStore` 只是隔离 Turso 实现细节的内部接口，不代表第三套
+数据库。升级到 0.3.2 时，旧 SQLite `nsg_vectors` 表会被删除，宿主应按需重建向量缓存。
 
 ## Scope 标识
 
@@ -78,5 +86,4 @@ Issue 讨论。参与前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 
-Apache License 2.0。参见 [LICENSE](LICENSE)、[NOTICE](NOTICE) 与
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
+Apache License 2.0。参见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。

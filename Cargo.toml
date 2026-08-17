@@ -53,6 +53,7 @@ tower-http = { version = "0.5.2", features = ["trace"] }
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+turso = { version = "0.8.0-pre.4", default-features = false }
 uuid = { version = "1.24.0", features = ["v4", "v7", "serde"] }
 unicode-normalization = "0.1.25"
 url = "2.5.8"

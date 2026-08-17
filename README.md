@@ -17,7 +17,7 @@ local HTTP interface in one workspace.
 - Dual-Mem Wiki (DMW) long-term memory
 - Narrative Semantic Graph (NSG)
 - MO State compilation
-- local SQLite persistence
+- SQLite application storage and a separate Turso vector store
 - OpenAI-compatible completion and streaming
 - capability discovery and context budgeting
 - vector-store contracts and deterministic retrieval
@@ -45,19 +45,31 @@ for pinned sources, terminology, and implementation status.
 
 - `momo-core`: orchestration and client-facing Rust APIs
 - `momo-domain`: shared domain types
-- `momo-storage`: local persistence and vector-store contracts
+- `momo-storage`: SQLite application persistence and Turso vector storage
 - `momo-memory`: DMW, NSG, retrieval, and MO State
 - `momo-moc`: MOC containers
 - `momo-crypto`: encrypted private containers
 - `momo-config`: portable runtime configuration
 - `momo-server`: local HTTP/SSE interface
 
-## Vector storage
+## Data storage
 
-`NsgVectorStore` defines the vector-storage boundary. In MOMO documentation,
-Turso always means the standalone database library selected for the vector
-database backend. The current source tree also contains a deterministic local
-exact-ranking implementation used by the test suite.
+Core deliberately uses two independent databases instead of putting all data
+in one SQLite file:
+
+- `momo.sqlite3`, managed through SQLx/SQLite, stores application data such as
+  characters, conversations, messages, deletion state, patch reviews, and
+  portable metadata;
+- `nsg-vectors.db`, managed by the official `turso` Rust library, stores only
+  the NSG vector index.
+
+DMW and NSG YAML/Markdown documents under `memory/scopes/<scope_id>` remain the
+portable sources of truth. Turso vectors are validated by source hash and
+vector-space identity, can be rebuilt from those documents, and are not stored
+in MOC files. `NsgVectorStore` is only the internal boundary that keeps Turso
+details out of the rest of Core; it is not a third database. When upgrading to
+0.3.2, the legacy SQLite `nsg_vectors` table is removed and the host should
+rebuild the vector cache when needed.
 
 ## Scope identity
 
@@ -86,5 +98,4 @@ are also open; substantial changes should preferably begin with an Issue. Read
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE), [NOTICE](NOTICE), and
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

@@ -1,4 +1,3 @@
-use super::vector::{nsg_vector_from_row, validate_nsg_vector};
 use super::*;
 
 impl LocalStore {
@@ -29,95 +28,6 @@ impl LocalStore {
     #[must_use]
     pub const fn pool(&self) -> &SqlitePool {
         &self.pool
-    }
-
-    pub async fn upsert_nsg_vector(&self, record: &NsgVectorRecord) -> Result<(), StorageError> {
-        validate_nsg_vector(record).map_err(StorageError::InvalidNsgVector)?;
-        sqlx::query(
-            r#"INSERT INTO nsg_vectors
-              (scope_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(scope_id, node_id, vector_space_id) DO UPDATE SET
-                source_hash=excluded.source_hash,
-                dimension=excluded.dimension,
-                vector_json=excluded.vector_json,
-                created_at=excluded.created_at"#,
-        )
-        .bind(record.scope_id.to_string())
-        .bind(&record.node_id)
-        .bind(&record.source_hash)
-        .bind(&record.vector_space_id)
-        .bind(record.dimension as i64)
-        .bind(serde_json::to_string(&record.vector)?)
-        .bind(record.created_at.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn list_nsg_vectors(
-        &self,
-        scope_id: Uuid,
-        vector_space_id: &str,
-    ) -> Result<Vec<NsgVectorRecord>, StorageError> {
-        let rows = sqlx::query(
-            "SELECT scope_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at \
-             FROM nsg_vectors WHERE scope_id=? AND vector_space_id=?",
-        )
-        .bind(scope_id.to_string())
-        .bind(vector_space_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter().map(nsg_vector_from_row).collect()
-    }
-
-    pub async fn remove_nsg_vectors(
-        &self,
-        scope_id: Uuid,
-        vector_space_id: Option<&str>,
-    ) -> Result<u64, StorageError> {
-        let result = if let Some(vector_space_id) = vector_space_id {
-            sqlx::query("DELETE FROM nsg_vectors WHERE scope_id=? AND vector_space_id=?")
-                .bind(scope_id.to_string())
-                .bind(vector_space_id)
-                .execute(&self.pool)
-                .await?
-        } else {
-            sqlx::query("DELETE FROM nsg_vectors WHERE scope_id=?")
-                .bind(scope_id.to_string())
-                .execute(&self.pool)
-                .await?
-        };
-        Ok(result.rows_affected())
-    }
-
-    pub async fn rank_nsg_vectors(
-        &self,
-        scope_id: Uuid,
-        vector_space_id: &str,
-        query_vector: &[f64],
-        current_hashes: &HashMap<String, String>,
-        limit: usize,
-    ) -> Result<Vec<String>, StorageError> {
-        <Self as NsgVectorStore>::rank_nsg_vectors(
-            self,
-            scope_id,
-            vector_space_id,
-            query_vector,
-            current_hashes,
-            limit,
-        )
-        .await
-    }
-
-    pub async fn nsg_vector_status(
-        &self,
-        scope_id: Uuid,
-        vector_space_id: &str,
-        current_hashes: &HashMap<String, String>,
-    ) -> Result<NsgVectorStatus, StorageError> {
-        <Self as NsgVectorStore>::nsg_vector_status(self, scope_id, vector_space_id, current_hashes)
-            .await
     }
 
     pub async fn save_character(&self, card: &CharacterCard) -> Result<(), StorageError> {

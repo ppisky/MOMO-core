@@ -2,7 +2,7 @@ use std::{collections::HashMap, env, time::Instant};
 
 use chrono::Utc;
 use momo_domain::new_id;
-use momo_storage::{LocalStore, NsgVectorRecord, NsgVectorStore};
+use momo_storage::{NsgVectorRecord, NsgVectorStore, TursoVectorStore};
 
 const DEFAULT_NODE_COUNT: usize = 5_000;
 const DEFAULT_DIMENSION: usize = 384;
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|record| (record.node_id.clone(), record.source_hash.clone()))
         .collect::<HashMap<_, _>>();
     let query = deterministic_vector(node_count, dimension);
-    let store = LocalStore::in_memory().await?;
+    let store = TursoVectorStore::in_memory().await?;
 
     let write_started = Instant::now();
     store.upsert_nsg_vectors(&records).await?;

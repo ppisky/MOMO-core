@@ -17,17 +17,23 @@ Embedding generation remains a caller responsibility. The caller supplies the
 vector-space identifier, query vector, and source vectors; Core validates and
 uses them through the storage contract.
 
-## Turso backend
+## Two-database runtime layout
 
-Turso in MOMO documentation means the standalone database library. It is the
-selected vector-database backend and must be integrated through
-`NsgVectorStore`, so database-specific details do not leak into memory, MOC, or
-client-facing contracts.
+MOMO Core uses two database files with different responsibilities:
 
-The current source tree also contains `LocalStore` exact cosine ranking. That
-path supplies deterministic compatibility semantics and test coverage while a
-Turso adapter uses the same observable contract. It must not be described as a
-different vector-database product.
+| File | Engine | Contents |
+| --- | --- | --- |
+| `momo.sqlite3` | SQLx/SQLite | characters, conversations, messages, deletion state, patch reviews, and portable metadata |
+| `nsg-vectors.db` | standalone Turso Rust library | NSG vector records and their source-hash/vector-space metadata |
+
+`TursoVectorStore` is the production `NsgVectorStore` implementation. It uses
+the standalone Turso engine in-process; it does not require Turso Cloud or
+network credentials. Exact cosine ranking is deterministic and runs over the
+records read from the Turso database.
+
+The `NsgVectorStore` trait is an internal boundary so Turso-specific details do
+not leak into memory, MOC, or client-facing contracts. It does not denote an
+additional data store.
 
 ## Required behavior
 
@@ -43,10 +49,12 @@ An implementation MUST:
 
 MOC exports therefore carry DMW and NSG source documents, not vector indexes.
 An index may be rebuilt from those sources and the selected embedding model.
+Migration `0014_remove_sqlite_vector_cache.sql` removes the pre-0.3.2 vector
+table from `momo.sqlite3`; its cache records are deliberately not migrated.
 
 ## Current validation baseline
 
-The exact-ranking tests cover scope isolation, vector-space isolation, input
-validation, stale hashes, status reporting, cosine ranking, and deterministic
-ties. The included benchmark is a local regression tool, not a product-level
-performance guarantee.
+The Turso-backed exact-ranking tests cover scope isolation, vector-space
+isolation, input validation, stale hashes, status reporting, cosine ranking,
+and deterministic ties. The included benchmark is a local regression tool,
+not a product-level performance guarantee.

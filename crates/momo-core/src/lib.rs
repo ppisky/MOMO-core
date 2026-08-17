@@ -10,7 +10,7 @@ mod portable;
 use std::path::{Path, PathBuf};
 
 use momo_memory::MemoryWorkspace;
-use momo_storage::{LocalStore, StorageError};
+use momo_storage::{LocalStore, StorageError, TursoVectorStore};
 use thiserror::Error;
 
 pub use capability::{
@@ -55,6 +55,7 @@ pub enum CoreError {
 pub struct MomoCore {
     data_dir: PathBuf,
     store: LocalStore,
+    vector_store: TursoVectorStore,
 }
 
 impl MomoCore {
@@ -62,12 +63,14 @@ impl MomoCore {
         let data_dir = data_dir.as_ref();
         std::fs::create_dir_all(data_dir).map_err(momo_memory::MemoryError::from)?;
         let store = LocalStore::open(data_dir.join("momo.sqlite3")).await?;
+        let vector_store = TursoVectorStore::open(data_dir.join("nsg-vectors.db")).await?;
         migrate_scope_directory(data_dir)?;
         std::fs::create_dir_all(data_dir.join("memory/scopes"))
             .map_err(momo_memory::MemoryError::from)?;
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
             store,
+            vector_store,
         })
     }
 
@@ -82,8 +85,8 @@ impl MomoCore {
     }
 
     #[must_use]
-    pub const fn vector_store(&self) -> &LocalStore {
-        &self.store
+    pub const fn vector_store(&self) -> &TursoVectorStore {
+        &self.vector_store
     }
 
     pub fn memory_for_scope(
@@ -126,6 +129,7 @@ mod tests {
             .await
             .expect("initialize core");
         assert!(core.data_dir().join("momo.sqlite3").exists());
+        assert!(core.data_dir().join("nsg-vectors.db").exists());
         let scope_id = momo_domain::new_id();
         core.memory_for_scope(scope_id).expect("memory");
         assert!(
