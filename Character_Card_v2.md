@@ -358,9 +358,9 @@ MOMO-STD-0001 (Character Card Specification v2.0.0) 确立了一个简单、可�
 
 固定来源快照与字段边界见
 [`docs/character_card_compatibility.md`](docs/character_card_compatibility.md)。本附录描述的是
-转换器应遵循的设计规则，不代表当前 `momo-core` 已实现外部格式解析器。当前版本只实现
-MOMO Character Card v2 在 MOC v2 中的导入导出；CCv2 JSON/PNG 与 CCv3
-JSON/PNG/CHARX 的直接导入导出仍未实现。
+转换器应遵循的设计规则。当前 `momo-core` 已实现 CCv1/v2 JSON、PNG 与 CCv3
+JSON、PNG/APNG、CHARX 导入，以及 CCv2/CCv3 JSON 导出。PNG/APNG 与 CHARX 中的
+多媒体资产不会进入 MOMO 核心角色卡；字段与警告作为来源元数据保存并随 MOC 往返。
 
 ### A.1 格式识别
 

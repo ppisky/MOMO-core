@@ -174,6 +174,9 @@ pub async fn export_moc(
     if selection.characters {
         export_characters(core, staging.path(), scope_id, selection.character_id).await?;
         modules.push(("characters".to_owned(), PathBuf::from("characters")));
+        if staging.path().join("tavern_compat").exists() {
+            modules.push(("tavern_compat".to_owned(), PathBuf::from("tavern_compat")));
+        }
     }
     if selection.conversations {
         export_conversations(core, staging.path(), scope_id).await?;
@@ -297,6 +300,7 @@ pub async fn import_moc_with_passphrase(
                     | "conversations"
                     | "memory"
                     | "semantic_graph"
+                    | "tavern_compat"
                     | "encrypted-container"
             )
         })
@@ -326,6 +330,7 @@ pub async fn import_moc_with_passphrase(
         }
     }
     import_characters(core, extracted, scope_id, mode, &mut report).await?;
+    import_external_character_sources(core, extracted, scope_id).await?;
     import_conversations(core, extracted, scope_id, mode, &mut report).await?;
     import_memory(core, extracted, scope_id, mode, &mut report)?;
     import_semantic_graph(core, extracted, scope_id, mode, &mut report)?;
@@ -496,6 +501,20 @@ async fn export_characters(
         if let Some(opening) = card.opening_markdown {
             atomic_write(&directory.join("opening.md"), opening.as_bytes())?;
         }
+        if let Some(external) = core
+            .store()
+            .portable_metadata("external_character_card", &card.id.to_string())
+            .await?
+        {
+            serde_json::from_str::<serde_json::Value>(&external).map_err(|error| {
+                PortableError::InvalidData(format!(
+                    "stored external character metadata is invalid: {error}"
+                ))
+            })?;
+            let compat_directory = root.join("tavern_compat").join(card.id.to_string());
+            fs::create_dir_all(&compat_directory)?;
+            atomic_write(&compat_directory.join("source.json"), external.as_bytes())?;
+        }
     }
     Ok(())
 }
@@ -624,6 +643,43 @@ async fn import_characters(
             .save_portable_metadata("character", &id.to_string(), &portable_metadata)
             .await?;
         report.characters_imported += 1;
+    }
+    Ok(())
+}
+
+async fn import_external_character_sources(
+    core: &MomoCore,
+    root: &Path,
+    scope_id: Uuid,
+) -> Result<(), PortableError> {
+    let directory = root.join("tavern_compat");
+    if !directory.exists() {
+        return Ok(());
+    }
+    let character_ids = core
+        .store()
+        .list_characters_for_scope(scope_id)
+        .await?
+        .into_iter()
+        .map(|character| character.id)
+        .collect::<HashSet<_>>();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            return Err(PortableError::InvalidData(
+                "tavern_compat entries must be character directories".to_owned(),
+            ));
+        }
+        let id = Uuid::parse_str(&entry.file_name().to_string_lossy())?;
+        if !character_ids.contains(&id) {
+            return Err(PortableError::InvalidData(format!(
+                "tavern_compat source references unknown character {id}"
+            )));
+        }
+        let source = read_external_source_asset(&entry.path().join("source.json"))?;
+        core.store()
+            .save_portable_metadata("external_character_card", &id.to_string(), &source)
+            .await?;
     }
     Ok(())
 }
@@ -899,6 +955,21 @@ fn read_markdown_asset(root: &Path, relative: &Path) -> Result<String, PortableE
         )));
     }
     Ok(text.to_owned())
+}
+
+fn read_external_source_asset(path: &Path) -> Result<String, PortableError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 2 * 1024 * 1024
+    {
+        return Err(PortableError::InvalidData(
+            "tavern_compat source.json has an invalid type or size".to_owned(),
+        ));
+    }
+    let source = fs::read_to_string(path)?;
+    serde_json::from_str::<serde_json::Value>(&source).map_err(|error| {
+        PortableError::InvalidData(format!("tavern_compat source.json is invalid: {error}"))
+    })?;
+    Ok(source)
 }
 
 fn contains_frontmatter(text: &str) -> bool {

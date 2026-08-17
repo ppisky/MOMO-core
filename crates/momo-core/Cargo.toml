@@ -5,6 +5,8 @@ edition.workspace = true
 license = "Apache-2.0"
 
 [dependencies]
+base64.workspace = true
+crc32fast.workspace = true
 futures-util.workspace = true
 chrono.workspace = true
 language-tags.workspace = true
@@ -29,6 +31,7 @@ walkdir.workspace = true
 wuff.workspace = true
 yaml_serde.workspace = true
 zeroize.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

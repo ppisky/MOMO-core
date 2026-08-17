@@ -1,4 +1,4 @@
-# MOMO Core 0.3.1
+# MOMO Core
 
 [简体中文](README.zh-CN.md)
 
@@ -10,6 +10,9 @@ local HTTP interface in one workspace.
 ## Capabilities
 
 - independent MOMO Character Card v2 (`character.toml` + Markdown)
+- Character Card v1/v2 JSON and PNG import
+- Character Card v3 JSON, PNG/APNG, and CHARX import
+- Character Card v2/v3 JSON export with source-field preservation
 - MOC v2 import and export
 - Dual-Mem Wiki (DMW) long-term memory
 - Narrative Semantic Graph (NSG)
@@ -28,8 +31,9 @@ loopback HTTP/SSE interface for local applications.
 MOMO Character Card v2 is an independent format defined by this repository in
 [`Character_Card_v2.md`](Character_Card_v2.md). Its “v2” does not mean the
 external `chara_card_v2` JSON/PNG format. Core currently imports and exports the
-MOMO format inside MOC v2; direct import or export of external CCv2 JSON/PNG and
-CCv3 JSON/PNG/CHARX is not implemented.
+MOMO format inside MOC v2. It also imports external CCv1/v2 JSON and PNG plus
+CCv3 JSON, PNG/APNG, and CHARX, and exports CCv2/CCv3 JSON. Unsupported external
+fields are retained as source metadata and survive MOC round trips.
 
 Compatibility design for external formats is based specifically on
 [Character Card v2](https://github.com/malfoyslastname/character-card-spec-v2)
@@ -53,7 +57,7 @@ for pinned sources, terminology, and implementation status.
 `NsgVectorStore` defines the vector-storage boundary. In MOMO documentation,
 Turso always means the standalone database library selected for the vector
 database backend. The current source tree also contains a deterministic local
-exact-ranking implementation used by the 0.3.1 test suite.
+exact-ranking implementation used by the test suite.
 
 ## Scope identity
 
@@ -71,8 +75,8 @@ cargo test --workspace --all-features
 cargo doc --workspace --all-features --no-deps
 ```
 
-See [Core 0.3.1 status](docs/core_progress_0_3_1.md) and the
-[development guide](docs/development.en.md).
+See the [development guide](docs/development.en.md) and
+[character-card compatibility profile](docs/character_card_compatibility.md).
 
 ## Contributing
 
@@ -82,5 +86,5 @@ are also open; substantial changes should preferably begin with an Issue. Read
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) and
+Apache License 2.0. See [LICENSE](LICENSE), [NOTICE](NOTICE), and
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

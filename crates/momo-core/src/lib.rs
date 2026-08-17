@@ -2,6 +2,7 @@
 
 pub mod api;
 mod capability;
+mod character_compat;
 mod context;
 mod gateway;
 mod portable;
@@ -16,6 +17,10 @@ pub use capability::{
     CapabilityDiscoveryDocument, CapabilityError, CapabilityProfile, CapabilityRegistry,
     CapabilitySource, MAX_DISCOVERY_TTL_SECONDS, ResolvedCapability, TokenizerProfile,
     fetch_capability_document,
+};
+pub use character_compat::{
+    CharacterCompatError, ExternalCharacterExportFormat, ExternalCharacterImport,
+    export_external_character, import_external_character,
 };
 pub use context::{
     ContextBudget, ContextRequest, ContextSections, PreparedContext, estimate_text_tokens,

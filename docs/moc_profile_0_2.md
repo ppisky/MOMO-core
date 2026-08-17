@@ -14,15 +14,16 @@
 - Manifest 包含包类型、模块定义、依赖、导入顺序、逐文件 SHA-256、可选 sequence
   范围和删除记录结构。
 - 模块 ID 为 `config`、`characters`、`conversations`、`memory`、
-  `semantic_graph`、`encrypted-container`。
+  `semantic_graph`、`tavern_compat`、`encrypted-container`。
 - DMW/NSG 按 `lore/`、`rules/`、`archive/lore/`、`archive/rules/` 前缀分区。
 - MOMO 独立 Character Card v2 导入导出及可选 `opening.md`。
+- 外部角色卡原始字段按角色 ID 保存在 `tavern_compat` 模块，并随 MOC 往返。
 - 非 v2 容器、非 MOMO v2 角色卡元数据和非规范模块 ID 会被拒绝。
 - 未知模块安全解包并在报告中列出，不写入已知业务数据。
 - 更高格式版本明确拒绝。
 - tar 路径、重复条目、条目类型、摘要、数量和总大小限制保持启用。
 - 私有 MOC 使用 `private/payload.enc` 单文件封装和 512 MiB 上限。
-- 0.3.1 的 `export_moc_json` 通过一个结构化请求文档接收输出路径、`scope_id`、
+- `export_moc_json` 通过一个结构化请求文档接收输出路径、`scope_id`、
   模块选择、设置与可选密码，不再暴露九个位置参数。
 
 ## 当前实现范围
@@ -36,5 +37,5 @@
 
 测试覆盖 v2 创建与解包、格式版本拒绝、非规范模块 ID、未知模块报告、重复路径、路径
 穿越、摘要、资源上限及 MOMO Character Card v2 资源验证。外部 CCv2/CCv3 的直接
-导入导出不在当前实现范围内，详见
+JSON/PNG/CHARX 导入及 CCv2/CCv3 JSON 导出由角色卡兼容层实现，详见
 [`character_card_compatibility.md`](character_card_compatibility.md)。

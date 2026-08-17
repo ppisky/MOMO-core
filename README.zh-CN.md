@@ -1,4 +1,4 @@
-# MOMO Core 0.3.1
+# MOMO Core
 
 [English](README.md)
 
@@ -9,6 +9,9 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 ## 主要能力
 
 - MOMO 独立 Character Card v2（`character.toml` + Markdown）
+- Character Card v1/v2 JSON 与 PNG 导入
+- Character Card v3 JSON、PNG/APNG 与 CHARX 导入
+- 保留来源字段的 Character Card v2/v3 JSON 导出
 - MOC v2 导入与导出
 - Dual-Mem Wiki（DMW）长期记忆
 - Narrative Semantic Graph（NSG）
@@ -26,7 +29,8 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 MOMO Character Card v2 是由本仓库定义的独立角色卡格式，规范见
 [`Character_Card_v2.md`](Character_Card_v2.md)。其中的“v2”不表示外部生态的
 `chara_card_v2` JSON/PNG 格式。当前 Core 实现的是 MOMO 格式随 MOC v2 的导入导出；
-尚未实现外部 CCv2 JSON/PNG 或 CCv3 JSON/PNG/CHARX 的直接导入导出。
+同时支持外部 CCv1/v2 JSON、PNG，以及 CCv3 JSON、PNG/APNG、CHARX 的导入，并支持
+CCv2/CCv3 JSON 导出。未映射的外部字段作为来源元数据保留，也会随 MOC 往返。
 
 外部格式兼容设计的规范来源固定为
 [Character Card v2](https://github.com/malfoyslastname/character-card-spec-v2) 与
@@ -47,7 +51,7 @@ MOMO Character Card v2 是由本仓库定义的独立角色卡格式，规范见
 ## 向量存储
 
 `NsgVectorStore` 定义向量存储边界。MOMO 文档中的 Turso 始终指选作向量数据库后端的
-独立数据库库。当前源码同时保留 0.3.1 测试使用的确定性本地精确排序实现。
+独立数据库库。当前源码同时保留测试使用的确定性本地精确排序实现。
 
 ## Scope 标识
 
@@ -64,8 +68,8 @@ cargo test --workspace --all-features
 cargo doc --workspace --all-features --no-deps
 ```
 
-参见 [Core 0.3.1 状态](docs/core_progress_0_3_1.md)与
-[开发指南](docs/development.en.md)。
+参见[开发指南](docs/development.en.md)与
+[角色卡兼容边界](docs/character_card_compatibility.md)。
 
 ## 参与方式
 
@@ -74,5 +78,5 @@ Issue 讨论。参与前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 
-Apache License 2.0。参见 [LICENSE](LICENSE) 与
+Apache License 2.0。参见 [LICENSE](LICENSE)、[NOTICE](NOTICE) 与
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

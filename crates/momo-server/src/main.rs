@@ -65,6 +65,19 @@ struct CreateCharacterRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportExternalCharacterRequest {
+    input_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportExternalCharacterRequest {
+    output_path: String,
+    format: String,
+}
+
+#[derive(Deserialize)]
 struct ChatRequest {
     base_url: String,
     api_key: Option<String>,
@@ -351,6 +364,14 @@ fn api_routes() -> Router<AppState> {
         .route("/health", get(health))
         .route("/characters", get(list_characters).post(create_character))
         .route(
+            "/characters/import-external",
+            post(import_external_character),
+        )
+        .route(
+            "/characters/:id/export-external",
+            post(export_external_character),
+        )
+        .route(
             "/characters/:id",
             put(update_character).delete(delete_character),
         )
@@ -449,6 +470,41 @@ async fn create_character(
             request.description,
             request.character_markdown,
             request.user_markdown,
+        )
+        .await,
+    )
+}
+
+async fn import_external_character(
+    State(state): State<AppState>,
+    Json(request): Json<ImportExternalCharacterRequest>,
+) -> Result<Json<Value>, ApiError> {
+    json_result(
+        simple::import_external_character_json(
+            json!({
+                "scope_id": state.scope_id,
+                "input_path": request.input_path,
+            })
+            .to_string(),
+        )
+        .await,
+    )
+}
+
+async fn export_external_character(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ExportExternalCharacterRequest>,
+) -> Result<Json<Value>, ApiError> {
+    json_result(
+        simple::export_external_character_json(
+            json!({
+                "scope_id": state.scope_id,
+                "character_id": id,
+                "output_path": request.output_path,
+                "format": request.format,
+            })
+            .to_string(),
         )
         .await,
     )
@@ -1113,6 +1169,81 @@ mod tests {
             .expect("removed owner_id response");
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
+        let external_path = data_dir.path().join("external-card.json");
+        std::fs::write(
+            &external_path,
+            serde_json::to_vec_pretty(&json!({
+                "spec": "chara_card_v2",
+                "spec_version": "2.0",
+                "data": {
+                    "name": "Imported external character",
+                    "description": "Imported description",
+                    "personality": "Careful",
+                    "scenario": "A contract test",
+                    "first_mes": "Hello from CCv2",
+                    "mes_example": "{{char}}: Hello",
+                    "creator_notes": "Keep this note",
+                    "system_prompt": "external runtime field",
+                    "post_history_instructions": "",
+                    "alternate_greetings": [],
+                    "tags": ["test"],
+                    "creator": "External creator",
+                    "character_version": "1.2.3",
+                    "extensions": {"contract": {"preserve": true}}
+                }
+            }))
+            .expect("external card JSON"),
+        )
+        .expect("external card fixture");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/characters/import-external")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"input_path": external_path}).to_string()))
+                    .expect("external import request"),
+            )
+            .await
+            .expect("external import response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let imported: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 128 * 1024)
+                .await
+                .expect("external import body"),
+        )
+        .expect("external import JSON");
+        assert_eq!(imported["source_format"], "ccv2_json");
+        assert_eq!(imported["character"]["name"], "Imported external character");
+        let imported_id = imported["character"]["id"]
+            .as_str()
+            .expect("imported character id");
+        let exported_path = data_dir.path().join("exported-card.json");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/v1/characters/{imported_id}/export-external"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "output_path": exported_path,
+                            "format": "ccv2_json"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("external export request"),
+            )
+            .await
+            .expect("external export response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let exported: Value =
+            serde_json::from_slice(&std::fs::read(exported_path).expect("exported external card"))
+                .expect("exported external JSON");
+        assert_eq!(exported["data"]["extensions"]["contract"]["preserve"], true);
+
         let response = app
             .clone()
             .oneshot(
@@ -1314,6 +1445,6 @@ mod tests {
                 .expect("list body"),
         )
         .expect("characters JSON");
-        assert_eq!(characters.as_array().map(Vec::len), Some(1));
+        assert_eq!(characters.as_array().map(Vec::len), Some(2));
     }
 }

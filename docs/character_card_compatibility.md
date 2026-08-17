@@ -1,6 +1,6 @@
 # 角色卡格式与兼容边界
 
-**状态：** Implementation Boundary
+**状态：** Implemented Profile
 **更新日期：** 2026-08-17
 
 ## 1. MOMO 独立角色卡
@@ -37,18 +37,34 @@ TOML + Markdown 结构不是同一种线格式。
 | --- | --- |
 | MOMO Character Card v2 → MOC v2 | 已实现 |
 | MOC v2 → MOMO Character Card v2 | 已实现 |
-| 外部 CCv2 JSON/PNG → MOMO | 未实现；仅有转换设计 |
-| 外部 CCv3 JSON/PNG/CHARX → MOMO | 未实现；仅有转换设计 |
-| MOMO → 外部 CCv2/CCv3 | 未实现；设计上属于有损转换 |
+| 外部 CCv1/v2 JSON/PNG → MOMO | 已实现 |
+| 外部 CCv3 JSON/PNG/APNG/CHARX → MOMO | 已实现；CHARX 媒体资产不进入核心角色卡 |
+| MOMO → 外部 CCv2/CCv3 JSON | 已实现；无来源快照时为有损转换 |
+| MOMO → 外部 PNG/APNG/CHARX | 未实现；需要调用方提供媒体载体 |
+| 外部未知字段与运行时字段保留 | 已实现；作为来源元数据保存并随 MOC 往返 |
 
-因此，文档不得把“支持 MOMO Character Card v2”简写成可能被理解为“支持外部
-CCv2”的表述。只有实现并测试对应解析器、字段保留、安全限制和逆向导出后，才能声明
-对外部格式兼容。
+HTTP 接口使用 `POST /v1/characters/import-external` 导入本地文件，使用
+`POST /v1/characters/{id}/export-external` 导出 JSON；导出格式为 `ccv2_json` 或
+`ccv3_json`。导入器限制文件大小、校验 PNG chunk CRC、限制 CHARX 条目数，并拒绝
+格式标识不一致的输入。
+
+```json
+POST /v1/characters/import-external
+{"input_path":"D:/cards/example.charx"}
+```
+
+```json
+POST /v1/characters/<id>/export-external
+{"output_path":"D:/cards/example.json","format":"ccv3_json"}
+```
+
+路径由本机 `momo-server` 读取或写入；HTTP 客户端上传二进制文件不属于该接口。
 
 ## 4. English summary
 
 MOMO Character Card v2 is an independent TOML + Markdown format defined by
 MOMO-STD-0001. It is not the external `chara_card_v2` wire format. External
 compatibility design is based only on the two repositories pinned above.
-Current Core imports and exports the MOMO format through MOC v2; direct CCv2
-and CCv3 import/export is not implemented.
+Core imports CCv1/v2 JSON and PNG plus CCv3 JSON, PNG/APNG, and CHARX. It
+exports CCv2/CCv3 JSON and preserves external-only source fields through MOC
+round trips. Media-container export remains outside the current profile.

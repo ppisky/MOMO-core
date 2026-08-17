@@ -1,4 +1,5 @@
 mod capabilities;
+mod character_compat;
 mod chat;
 mod crypto;
 mod fonts;
@@ -9,6 +10,7 @@ mod portable;
 mod sync;
 
 pub use capabilities::*;
+pub use character_compat::*;
 pub use chat::*;
 pub use crypto::*;
 pub use fonts::*;

@@ -1,0 +1,18 @@
+MOMO Core
+Copyright 2026 ppisky and MOMO Core contributors
+
+This product is licensed under the Apache License, Version 2.0.
+
+This product includes reference copies and compatibility work based on the
+Character Card specifications maintained at:
+
+  https://github.com/malfoyslastname/character-card-spec-v2
+  https://github.com/kwaroran/character-card-spec-v3
+
+The Character Card v3 specification is Copyright (c) 2024 Kwaroran and is
+available under the MIT License. See docs/character-card-spec-v3.LICENSE.
+
+The Character Card v1/v2 specification repository did not declare a license
+when its reference snapshots were verified. Those reference documents remain
+the material of their upstream authors and are not relicensed under the Apache
+License, Version 2.0.

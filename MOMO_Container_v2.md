@@ -107,6 +107,11 @@ All referenced assets are distinct, regular UTF-8 Markdown files below the
 character directory. Absolute paths, `..`, links, non-Markdown files, and
 frontmatter are rejected.
 
+External CCv1/v2/v3 source fields are not part of the MOMO character payload.
+When present, they use the separate `tavern_compat` module at
+`tavern_compat/<UUID>/source.json` so the core character definition remains
+independent while compatible exports can preserve upstream-only fields.
+
 ## 5. Package types and deletion records
 
 ### 5.1 Snapshot

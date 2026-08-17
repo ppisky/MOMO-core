@@ -81,6 +81,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+dependencies = [
+ "derive_arbitrary",
+]
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -524,6 +533,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -664,6 +684,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -1392,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "momo-config"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "momo-domain",
  "tempfile",
@@ -1402,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "momo-crypto"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1419,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "momo-domain"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "serde",
@@ -1429,7 +1450,7 @@ dependencies = [
 
 [[package]]
 name = "momo-memory"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "hex",
@@ -1444,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "momo-moc"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "hex",
@@ -1462,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "momo-server"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "axum",
  "momo_core",
@@ -1480,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "momo-storage"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "hex",
@@ -1496,9 +1517,11 @@ dependencies = [
 
 [[package]]
 name = "momo_core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
+ "base64",
  "chrono",
+ "crc32fast",
  "futures-util",
  "language-tags",
  "momo-config",
@@ -1522,6 +1545,7 @@ dependencies = [
  "wuff",
  "yaml_serde",
  "zeroize",
+ "zip",
 ]
 
 [[package]]
@@ -3499,6 +3523,25 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zip"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb2a05c7c36fde6c09b08576c9f7fb4cda705990f73b58fe011abf7dfb24168b"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
+]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12"
 
 [[package]]
 name = "zmij"
