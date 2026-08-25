@@ -22,6 +22,7 @@ use crate::MomoCore;
 const PRIVATE_MOC_AAD: &[u8] = b"momo-private-moc-v1";
 const PRIVATE_MOC_PAYLOAD: &str = "private/payload.enc";
 const PRIVATE_MOC_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const EXTERNAL_SOURCE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum PortableError {
@@ -514,6 +515,17 @@ async fn export_characters(
             let compat_directory = root.join("tavern_compat").join(card.id.to_string());
             fs::create_dir_all(&compat_directory)?;
             atomic_write(&compat_directory.join("source.json"), external.as_bytes())?;
+            crate::character_compat::export_preserved_charx_source(
+                core,
+                card.id,
+                &external,
+                &compat_directory.join("source.charx"),
+            )
+            .map_err(|error| {
+                PortableError::InvalidData(format!(
+                    "stored CHARX source cannot be exported: {error}"
+                ))
+            })?;
         }
     }
     Ok(())
@@ -677,6 +689,15 @@ async fn import_external_character_sources(
             )));
         }
         let source = read_external_source_asset(&entry.path().join("source.json"))?;
+        crate::character_compat::import_preserved_charx_source(
+            core,
+            id,
+            &source,
+            &entry.path().join("source.charx"),
+        )
+        .map_err(|error| {
+            PortableError::InvalidData(format!("MOC CHARX source cannot be imported: {error}"))
+        })?;
         core.store()
             .save_portable_metadata("external_character_card", &id.to_string(), &source)
             .await?;
@@ -959,7 +980,9 @@ fn read_markdown_asset(root: &Path, relative: &Path) -> Result<String, PortableE
 
 fn read_external_source_asset(path: &Path) -> Result<String, PortableError> {
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 2 * 1024 * 1024
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > EXTERNAL_SOURCE_MAX_BYTES
     {
         return Err(PortableError::InvalidData(
             "tavern_compat source.json has an invalid type or size".to_owned(),

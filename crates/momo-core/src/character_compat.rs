@@ -1,9 +1,10 @@
 //! Import and export adapters for the external Character Card v1/v2/v3 formats.
 
 use std::{
+    collections::HashSet,
     fs,
-    io::{Read, Write},
-    path::Path,
+    io::{Cursor, Read, Write},
+    path::{Path, PathBuf},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -12,16 +13,21 @@ use crc32fast::Hasher;
 use momo_domain::CharacterCard;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::MomoCore;
 
-const MAX_JSON_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_JSON_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CHARX_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_CHARX_ENTRY_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_CHARX_EXPANDED_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_CHARX_ENTRIES: usize = 10_000;
 const EXTERNAL_METADATA_CATEGORY: &str = "external_character_card";
+const CHARX_SOURCE_DIRECTORY: &str = "character-packages";
+const CHARX_SOURCE_FILE: &str = "source.charx";
 
 #[derive(Debug, Error)]
 pub enum CharacterCompatError {
@@ -63,6 +69,7 @@ impl ExternalCharacterSourceFormat {
 pub enum ExternalCharacterExportFormat {
     Ccv2Json,
     Ccv3Json,
+    Ccv3Charx,
 }
 
 impl std::str::FromStr for ExternalCharacterExportFormat {
@@ -72,8 +79,9 @@ impl std::str::FromStr for ExternalCharacterExportFormat {
         match value {
             "ccv2_json" => Ok(Self::Ccv2Json),
             "ccv3_json" => Ok(Self::Ccv3Json),
+            "ccv3_charx" => Ok(Self::Ccv3Charx),
             _ => Err(CharacterCompatError::Invalid(format!(
-                "unsupported export format {value:?}; expected ccv2_json or ccv3_json"
+                "unsupported export format {value:?}; expected ccv2_json, ccv3_json, or ccv3_charx"
             ))),
         }
     }
@@ -84,6 +92,19 @@ struct StoredExternalCharacter {
     source_format: ExternalCharacterSourceFormat,
     card: Value,
     warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    charx: Option<StoredCharxPackage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StoredCharxPackage {
+    schema_version: u8,
+    archive_sha256: String,
+    entry_count: usize,
+    asset_count: usize,
+    has_x_meta: bool,
+    has_module_risum: bool,
+    jpeg_zip_hybrid: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +123,15 @@ struct ParsedExternalCharacter {
     version: String,
     character_markdown: String,
     opening_markdown: Option<String>,
+    warnings: Vec<String>,
+    charx: Option<ParsedCharxPackage>,
+}
+
+#[derive(Debug)]
+struct ParsedCharxPackage {
+    bytes: Vec<u8>,
+    card_json: Vec<u8>,
+    info: StoredCharxPackage,
     warnings: Vec<String>,
 }
 
@@ -126,10 +156,14 @@ pub async fn import_external_character(
         updated_at: now,
     };
     core.store().stage_character(&character).await?;
+    if let Some(package) = &parsed.charx {
+        save_charx_source(core, character.id, &package.bytes)?;
+    }
     let stored = StoredExternalCharacter {
         source_format: parsed.format,
         card: parsed.card,
         warnings: parsed.warnings.clone(),
+        charx: parsed.charx.as_ref().map(|package| package.info.clone()),
     };
     core.store()
         .save_portable_metadata(
@@ -179,26 +213,45 @@ pub async fn export_external_character(
                 ExternalCharacterSourceFormat::Ccv3Json
                     | ExternalCharacterSourceFormat::Ccv3Png
                     | ExternalCharacterSourceFormat::Ccv3Charx,
-                ExternalCharacterExportFormat::Ccv3Json
+                ExternalCharacterExportFormat::Ccv3Json | ExternalCharacterExportFormat::Ccv3Charx
             )
         )
     });
     let source = preserved_source
         .then(|| stored.as_ref().map(|source| source.card.clone()))
         .flatten();
-    let value = match format {
-        ExternalCharacterExportFormat::Ccv2Json => export_ccv2(&character, source)?,
-        ExternalCharacterExportFormat::Ccv3Json => export_ccv3(&character, source)?,
+    let preserved_source_assets = match format {
+        ExternalCharacterExportFormat::Ccv2Json => {
+            let value = export_ccv2(&character, source)?;
+            atomic_write_json(output_path.as_ref(), &value)?;
+            false
+        }
+        ExternalCharacterExportFormat::Ccv3Json => {
+            let value = export_ccv3(&character, source)?;
+            atomic_write_json(output_path.as_ref(), &value)?;
+            false
+        }
+        ExternalCharacterExportFormat::Ccv3Charx => {
+            let value = export_ccv3(&character, source)?;
+            let source_archive = stored
+                .as_ref()
+                .and_then(|stored| stored.charx.as_ref())
+                .map(|info| load_charx_source(core, character_id, info))
+                .transpose()?;
+            write_charx(output_path.as_ref(), &value, source_archive.as_deref())?;
+            source_archive.is_some()
+        }
     };
-    atomic_write_json(output_path.as_ref(), &value)?;
     Ok(json!({
         "character_id": character_id,
         "format": match format {
             ExternalCharacterExportFormat::Ccv2Json => "ccv2_json",
             ExternalCharacterExportFormat::Ccv3Json => "ccv3_json",
+            ExternalCharacterExportFormat::Ccv3Charx => "ccv3_charx",
         },
         "output_path": output_path.as_ref(),
         "preserved_source_fields": preserved_source,
+        "preserved_source_assets": preserved_source_assets,
     }))
 }
 
@@ -230,22 +283,13 @@ fn parse_external_path(path: &Path) -> Result<ParsedExternalCharacter, Character
         }
         "charx" => {
             ensure_size(metadata.len(), MAX_CHARX_BYTES, "CHARX")?;
-            let json = read_charx_card(path)?;
+            let package = read_charx_package(path)?;
             let mut parsed = parse_external_json(
-                json.as_bytes(),
+                &package.card_json,
                 Some(ExternalCharacterSourceFormat::Ccv3Charx),
             )?;
-            if parsed
-                .card
-                .pointer("/data/assets")
-                .and_then(Value::as_array)
-                .is_some_and(|assets| !assets.is_empty())
-            {
-                parsed.warnings.push(
-                    "CHARX assets were not imported; card.json was preserved for round-trip metadata"
-                        .to_owned(),
-                );
-            }
+            parsed.warnings.extend(package.warnings.clone());
+            parsed.charx = Some(package);
             Ok(parsed)
         }
         _ => Err(CharacterCompatError::Invalid(format!(
@@ -372,6 +416,7 @@ fn parse_external_json(
         character_markdown,
         opening_markdown,
         warnings,
+        charx: None,
     })
 }
 
@@ -527,23 +572,377 @@ fn decode_png_json(encoded: &[u8]) -> Result<Vec<u8>, CharacterCompatError> {
     Ok(decoded)
 }
 
-fn read_charx_card(path: &Path) -> Result<String, CharacterCompatError> {
-    let file = fs::File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
+fn read_charx_package(path: &Path) -> Result<ParsedCharxPackage, CharacterCompatError> {
+    let bytes = fs::read(path)?;
+    parse_charx_package(bytes)
+}
+
+fn parse_charx_package(bytes: Vec<u8>) -> Result<ParsedCharxPackage, CharacterCompatError> {
+    ensure_size(bytes.len() as u64, MAX_CHARX_BYTES, "CHARX")?;
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes.as_slice()))?;
     if archive.len() > MAX_CHARX_ENTRIES {
         return Err(CharacterCompatError::Invalid(format!(
             "CHARX contains more than {MAX_CHARX_ENTRIES} entries"
         )));
     }
-    let mut card = archive.by_name("card.json")?;
-    if !card.is_file() || card.size() == 0 || card.size() > MAX_JSON_BYTES {
+    let archive_offset = usize::try_from(archive.offset()).map_err(|_| {
+        CharacterCompatError::Invalid("CHARX archive offset is not representable".to_owned())
+    })?;
+    let jpeg_zip_hybrid = archive_offset > 0;
+    if jpeg_zip_hybrid && !valid_jpeg_prefix(&bytes[..archive_offset]) {
         return Err(CharacterCompatError::Invalid(
-            "CHARX card.json has an invalid size or type".to_owned(),
+            "bytes before the CHARX ZIP are not a complete JPEG preview".to_owned(),
         ));
     }
-    let mut output = String::new();
-    card.read_to_string(&mut output)?;
+
+    let entry_count = archive.len();
+    let mut seen = HashSet::new();
+    let mut entry_paths = HashSet::new();
+    let mut card_json = None;
+    let mut asset_count = 0;
+    let mut has_x_meta = false;
+    let mut has_module_risum = false;
+    let mut expanded_bytes = 0_u64;
+    let mut non_ascii_path = false;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let name = entry.name().to_owned();
+        if !seen.insert(name.clone()) {
+            return Err(CharacterCompatError::Invalid(format!(
+                "CHARX contains duplicate entry {name:?}"
+            )));
+        }
+        if entry.enclosed_name().is_none() || name.contains('\\') {
+            return Err(CharacterCompatError::Invalid(format!(
+                "CHARX contains unsafe entry path {name:?}"
+            )));
+        }
+        if entry.encrypted() {
+            return Err(CharacterCompatError::Invalid(format!(
+                "CHARX entry {name:?} is encrypted"
+            )));
+        }
+        if entry.is_symlink() {
+            return Err(CharacterCompatError::Invalid(format!(
+                "CHARX entry {name:?} is a symbolic link"
+            )));
+        }
+        if !name.is_ascii() {
+            non_ascii_path = true;
+        }
+        if entry.is_dir() {
+            if entry.size() != 0 {
+                return Err(CharacterCompatError::Invalid(format!(
+                    "CHARX directory entry {name:?} contains data"
+                )));
+            }
+            continue;
+        }
+        if !entry.is_file() {
+            return Err(CharacterCompatError::Invalid(format!(
+                "CHARX entry {name:?} is not a regular file"
+            )));
+        }
+        let entry_limit = if name == "card.json" {
+            MAX_JSON_BYTES
+        } else {
+            MAX_CHARX_ENTRY_BYTES
+        };
+        if entry.size() > entry_limit || (name == "card.json" && entry.size() == 0) {
+            return Err(CharacterCompatError::Invalid(format!(
+                "CHARX entry {name:?} has an invalid expanded size"
+            )));
+        }
+        let data = read_bounded_zip_entry(&mut entry, entry_limit, &name)?;
+        expanded_bytes = expanded_bytes
+            .checked_add(data.len() as u64)
+            .filter(|total| *total <= MAX_CHARX_EXPANDED_BYTES)
+            .ok_or_else(|| {
+                CharacterCompatError::Invalid(format!(
+                    "CHARX expands beyond {MAX_CHARX_EXPANDED_BYTES} bytes"
+                ))
+            })?;
+        entry_paths.insert(name.clone());
+        match name.as_str() {
+            "card.json" => card_json = Some(data),
+            "module.risum" => has_module_risum = true,
+            _ => {
+                asset_count += usize::from(name.starts_with("assets/"));
+                has_x_meta |= name.starts_with("x_meta/") && name.ends_with(".json");
+            }
+        }
+    }
+
+    let card_json = card_json.ok_or_else(|| {
+        CharacterCompatError::Invalid(
+            "CHARX must contain exactly one card.json file at the ZIP root".to_owned(),
+        )
+    })?;
+    let mut warnings = embedded_asset_warnings(&card_json, &entry_paths)?;
+    if non_ascii_path {
+        warnings.push(
+            "CHARX contains non-ASCII entry paths; they were preserved, but the CCv3 profile recommends ASCII paths"
+                .to_owned(),
+        );
+    }
+    let archive_sha256 = hex::encode(Sha256::digest(&bytes));
+    Ok(ParsedCharxPackage {
+        bytes,
+        card_json,
+        info: StoredCharxPackage {
+            schema_version: 1,
+            archive_sha256,
+            entry_count,
+            asset_count,
+            has_x_meta,
+            has_module_risum,
+            jpeg_zip_hybrid,
+        },
+        warnings,
+    })
+}
+
+fn read_bounded_zip_entry(
+    entry: &mut zip::read::ZipFile<'_, impl Read>,
+    limit: u64,
+    name: &str,
+) -> Result<Vec<u8>, CharacterCompatError> {
+    let mut output = Vec::new();
+    entry
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut output)?;
+    if output.len() as u64 > limit {
+        return Err(CharacterCompatError::Invalid(format!(
+            "CHARX entry {name:?} exceeds {limit} expanded bytes"
+        )));
+    }
     Ok(output)
+}
+
+fn valid_jpeg_prefix(prefix: &[u8]) -> bool {
+    prefix.starts_with(b"\xFF\xD8\xFF")
+        && prefix
+            .windows(2)
+            .rposition(|window| window == b"\xFF\xD9")
+            .is_some_and(|end| end + 2 == prefix.len())
+}
+
+fn embedded_asset_warnings(
+    card_json: &[u8],
+    entry_paths: &HashSet<String>,
+) -> Result<Vec<String>, CharacterCompatError> {
+    let card: Value = serde_json::from_slice(card_json)?;
+    let mut warnings = Vec::new();
+    let Some(assets) = card.pointer("/data/assets").and_then(Value::as_array) else {
+        return Ok(warnings);
+    };
+    for (index, asset) in assets.iter().enumerate() {
+        let Some(uri) = asset.get("uri").and_then(Value::as_str) else {
+            continue;
+        };
+        let path = uri
+            .strip_prefix("embeded://")
+            .or_else(|| uri.strip_prefix("embedded://"));
+        if uri.starts_with("embedded://") {
+            warnings.push(format!(
+                "asset {index} uses the non-standard embedded:// spelling; CHARX specifies embeded://"
+            ));
+        }
+        if let Some(path) = path
+            && !entry_paths.contains(path)
+        {
+            warnings.push(format!(
+                "asset {index} references missing CHARX entry {path:?}; the descriptor was preserved"
+            ));
+        }
+    }
+    Ok(warnings)
+}
+
+fn charx_source_path(core: &MomoCore, character_id: Uuid) -> PathBuf {
+    core.data_dir()
+        .join(CHARX_SOURCE_DIRECTORY)
+        .join(character_id.to_string())
+        .join(CHARX_SOURCE_FILE)
+}
+
+fn save_charx_source(
+    core: &MomoCore,
+    character_id: Uuid,
+    bytes: &[u8],
+) -> Result<(), CharacterCompatError> {
+    atomic_write_bytes(&charx_source_path(core, character_id), bytes)
+}
+
+fn load_charx_source(
+    core: &MomoCore,
+    character_id: Uuid,
+    expected: &StoredCharxPackage,
+) -> Result<Vec<u8>, CharacterCompatError> {
+    let path = charx_source_path(core, character_id);
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        CharacterCompatError::Invalid(format!(
+            "preserved CHARX source is unavailable at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(CharacterCompatError::Invalid(
+            "preserved CHARX source is not a regular file".to_owned(),
+        ));
+    }
+    ensure_size(metadata.len(), MAX_CHARX_BYTES, "preserved CHARX")?;
+    let bytes = fs::read(path)?;
+    let actual_hash = hex::encode(Sha256::digest(&bytes));
+    if actual_hash != expected.archive_sha256 {
+        return Err(CharacterCompatError::Invalid(
+            "preserved CHARX source hash does not match its metadata".to_owned(),
+        ));
+    }
+    let parsed = parse_charx_package(bytes)?;
+    if parsed.info != *expected {
+        return Err(CharacterCompatError::Invalid(
+            "preserved CHARX source structure does not match its metadata".to_owned(),
+        ));
+    }
+    Ok(parsed.bytes)
+}
+
+fn write_charx(
+    path: &Path,
+    card: &Value,
+    source_archive: Option<&[u8]>,
+) -> Result<(), CharacterCompatError> {
+    if source_archive.is_none() && has_embedded_asset_references(card) {
+        return Err(CharacterCompatError::Invalid(
+            "cannot export CHARX because the card references embedded assets but no preserved source archive is available"
+                .to_owned(),
+        ));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    {
+        let mut writer = zip::ZipWriter::new(temporary.as_file_mut());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+        writer.start_file("card.json", options)?;
+        serde_json::to_writer_pretty(&mut writer, card)?;
+        writer.write_all(b"\n")?;
+
+        if let Some(source_archive) = source_archive {
+            let mut source = zip::ZipArchive::new(Cursor::new(source_archive))?;
+            for index in 0..source.len() {
+                let mut entry = source.by_index(index)?;
+                let name = entry.name().to_owned();
+                if name == "card.json" {
+                    continue;
+                }
+                let entry_options = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated)
+                    .unix_permissions(entry.unix_mode().unwrap_or(if entry.is_dir() {
+                        0o755
+                    } else {
+                        0o644
+                    }));
+                if entry.is_dir() {
+                    writer.add_directory(name, entry_options)?;
+                    continue;
+                }
+                writer.start_file(name, entry_options)?;
+                std::io::copy(&mut entry, &mut writer)?;
+            }
+        }
+        writer.finish()?;
+    }
+    temporary.as_file().sync_all()?;
+    ensure_size(
+        temporary.as_file().metadata()?.len(),
+        MAX_CHARX_BYTES,
+        "CHARX output",
+    )?;
+    temporary
+        .persist(path)
+        .map_err(|error| CharacterCompatError::Io(error.error))?;
+    Ok(())
+}
+
+fn has_embedded_asset_references(card: &Value) -> bool {
+    card.pointer("/data/assets")
+        .and_then(Value::as_array)
+        .is_some_and(|assets| {
+            assets.iter().any(|asset| {
+                asset.get("uri").and_then(Value::as_str).is_some_and(|uri| {
+                    uri.starts_with("embeded://") || uri.starts_with("embedded://")
+                })
+            })
+        })
+}
+
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), CharacterCompatError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| CharacterCompatError::Io(error.error))?;
+    Ok(())
+}
+
+pub(crate) fn export_preserved_charx_source(
+    core: &MomoCore,
+    character_id: Uuid,
+    metadata_document: &str,
+    output_path: &Path,
+) -> Result<bool, CharacterCompatError> {
+    let stored: StoredExternalCharacter = serde_json::from_str(metadata_document)?;
+    let Some(info) = stored.charx.as_ref() else {
+        return Ok(false);
+    };
+    let bytes = load_charx_source(core, character_id, info)?;
+    atomic_write_bytes(output_path, &bytes)?;
+    Ok(true)
+}
+
+pub(crate) fn import_preserved_charx_source(
+    core: &MomoCore,
+    character_id: Uuid,
+    metadata_document: &str,
+    input_path: &Path,
+) -> Result<bool, CharacterCompatError> {
+    let stored: StoredExternalCharacter = serde_json::from_str(metadata_document)?;
+    let Some(expected) = stored.charx.as_ref() else {
+        if input_path.exists() {
+            return Err(CharacterCompatError::Invalid(
+                "MOC contains a CHARX source without matching source metadata".to_owned(),
+            ));
+        }
+        return Ok(false);
+    };
+    let metadata = fs::symlink_metadata(input_path).map_err(|error| {
+        CharacterCompatError::Invalid(format!(
+            "MOC is missing the declared CHARX source {}: {error}",
+            input_path.display()
+        ))
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(CharacterCompatError::Invalid(
+            "MOC CHARX source is not a regular file".to_owned(),
+        ));
+    }
+    ensure_size(metadata.len(), MAX_CHARX_BYTES, "MOC CHARX")?;
+    let parsed = parse_charx_package(fs::read(input_path)?)?;
+    if parsed.info != *expected {
+        return Err(CharacterCompatError::Invalid(
+            "MOC CHARX source does not match its declared hash and structure".to_owned(),
+        ));
+    }
+    save_charx_source(core, character_id, &parsed.bytes)?;
+    Ok(true)
 }
 
 fn export_ccv2(
@@ -704,6 +1103,24 @@ mod tests {
         png
     }
 
+    fn charx_bytes(card: &Value, entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        archive
+            .start_file("card.json", options)
+            .expect("card entry");
+        archive
+            .write_all(&serde_json::to_vec(card).expect("CCv3 JSON"))
+            .expect("card JSON");
+        for (name, data) in entries {
+            archive.start_file(*name, options).expect("CHARX entry");
+            archive.write_all(data).expect("CHARX data");
+        }
+        archive.finish().expect("finish CHARX").into_inner()
+    }
+
     fn ccv2() -> Value {
         json!({
             "spec": "chara_card_v2",
@@ -861,26 +1278,189 @@ mod tests {
     }
 
     #[test]
-    fn reads_charx_card_json_without_extracting_assets() {
+    fn reads_charx_card_and_validates_container() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("card.charx");
-        let file = fs::File::create(&path).expect("CHARX output");
-        let mut archive = zip::ZipWriter::new(file);
-        archive
-            .start_file(
-                "card.json",
-                zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Deflated),
-            )
-            .expect("card entry");
-        archive
-            .write_all(&serde_json::to_vec(&ccv3()).expect("CCv3 JSON"))
-            .expect("card JSON");
-        archive.finish().expect("finish CHARX");
+        fs::write(&path, charx_bytes(&ccv3(), &[])).expect("CHARX output");
 
         let parsed = parse_external_path(&path).expect("CHARX import");
         assert_eq!(parsed.format, ExternalCharacterSourceFormat::Ccv3Charx);
         assert_eq!(parsed.name, "Snowball");
+        let package = parsed.charx.expect("CHARX package");
+        assert_eq!(package.info.entry_count, 1);
+        assert_eq!(package.info.asset_count, 0);
+    }
+
+    #[test]
+    fn reads_jpeg_zip_hybrid_and_rejects_unsafe_entries() {
+        let zip = charx_bytes(&ccv3(), &[]);
+        let mut hybrid = b"\xFF\xD8\xFFpreview\xFF\xD9".to_vec();
+        hybrid.extend_from_slice(&zip);
+        let parsed = parse_charx_package(hybrid).expect("JPEG+ZIP CHARX");
+        assert!(parsed.info.jpeg_zip_hybrid);
+
+        let unsafe_archive = charx_bytes(&ccv3(), &[("../outside.txt", b"bad")]);
+        assert!(parse_charx_package(unsafe_archive).is_err());
+    }
+
+    #[tokio::test]
+    async fn charx_assets_and_risu_extensions_round_trip_through_moc() {
+        let directory = tempfile::tempdir().expect("data directory");
+        let mut card = ccv3();
+        card["data"]["assets"] = json!([{
+            "type": "icon",
+            "uri": "embeded://assets/icon/images/avatar.png",
+            "name": "main",
+            "ext": "png"
+        }]);
+        let input = directory.path().join("source.charx");
+        fs::write(
+            &input,
+            charx_bytes(
+                &card,
+                &[
+                    ("assets/icon/images/avatar.png", b"image-bytes"),
+                    ("x_meta/0.json", br#"{"type":"PNG"}"#),
+                    ("module.risum", b"opaque-module"),
+                    ("app.json", br#"{"future":true}"#),
+                ],
+            ),
+        )
+        .expect("source CHARX");
+        let core = MomoCore::initialize(directory.path().join("core"))
+            .await
+            .expect("core");
+        let scope_id = momo_domain::new_id();
+        let imported = import_external_character(&core, scope_id, &input)
+            .await
+            .expect("CHARX import");
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("missing CHARX entry"))
+        );
+        let mut updated = imported.character.clone();
+        updated.name = "Snowball 0.4".to_owned();
+        updated.updated_at = Utc::now();
+        core.store()
+            .stage_character_update(&updated)
+            .await
+            .expect("character update");
+
+        let output = directory.path().join("output.charx");
+        let report = export_external_character(
+            &core,
+            scope_id,
+            imported.character.id,
+            &output,
+            ExternalCharacterExportFormat::Ccv3Charx,
+        )
+        .await
+        .expect("CHARX export");
+        assert_eq!(report["preserved_source_assets"], true);
+        assert_charx_entry(&output, "assets/icon/images/avatar.png", b"image-bytes");
+        assert_charx_entry(&output, "module.risum", b"opaque-module");
+        assert_charx_entry(&output, "app.json", br#"{"future":true}"#);
+        assert_eq!(read_charx_card(&output)["data"]["name"], "Snowball 0.4");
+
+        let moc = directory.path().join("character.moc");
+        crate::export_moc(
+            &core,
+            &moc,
+            scope_id,
+            &json!({}),
+            crate::ExportSelection {
+                config: false,
+                characters: true,
+                conversations: false,
+                memory: false,
+                semantic_graph: false,
+                character_id: Some(imported.character.id),
+            },
+        )
+        .await
+        .expect("MOC export");
+        let destination = MomoCore::initialize(directory.path().join("destination"))
+            .await
+            .expect("destination");
+        let destination_scope = momo_domain::new_id();
+        crate::import_moc(&destination, &moc, destination_scope, "replace")
+            .await
+            .expect("MOC import");
+        let round_trip = directory.path().join("round-trip.charx");
+        export_external_character(
+            &destination,
+            destination_scope,
+            imported.character.id,
+            &round_trip,
+            ExternalCharacterExportFormat::Ccv3Charx,
+        )
+        .await
+        .expect("round-trip CHARX export");
+        assert_charx_entry(&round_trip, "assets/icon/images/avatar.png", b"image-bytes");
+        assert_charx_entry(&round_trip, "x_meta/0.json", br#"{"type":"PNG"}"#);
+        assert_eq!(read_charx_card(&round_trip)["data"]["name"], "Snowball 0.4");
+    }
+
+    #[tokio::test]
+    async fn native_character_exports_card_only_charx() {
+        let directory = tempfile::tempdir().expect("data directory");
+        let core = MomoCore::initialize(directory.path().join("core"))
+            .await
+            .expect("core");
+        let scope_id = momo_domain::new_id();
+        let now = Utc::now();
+        let character = CharacterCard {
+            id: momo_domain::new_id(),
+            scope_id,
+            name: "Native".to_owned(),
+            version: "1.0.0".to_owned(),
+            author_name: "MOMO".to_owned(),
+            author_url: None,
+            character_markdown: "# Native".to_owned(),
+            user_markdown: String::new(),
+            opening_markdown: Some("Hello".to_owned()),
+            created_at: now,
+            updated_at: now,
+        };
+        core.store()
+            .stage_character(&character)
+            .await
+            .expect("character");
+        let output = directory.path().join("native.charx");
+        let report = export_external_character(
+            &core,
+            scope_id,
+            character.id,
+            &output,
+            ExternalCharacterExportFormat::Ccv3Charx,
+        )
+        .await
+        .expect("CHARX export");
+        assert_eq!(report["preserved_source_assets"], false);
+        assert_eq!(read_charx_card(&output)["data"]["name"], "Native");
+        let archive = zip::ZipArchive::new(fs::File::open(output).expect("CHARX file"))
+            .expect("CHARX archive");
+        assert_eq!(archive.len(), 1);
+    }
+
+    fn assert_charx_entry(path: &Path, name: &str, expected: &[u8]) {
+        let file = fs::File::open(path).expect("CHARX file");
+        let mut archive = zip::ZipArchive::new(file).expect("CHARX archive");
+        let mut entry = archive.by_name(name).expect("CHARX entry");
+        let mut actual = Vec::new();
+        entry.read_to_end(&mut actual).expect("entry data");
+        assert_eq!(actual, expected);
+    }
+
+    fn read_charx_card(path: &Path) -> Value {
+        let file = fs::File::open(path).expect("CHARX file");
+        let mut archive = zip::ZipArchive::new(file).expect("CHARX archive");
+        let mut entry = archive.by_name("card.json").expect("card.json");
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).expect("card JSON");
+        serde_json::from_slice(&data).expect("CCv3 card")
     }
 
     #[test]

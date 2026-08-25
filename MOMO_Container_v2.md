@@ -110,7 +110,12 @@ frontmatter are rejected.
 External CCv1/v2/v3 source fields are not part of the MOMO character payload.
 When present, they use the separate `tavern_compat` module at
 `tavern_compat/<UUID>/source.json` so the core character definition remains
-independent while compatible exports can preserve upstream-only fields.
+independent while compatible exports can preserve upstream-only fields. A
+preserved CHARX container is stored beside it as
+`tavern_compat/<UUID>/source.charx`. `source.json` MUST declare the CHARX hash
+and container summary; import MUST reject a missing, unexpected, unsafe, or
+mismatched `source.charx`. The CHARX remains external compatibility data, not a
+MOMO Character Card v2 payload.
 
 ## 5. Package types and deletion records
 

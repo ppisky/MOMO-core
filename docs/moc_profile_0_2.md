@@ -3,7 +3,7 @@
 **状态：** Implementation Baseline  
 **编码：** tar.zstd  
 **格式版本：** 2  
-**更新日期：** 2026-08-16
+**更新日期：** 2026-08-25
 
 本文记录当前源码实现的 MOC v2 行为。规范字段与扩展规则见
 `MOMO_Container_v2.md`。
@@ -17,7 +17,8 @@
   `semantic_graph`、`tavern_compat`、`encrypted-container`。
 - DMW/NSG 按 `lore/`、`rules/`、`archive/lore/`、`archive/rules/` 前缀分区。
 - MOMO 独立 Character Card v2 导入导出及可选 `opening.md`。
-- 外部角色卡原始字段按角色 ID 保存在 `tavern_compat` 模块，并随 MOC 往返。
+- 外部角色卡原始字段按角色 ID 保存在 `tavern_compat` 模块；CHARX 来源另以
+  `source.charx` 保存，并由 `source.json` 中的 SHA-256 与结构摘要绑定。
 - 非 v2 容器、非 MOMO v2 角色卡元数据和非规范模块 ID 会被拒绝。
 - 未知模块安全解包并在报告中列出，不写入已知业务数据。
 - 更高格式版本明确拒绝。
@@ -37,5 +38,5 @@
 
 测试覆盖 v2 创建与解包、格式版本拒绝、非规范模块 ID、未知模块报告、重复路径、路径
 穿越、摘要、资源上限及 MOMO Character Card v2 资源验证。外部 CCv2/CCv3 的直接
-JSON/PNG/CHARX 导入及 CCv2/CCv3 JSON 导出由角色卡兼容层实现，详见
+JSON/PNG/CHARX 导入及 CCv2/CCv3 JSON/CHARX 导出由角色卡兼容层实现，详见
 [`character_card_compatibility.md`](character_card_compatibility.md)。

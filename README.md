@@ -11,8 +11,8 @@ local HTTP interface in one workspace.
 
 - independent MOMO Character Card v2 (`character.toml` + Markdown)
 - Character Card v1/v2 JSON and PNG import
-- Character Card v3 JSON, PNG/APNG, and CHARX import
-- Character Card v2/v3 JSON export with source-field preservation
+- Character Card v3 JSON, PNG/APNG, and full CHARX-container import
+- Character Card v2/v3 JSON and CHARX export with source preservation
 - MOC v2 import and export
 - Dual-Mem Wiki (DMW) long-term memory
 - Narrative Semantic Graph (NSG)
@@ -32,14 +32,17 @@ MOMO Character Card v2 is an independent format defined by this repository in
 [`Character_Card_v2.md`](Character_Card_v2.md). Its “v2” does not mean the
 external `chara_card_v2` JSON/PNG format. Core currently imports and exports the
 MOMO format inside MOC v2. It also imports external CCv1/v2 JSON and PNG plus
-CCv3 JSON, PNG/APNG, and CHARX, and exports CCv2/CCv3 JSON. Unsupported external
-fields are retained as source metadata and survive MOC round trips.
+CCv3 JSON, PNG/APNG, and CHARX, and exports CCv2/CCv3 JSON and CHARX. CHARX
+assets, `x_meta`, `module.risum`, and unknown safe entries are retained with the
+source container and survive MOC round trips.
 
 Compatibility design for external formats is based specifically on
 [Character Card v2](https://github.com/malfoyslastname/character-card-spec-v2)
 and [Character Card v3](https://github.com/kwaroran/character-card-spec-v3).
+CHARX implementation behavior is additionally pinned to the
+[Character Foundry CHARX documentation](https://github.com/character-foundry/character-foundry/blob/master/docs/charx.md).
 See [character-card formats and compatibility](docs/character_card_compatibility.md)
-for pinned sources, terminology, and implementation status.
+for source precedence, pinned snapshots, terminology, and implementation status.
 
 ## Workspace
 
@@ -62,6 +65,9 @@ in one SQLite file:
   portable metadata;
 - `nsg-vectors.db`, managed by the official `turso` Rust library, stores only
   the NSG vector index.
+- `character-packages/<character_id>/source.charx` retains an imported CHARX
+  source container so binary assets and application extensions can round-trip
+  through MOC.
 
 DMW and NSG YAML/Markdown documents under `memory/scopes/<scope_id>` remain the
 portable sources of truth. Turso vectors are validated by source hash and
@@ -70,6 +76,10 @@ in MOC files. `NsgVectorStore` is only the internal boundary that keeps Turso
 details out of the rest of Core; it is not a third database. When upgrading to
 0.3.2, the legacy SQLite `nsg_vectors` table is removed and the host should
 rebuild the vector cache when needed.
+
+Version 0.4.0 still exposes only vector storage and ranking contracts, not an
+embedding-model interface, so an HTTP caller cannot independently build the
+index. See the [embedding interface audit and 0.4.1 plan](docs/vectorization_model_interface_0_4_1.md).
 
 ## Scope identity
 

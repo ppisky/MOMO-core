@@ -37,12 +37,21 @@ cargo doc --workspace --all-features --no-deps
 Runtime state is intentionally split between `momo.sqlite3` (SQLx/SQLite
 application records) and `nsg-vectors.db` (the standalone Turso database used
 for NSG vector indexes). DMW and NSG source documents remain in the filesystem.
+Imported CHARX source containers are retained under
+`character-packages/<character_id>/source.charx`; they are compatibility
+payloads used for asset-preserving CHARX and MOC round trips, not executable
+content.
 
 `NsgVectorStore` isolates Turso persistence and exact cosine ranking from the
 rest of Core. Its observable contract covers scope identity, vector space,
 dimensions, source hashes, and stable ordering. The index is disposable: the
 filesystem source documents are authoritative and MOC exports do not include
 the Turso database.
+
+`NsgVectorStore` is not an embedding-model provider. Version 0.4.0 has no
+OpenAI-compatible embeddings call or HTTP index-build workflow. The confirmed
+gap and proposed 0.4.1 boundary are documented in
+`vectorization_model_interface_0_4_1.md`.
 
 ## Runtime data and secrets
 

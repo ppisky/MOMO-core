@@ -2004,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "momo-config"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "momo-domain",
  "tempfile",
@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "momo-crypto"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "aes-gcm 0.11.0",
  "argon2",
@@ -2031,7 +2031,7 @@ dependencies = [
 
 [[package]]
 name = "momo-domain"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "momo-memory"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "hex",
@@ -2056,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "momo-moc"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "hex",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "momo-server"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "axum",
  "momo_core",
@@ -2092,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "momo-storage"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "hex",
@@ -2109,12 +2109,13 @@ dependencies = [
 
 [[package]]
 name = "momo_core"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "base64",
  "chrono",
  "crc32fast",
  "futures-util",
+ "hex",
  "language-tags",
  "momo-config",
  "momo-crypto",
@@ -2126,6 +2127,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror",
  "tiktoken-rs",

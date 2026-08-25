@@ -11,6 +11,7 @@ Character Card specifications maintained at:
 
   https://github.com/malfoyslastname/character-card-spec-v2
   https://github.com/kwaroran/character-card-spec-v3
+  https://github.com/character-foundry/character-foundry/blob/master/docs/charx.md
 
 The Character Card v3 specification is Copyright (c) 2024 Kwaroran and is
 available under the MIT License. See docs/character-card-spec-v3.LICENSE.
@@ -19,3 +20,11 @@ The Character Card v1/v2 specification repository did not declare a license
 when its reference snapshots were verified. Those reference documents remain
 the material of their upstream authors and are not relicensed under the Apache
 License, Version 2.0.
+
+The reference snapshot at docs/character-foundry_charx.md comes from Character
+Foundry commit 322fe8d940d1b91c978b43330b80ab2e115002e4. The upstream README
+declares the repository to be MIT licensed, but that commit has no standalone
+root LICENSE file or more specific copyright notice. Copyright remains with
+the Character Foundry contributors. The snapshot is included for
+interoperability reference and is not relicensed under Apache-2.0. See
+docs/character-foundry-charx.LICENSE.
