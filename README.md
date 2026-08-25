@@ -18,7 +18,7 @@ local HTTP interface in one workspace.
 - Narrative Semantic Graph (NSG)
 - MO State compilation
 - SQLite application storage and a separate Turso vector store
-- OpenAI-compatible completion, streaming, and embeddings
+- outbound OpenAI-compatible completion, streaming, and embeddings gateways
 - capability discovery and context budgeting
 - vector-store contracts and deterministic retrieval
 
@@ -37,13 +37,13 @@ assets, `x_meta`, `module.risum`, and unknown safe entries are retained with the
 source container and survive MOC round trips.
 
 Compatibility design for external formats is based specifically on
-[Character Card v2](https://github.com/malfoyslastname/character-card-spec-v2)
-and [Character Card v3](https://github.com/kwaroran/character-card-spec-v3).
+[Character Card v2](https://github.com/malfoyslastname/character-card-spec-v2/blob/8083fb388615ccbce768e97cbbd49d2b3214632c/spec_v2.md)
+and [Character Card v3](https://github.com/kwaroran/character-card-spec-v3/blob/f3a86af019fbd99f788f7a1155f399655b34ab35/SPEC_V3.md).
 Risu-specific extensions are identified from the
-[RisuAI reference implementation](https://github.com/kwaroran/Risuai), with the
-[Character Foundry CHARX documentation](https://github.com/character-foundry/character-foundry/blob/master/docs/charx.md)
-used only as a downstream cross-check. Unlicensed upstream documents are linked
-rather than redistributed. See [character-card formats and compatibility](docs/character_card_compatibility.md)
+[RisuAI reference implementation](https://github.com/kwaroran/Risuai/blob/c0ed1026de4b06a1c4600b79c789fea0616c297c/src/ts/characterCards.ts), with the
+[Character Foundry CHARX documentation](https://github.com/character-foundry/character-foundry/blob/322fe8d940d1b91c978b43330b80ab2e115002e4/docs/charx.md)
+used only as a downstream cross-check. All external specification documents are
+linked at pinned revisions rather than redistributed. See [character-card formats and compatibility](docs/character_card_compatibility.md)
 for source precedence, licensing boundaries, terminology, and implementation status.
 
 ## Workspace
@@ -79,11 +79,12 @@ details out of the rest of Core; it is not a third database. When upgrading to
 0.3.2, the legacy SQLite `nsg_vectors` table is removed and the host should
 rebuild the vector cache when needed.
 
-Version 0.4.1 adds a structured embedding profile, deterministic vector-space
-identity, OpenAI-compatible batch generation, atomic full/incremental NSG index
-rebuilds, and query-text embedding inside scoped retrieval. Raw-vector APIs
-remain available as a low-level compatibility path. See the
-[embedding interface profile](docs/vectorization_model_interface_0_4_1.md).
+Version 0.4.2 aligns the outbound embeddings adapter with the documented OpenAI
+request/response metadata, retains token usage, and returns useful 400/502/504
+status codes from the local generation endpoint. That local endpoint remains a
+MOMO orchestration API, not a drop-in OpenAI server. Raw-vector APIs remain a
+low-level compatibility path. See the
+[embedding interface profile](docs/vectorization_model_interface_0_4_2.md).
 
 ## Scope identity
 

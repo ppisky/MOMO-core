@@ -20,18 +20,17 @@ pub struct EmbeddingRequestConfig {
 }
 
 impl EmbeddingRequestConfig {
-    fn provider(&self) -> Result<OpenAiEmbeddingProvider, String> {
+    fn provider(&self) -> Result<OpenAiEmbeddingProvider, EmbeddingError> {
         if self.timeout_seconds == 0 || self.timeout_seconds > MAX_EMBEDDING_TIMEOUT_SECONDS {
-            return Err(format!(
+            return Err(EmbeddingError::InvalidProfile(format!(
                 "embedding timeout must be between 1 and {MAX_EMBEDDING_TIMEOUT_SECONDS} seconds"
-            ));
+            )));
         }
-        self.profile.validate().map_err(|error| error.to_string())?;
+        self.profile.validate()?;
         OpenAiEmbeddingProvider::new(
             self.endpoint.clone(),
             Duration::from_secs(self.timeout_seconds),
         )
-        .map_err(|error| error.to_string())
     }
 }
 
@@ -40,6 +39,16 @@ impl EmbeddingRequestConfig {
 struct GenerateEmbeddingsRequest {
     embedding: EmbeddingRequestConfig,
     inputs: Vec<EmbeddingInput>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GenerateEmbeddingsError {
+    #[error("invalid embedding request JSON: {0}")]
+    InvalidRequest(serde_json::Error),
+    #[error(transparent)]
+    Provider(#[from] EmbeddingError),
+    #[error("failed to serialize embedding response: {0}")]
+    Serialize(serde_json::Error),
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -60,21 +69,28 @@ struct RebuildNsgIndexRequest {
 }
 
 pub async fn generate_embeddings_json(request_json: String) -> Result<String, String> {
+    generate_embeddings_json_typed(request_json)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn generate_embeddings_json_typed(
+    request_json: String,
+) -> Result<String, GenerateEmbeddingsError> {
     let request: GenerateEmbeddingsRequest =
-        serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
+        serde_json::from_str(&request_json).map_err(GenerateEmbeddingsError::InvalidRequest)?;
     let provider = request.embedding.provider()?;
     let batch = provider
         .embed_batch(&request.embedding.profile, &request.inputs)
-        .await
-        .map_err(|error| error.to_string())?;
-    serde_json::to_string(&batch).map_err(|error| error.to_string())
+        .await?;
+    serde_json::to_string(&batch).map_err(GenerateEmbeddingsError::Serialize)
 }
 
 pub(super) async fn embed_query(
     embedding: &EmbeddingRequestConfig,
     query: &str,
 ) -> Result<(String, Vec<f64>), String> {
-    let provider = embedding.provider()?;
+    let provider = embedding.provider().map_err(|error| error.to_string())?;
     let batch = provider
         .embed_batch(
             &embedding.profile,
@@ -106,7 +122,10 @@ pub async fn rebuild_nsg_vector_index_json(
             "embedding batch_size must be between 1 and {MAX_EMBEDDING_BATCH_SIZE}"
         ));
     }
-    let provider = request.embedding.provider()?;
+    let provider = request
+        .embedding
+        .provider()
+        .map_err(|error| error.to_string())?;
     let vector_space_id = request
         .embedding
         .profile

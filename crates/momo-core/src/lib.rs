@@ -29,7 +29,7 @@ pub use context::{
 };
 pub use embedding::{
     EmbeddingBatch, EmbeddingEndpoint, EmbeddingError, EmbeddingInput, EmbeddingNormalization,
-    EmbeddingProfile, EmbeddingProvider, EmbeddingPurpose, EmbeddingVector,
+    EmbeddingProfile, EmbeddingProvider, EmbeddingPurpose, EmbeddingUsage, EmbeddingVector,
     MAX_EMBEDDING_BATCH_SIZE, MAX_EMBEDDING_DIMENSION, OpenAiEmbeddingProvider,
 };
 pub use gateway::{

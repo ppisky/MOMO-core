@@ -8,20 +8,23 @@ the MIT License: https://github.com/tursodatabase/turso
 
 Character-card compatibility is based on the public format specifications at:
 
-  https://github.com/malfoyslastname/character-card-spec-v2
-  https://github.com/kwaroran/character-card-spec-v3
+  https://github.com/malfoyslastname/character-card-spec-v2/blob/8083fb388615ccbce768e97cbbd49d2b3214632c/spec_v1.md
+  https://github.com/malfoyslastname/character-card-spec-v2/blob/8083fb388615ccbce768e97cbbd49d2b3214632c/spec_v2.md
+  https://github.com/kwaroran/character-card-spec-v3/blob/f3a86af019fbd99f788f7a1155f399655b34ab35/SPEC_V3.md
 
-The Character Card v3 specification is Copyright (c) 2024 Kwaroran and is
-available under the MIT License. See docs/character-card-spec-v3.LICENSE.
-
-The Character Card v1/v2 repository did not declare a license when verified.
-MOMO Core therefore links to it but does not redistribute its specification
-documents.
+The v0.4.2 source tree and release archive do not redistribute any Character
+Card v1/v2/v3 specification document. The v1/v2 repository did not declare a
+license when verified. The v3 repository declares MIT, but its specification
+is derived from the earlier v2 work; this project therefore applies the same
+link-only policy to all external Character Card specifications instead of
+making a downstream licensing determination. Earlier v0.4.0/v0.4.1 Git commits
+remain historical records; no destructive history rewrite is implied by this
+release.
 
 RisuAI's GPL-3.0 source was reviewed only to identify de facto interoperability
 extensions such as CHARX-JPEG, x_meta, and module.risum:
 
-  https://github.com/kwaroran/Risuai
+  https://github.com/kwaroran/Risuai/blob/c0ed1026de4b06a1c4600b79c789fea0616c297c/src/ts/characterCards.ts
 
 MOMO Core does not include verbatim or mechanically translated RisuAI source
 code. The CHARX adapter was nevertheless written after public implementation
@@ -33,7 +36,18 @@ licensing assessment.
 The downstream Character Foundry CHARX documentation was also reviewed as an
 interoperability reference:
 
-  https://github.com/character-foundry/character-foundry/blob/master/docs/charx.md
+  https://github.com/character-foundry/character-foundry/blob/322fe8d940d1b91c978b43330b80ab2e115002e4/docs/charx.md
 
 The verified Character Foundry commit did not contain a root LICENSE file, so
 MOMO Core links to that document and does not redistribute it.
+
+SillyTavern's AGPL-3.0 validator and CHARX reader were reviewed at commit
+8172dcd0ee672d3cd9a5e5f7af134f91a45cd2b8 as an additional ecosystem
+interoperability cross-check:
+
+  https://github.com/SillyTavern/SillyTavern/blob/8172dcd0ee672d3cd9a5e5f7af134f91a45cd2b8/src/validator/TavernCardValidator.js
+  https://github.com/SillyTavern/SillyTavern/blob/8172dcd0ee672d3cd9a5e5f7af134f91a45cd2b8/src/charx.js
+
+MOMO Core does not include or mechanically translate SillyTavern source code.
+The same non-clean-room and no-legal-conclusion statement above applies to this
+review.

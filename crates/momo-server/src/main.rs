@@ -289,6 +289,20 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: message.into(),
+        }
+    }
+
+    fn gateway_timeout(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -650,7 +664,12 @@ async fn cancel_chat(Path(request_id): Path<String>) -> Json<Value> {
 }
 
 async fn generate_embeddings(Json(request): Json<Value>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::generate_embeddings_json(to_json_string(&request)?).await)
+    let response = simple::generate_embeddings_json_typed(to_json_string(&request)?)
+        .await
+        .map_err(embedding_api_error)?;
+    serde_json::from_str(&response)
+        .map(Json)
+        .map_err(|error| ApiError::internal(error.to_string()))
 }
 
 async fn prepare_context(
@@ -963,6 +982,32 @@ fn json_result(result: Result<String, String>) -> Result<Json<Value>, ApiError> 
         .map_err(|error| ApiError::internal(error.to_string()))
 }
 
+fn embedding_api_error(error: simple::GenerateEmbeddingsError) -> ApiError {
+    match error {
+        simple::GenerateEmbeddingsError::InvalidRequest(error) => {
+            ApiError::bad_request(error.to_string())
+        }
+        simple::GenerateEmbeddingsError::Provider(
+            error @ (momo_core::EmbeddingError::InvalidProfile(_)
+            | momo_core::EmbeddingError::InvalidInput(_)
+            | momo_core::EmbeddingError::InvalidBaseUrl(_)
+            | momo_core::EmbeddingError::InvalidAuthorization),
+        ) => ApiError::bad_request(error.to_string()),
+        simple::GenerateEmbeddingsError::Provider(momo_core::EmbeddingError::Request(error))
+            if error.is_timeout() =>
+        {
+            ApiError::gateway_timeout(error.to_string())
+        }
+        simple::GenerateEmbeddingsError::Provider(
+            error @ momo_core::EmbeddingError::SerializeProfile(_),
+        ) => ApiError::internal(error.to_string()),
+        simple::GenerateEmbeddingsError::Provider(error) => {
+            ApiError::bad_gateway(error.to_string())
+        }
+        simple::GenerateEmbeddingsError::Serialize(error) => ApiError::internal(error.to_string()),
+    }
+}
+
 fn ok_json(result: Result<String, String>) -> Result<Json<Value>, ApiError> {
     result.map_err(ApiError::internal)?;
     Ok(Json(json!({ "ok": true })))
@@ -1049,6 +1094,19 @@ mod tests {
         assert!(ensure_bind_allowed(loopback, false).is_ok());
         assert!(ensure_bind_allowed(remote, false).is_err());
         assert!(ensure_bind_allowed(remote, true).is_ok());
+    }
+
+    #[test]
+    fn embedding_errors_use_client_and_gateway_status_codes() {
+        let client = embedding_api_error(simple::GenerateEmbeddingsError::Provider(
+            momo_core::EmbeddingError::InvalidInput("bad input".to_owned()),
+        ));
+        assert_eq!(client.status, StatusCode::BAD_REQUEST);
+
+        let upstream = embedding_api_error(simple::GenerateEmbeddingsError::Provider(
+            momo_core::EmbeddingError::InvalidResponse("bad response".to_owned()),
+        ));
+        assert_eq!(upstream.status, StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]
@@ -1392,7 +1450,7 @@ mod tests {
             .expect("embedding listener");
         let embedding_address = embedding_listener.local_addr().expect("embedding address");
         tokio::spawn(async move {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let (mut socket, _) = embedding_listener.accept().await.expect("accept embedding");
                 let mut request = vec![0_u8; 32 * 1024];
                 let read = socket
@@ -1403,7 +1461,9 @@ mod tests {
                 assert!(request.starts_with("POST /v1/embeddings "));
                 let body = json!({
                     "model": "test-embedding",
-                    "data": [{"index": 0, "embedding": [1.0, 0.0, 0.0]}]
+                    "object": "list",
+                    "data": [{"object": "embedding", "index": 0, "embedding": [1.0, 0.0, 0.0]}],
+                    "usage": {"prompt_tokens": 3, "total_tokens": 3}
                 })
                 .to_string();
                 let response = format!(
@@ -1430,6 +1490,64 @@ mod tests {
             },
             "timeout_seconds": 10
         });
+        let mut invalid_embedding = embedding.clone();
+        invalid_embedding["profile"]["dimension"] = json!(0);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/embeddings/generate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "embedding": invalid_embedding,
+                            "inputs": [{
+                                "id": "invalid",
+                                "text": "must not reach provider",
+                                "purpose": "document"
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("invalid embedding request"),
+            )
+            .await
+            .expect("invalid embedding response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/embeddings/generate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "embedding": embedding,
+                            "inputs": [{
+                                "id": "direct",
+                                "text": "direct embedding",
+                                "purpose": "document"
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("embedding request"),
+            )
+            .await
+            .expect("embedding response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let generated: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("embedding body"),
+        )
+        .expect("embedding JSON");
+        assert_eq!(generated["model"], "test-embedding");
+        assert_eq!(generated["usage"]["total_tokens"], 3);
+
         let response = app
             .clone()
             .oneshot(

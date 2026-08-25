@@ -17,10 +17,10 @@
   timeout validation, plus redacted endpoint debug output.
 - Added vector-space identity to vector-status responses and atomic replacement
   tests that prevent deleted NSG nodes from surviving an index rebuild.
-- Corrected the CHARX provenance policy: only the MIT-licensed CCv3 normative
-  snapshot remains vendored. CCv1/v2, RisuAI extension behavior, and Character
-  Foundry documentation are linked with explicit roles and licensing notes,
-  rather than redistributed.
+- Corrected the CHARX provenance policy for CCv1/v2, RisuAI extension behavior,
+  and Character Foundry. Version 0.4.2 applies the stricter link-only policy to
+  CCv3 as well, so no external Character Card specification text remains
+  vendored.
 
 ## Compatibility
 

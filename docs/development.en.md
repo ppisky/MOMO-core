@@ -52,7 +52,8 @@ the Turso database.
 embedding-model provider. Version 0.4.1 adds a separate `EmbeddingProvider`,
 an OpenAI-compatible implementation, HTTP batch generation, atomic full or
 incremental NSG index rebuilds, and query-text embedding. The implemented
-contract is documented in `vectorization_model_interface_0_4_1.md`.
+contract and its 0.4.2 protocol alignment are documented in
+`vectorization_model_interface_0_4_2.md`.
 
 ## Runtime data and secrets
 

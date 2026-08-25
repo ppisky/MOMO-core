@@ -135,6 +135,14 @@ pub struct EmbeddingBatch {
     pub model: String,
     pub dimension: usize,
     pub vectors: Vec<EmbeddingVector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<EmbeddingUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmbeddingUsage {
+    pub prompt_tokens: u64,
+    pub total_tokens: u64,
 }
 
 #[derive(Debug, Error)]
@@ -316,13 +324,29 @@ fn validate_response(
     inputs: &[EmbeddingInput],
     response: EmbeddingResponse,
 ) -> Result<EmbeddingBatch, EmbeddingError> {
-    if let Some(model) = response.model.as_deref()
-        && model != profile.model
-    {
+    if response.model != profile.model {
         return Err(EmbeddingError::InvalidResponse(format!(
             "provider reported model {:?}, expected {:?}",
-            model, profile.model
+            response.model, profile.model
         )));
+    }
+    if response
+        .object
+        .as_deref()
+        .is_some_and(|object| object != "list")
+    {
+        return Err(EmbeddingError::InvalidResponse(
+            "response object must be \"list\" when present".to_owned(),
+        ));
+    }
+    if response
+        .usage
+        .as_ref()
+        .is_some_and(|usage| usage.total_tokens < usage.prompt_tokens)
+    {
+        return Err(EmbeddingError::InvalidResponse(
+            "response usage total_tokens must not be lower than prompt_tokens".to_owned(),
+        ));
     }
     if response.data.len() != inputs.len() {
         return Err(EmbeddingError::InvalidResponse(format!(
@@ -337,6 +361,16 @@ fn validate_response(
             return Err(EmbeddingError::InvalidResponse(
                 "response indexes must be unique and cover the request batch".to_owned(),
             ));
+        }
+        if item
+            .object
+            .as_deref()
+            .is_some_and(|object| object != "embedding")
+        {
+            return Err(EmbeddingError::InvalidResponse(format!(
+                "vector {} object must be \"embedding\" when present",
+                item.index
+            )));
         }
         let mut vector = item.embedding;
         if vector.len() != profile.dimension
@@ -363,9 +397,10 @@ fn validate_response(
         .collect();
     Ok(EmbeddingBatch {
         vector_space_id: profile.vector_space_id()?,
-        model: response.model.unwrap_or_else(|| profile.model.clone()),
+        model: response.model,
         dimension: profile.dimension,
         vectors,
+        usage: response.usage,
     })
 }
 
@@ -394,13 +429,16 @@ fn embedding_url(base_url: &str) -> Result<Url, url::ParseError> {
 #[derive(Debug, Deserialize)]
 struct EmbeddingResponse {
     data: Vec<EmbeddingResponseItem>,
-    model: Option<String>,
+    model: String,
+    object: Option<String>,
+    usage: Option<EmbeddingUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct EmbeddingResponseItem {
     index: usize,
     embedding: Vec<f64>,
+    object: Option<String>,
 }
 
 #[cfg(test)]
@@ -482,9 +520,11 @@ mod tests {
             assert!(request.contains("\"dimensions\":3"));
             let body = serde_json::json!({
                 "model": "embedding-model",
+                "object": "list",
+                "usage": {"prompt_tokens": 4, "total_tokens": 4},
                 "data": [
-                    {"index": 1, "embedding": [0.0, 3.0, 4.0]},
-                    {"index": 0, "embedding": [2.0, 0.0, 0.0]}
+                    {"object": "embedding", "index": 1, "embedding": [0.0, 3.0, 4.0]},
+                    {"object": "embedding", "index": 0, "embedding": [2.0, 0.0, 0.0]}
                 ]
             })
             .to_string();
@@ -528,6 +568,13 @@ mod tests {
         assert_eq!(batch.vectors[0].vector, vec![1.0, 0.0, 0.0]);
         assert_eq!(batch.vectors[1].id, "document");
         assert_eq!(batch.vectors[1].vector, vec![0.0, 0.6, 0.8]);
+        assert_eq!(
+            batch.usage,
+            Some(EmbeddingUsage {
+                prompt_tokens: 4,
+                total_tokens: 4
+            })
+        );
     }
 
     #[test]
@@ -543,8 +590,11 @@ mod tests {
                 data: vec![EmbeddingResponseItem {
                     index: 0,
                     embedding: vec![1.0, 2.0],
+                    object: None,
                 }],
-                model: None,
+                model: "embedding-model".to_owned(),
+                object: None,
+                usage: None,
             },
         )
         .expect_err("wrong dimension");
@@ -564,11 +614,40 @@ mod tests {
                 data: vec![EmbeddingResponseItem {
                     index: 0,
                     embedding: vec![1.0, 0.0, 0.0],
+                    object: None,
                 }],
-                model: Some("different-model".to_owned()),
+                model: "different-model".to_owned(),
+                object: None,
+                usage: None,
             },
         )
         .expect_err("unexpected model");
         assert!(matches!(error, EmbeddingError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn rejects_invalid_openai_response_metadata() {
+        let input = [EmbeddingInput {
+            id: "query".to_owned(),
+            text: "hello".to_owned(),
+            purpose: EmbeddingPurpose::Query,
+        }];
+        let response = EmbeddingResponse {
+            data: vec![EmbeddingResponseItem {
+                index: 0,
+                embedding: vec![1.0, 0.0, 0.0],
+                object: Some("not-an-embedding".to_owned()),
+            }],
+            model: "embedding-model".to_owned(),
+            object: Some("list".to_owned()),
+            usage: Some(EmbeddingUsage {
+                prompt_tokens: 2,
+                total_tokens: 1,
+            }),
+        };
+        assert!(matches!(
+            validate_response(&profile(), &input, response),
+            Err(EmbeddingError::InvalidResponse(_))
+        ));
     }
 }

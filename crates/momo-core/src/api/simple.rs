@@ -36,8 +36,8 @@ use tokio::sync::OnceCell;
 
 use crate::{
     CapabilityDiscoveryDocument, CapabilityRegistry, ChatInput, ChatParameters, ContextBudget,
-    ContextRequest, ContextSections, EmbeddingEndpoint, EmbeddingInput, EmbeddingProfile,
-    EmbeddingProvider, EmbeddingPurpose, GatewayError, MAX_DISCOVERY_TTL_SECONDS,
+    ContextRequest, ContextSections, EmbeddingEndpoint, EmbeddingError, EmbeddingInput,
+    EmbeddingProfile, EmbeddingProvider, EmbeddingPurpose, GatewayError, MAX_DISCOVERY_TTL_SECONDS,
     MAX_EMBEDDING_BATCH_SIZE, MomoCore, OpenAiEmbeddingProvider, OpenAiGateway, ProviderEndpoint,
     fetch_capability_document, prepare_context,
 };

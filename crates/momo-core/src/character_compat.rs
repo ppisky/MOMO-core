@@ -331,6 +331,7 @@ fn parse_external_json(
             )));
         }
     };
+    let mut warnings = Vec::new();
     if let Some(hint) = hinted_format
         && ((hint.major() == 3) != (detected == 3))
     {
@@ -340,10 +341,28 @@ fn parse_external_json(
     }
     if detected > 1 {
         let spec_version = required_string(root, "spec_version")?;
-        if !spec_version.starts_with(if detected == 2 { '2' } else { '3' }) {
-            return Err(CharacterCompatError::Invalid(format!(
-                "card spec_version {spec_version:?} does not match spec"
-            )));
+        if detected == 2 {
+            if spec_version != "2.0" {
+                return Err(CharacterCompatError::Invalid(format!(
+                    "CCv2 spec_version must be \"2.0\", received {spec_version:?}"
+                )));
+            }
+        } else {
+            let numeric_version = spec_version.parse::<f64>().map_err(|_| {
+                CharacterCompatError::Invalid(format!(
+                    "CCv3 spec_version {spec_version:?} must be a decimal number"
+                ))
+            })?;
+            if !numeric_version.is_finite() || !(3.0..4.0).contains(&numeric_version) {
+                return Err(CharacterCompatError::Invalid(format!(
+                    "CCv3 spec_version {spec_version:?} must be at least 3.0 and lower than 4.0"
+                )));
+            }
+            if numeric_version > 3.0 {
+                warnings.push(format!(
+                    "CCv3 spec_version {spec_version:?} is newer than the implemented 3.0 profile; unknown fields will be preserved"
+                ));
+            }
         }
     }
     let data = if detected == 1 {
@@ -379,7 +398,6 @@ fn parse_external_json(
     } else {
         required_string(data, "character_version")?
     };
-    let mut warnings = Vec::new();
     let version = if semver::Version::parse(raw_version).is_ok() {
         raw_version.to_owned()
     } else {
@@ -1181,6 +1199,42 @@ mod tests {
         assert_eq!(exported["spec"], "chara_card_v3");
         assert_eq!(exported["data"]["name"], "Legacy Snowball");
         assert_eq!(exported["data"]["group_only_greetings"], json!([]));
+    }
+
+    #[test]
+    fn validates_external_spec_versions_without_prefix_guessing() {
+        let mut future_v3 = ccv3();
+        future_v3["spec_version"] = json!("3.1");
+        let parsed = parse_external_json(
+            &serde_json::to_vec(&future_v3).expect("future CCv3 JSON"),
+            None,
+        )
+        .expect("compatible future CCv3 revision");
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("newer than"))
+        );
+
+        for invalid in ["3bad", "30", "2.9"] {
+            let mut card = ccv3();
+            card["spec_version"] = json!(invalid);
+            assert!(
+                parse_external_json(&serde_json::to_vec(&card).expect("invalid CCv3 JSON"), None,)
+                    .is_err()
+            );
+        }
+
+        let mut nonstandard_v2 = ccv2();
+        nonstandard_v2["spec_version"] = json!("2.1");
+        assert!(
+            parse_external_json(
+                &serde_json::to_vec(&nonstandard_v2).expect("nonstandard CCv2 JSON"),
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
