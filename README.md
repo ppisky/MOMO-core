@@ -18,7 +18,7 @@ local HTTP interface in one workspace.
 - Narrative Semantic Graph (NSG)
 - MO State compilation
 - SQLite application storage and a separate Turso vector store
-- OpenAI-compatible completion and streaming
+- OpenAI-compatible completion, streaming, and embeddings
 - capability discovery and context budgeting
 - vector-store contracts and deterministic retrieval
 
@@ -39,10 +39,12 @@ source container and survive MOC round trips.
 Compatibility design for external formats is based specifically on
 [Character Card v2](https://github.com/malfoyslastname/character-card-spec-v2)
 and [Character Card v3](https://github.com/kwaroran/character-card-spec-v3).
-CHARX implementation behavior is additionally pinned to the
-[Character Foundry CHARX documentation](https://github.com/character-foundry/character-foundry/blob/master/docs/charx.md).
-See [character-card formats and compatibility](docs/character_card_compatibility.md)
-for source precedence, pinned snapshots, terminology, and implementation status.
+Risu-specific extensions are identified from the
+[RisuAI reference implementation](https://github.com/kwaroran/Risuai), with the
+[Character Foundry CHARX documentation](https://github.com/character-foundry/character-foundry/blob/master/docs/charx.md)
+used only as a downstream cross-check. Unlicensed upstream documents are linked
+rather than redistributed. See [character-card formats and compatibility](docs/character_card_compatibility.md)
+for source precedence, licensing boundaries, terminology, and implementation status.
 
 ## Workspace
 
@@ -77,9 +79,11 @@ details out of the rest of Core; it is not a third database. When upgrading to
 0.3.2, the legacy SQLite `nsg_vectors` table is removed and the host should
 rebuild the vector cache when needed.
 
-Version 0.4.0 still exposes only vector storage and ranking contracts, not an
-embedding-model interface, so an HTTP caller cannot independently build the
-index. See the [embedding interface audit and 0.4.1 plan](docs/vectorization_model_interface_0_4_1.md).
+Version 0.4.1 adds a structured embedding profile, deterministic vector-space
+identity, OpenAI-compatible batch generation, atomic full/incremental NSG index
+rebuilds, and query-text embedding inside scoped retrieval. Raw-vector APIs
+remain available as a low-level compatibility path. See the
+[embedding interface profile](docs/vectorization_model_interface_0_4_1.md).
 
 ## Scope identity
 

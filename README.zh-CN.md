@@ -17,7 +17,7 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 - Narrative Semantic Graph（NSG）
 - MO State 编译
 - SQLite 业务存储与独立 Turso 向量存储
-- OpenAI-compatible completion 与流式输出
+- OpenAI-compatible completion、流式输出与 embeddings
 - capability discovery 与上下文预算
 - 向量存储契约与确定性检索
 
@@ -35,9 +35,10 @@ CCv2/CCv3 JSON 与 CHARX 导出。CHARX 的资产、`x_meta`、`module.risum` �
 
 外部格式兼容设计的规范来源固定为
 [Character Card v2](https://github.com/malfoyslastname/character-card-spec-v2) 与
-[Character Card v3](https://github.com/kwaroran/character-card-spec-v3)；CHARX 的实现行为另以
+[Character Card v3](https://github.com/kwaroran/character-card-spec-v3)。Risu 专用扩展以
+[RisuAI 参考实现](https://github.com/kwaroran/Risuai)确认，
 [Character Foundry CHARX 文档](https://github.com/character-foundry/character-foundry/blob/master/docs/charx.md)
-为固定参考。来源快照、优先级声明和当前实现状态见
+仅用于下游交叉检查；无明确许可证的上游文档只链接、不搬运。来源优先级、许可证边界和当前实现状态见
 [角色卡格式与兼容边界](docs/character_card_compatibility.md)。
 
 ## Workspace
@@ -66,9 +67,10 @@ DMW 与 NSG 的 YAML/Markdown 源文档仍位于 `memory/scopes/<scope_id>`，�
 缓存，不进入 MOC。`NsgVectorStore` 只是隔离 Turso 实现细节的内部接口，不代表第三套
 数据库。升级到 0.3.2 时，旧 SQLite `nsg_vectors` 表会被删除，宿主应按需重建向量缓存。
 
-0.4.0 仍只公开向量存储与排序契约，没有向量化模型接口；HTTP 调用方无法独立完成
-建库闭环。问题确认与 0.4.1 计划见
-[向量化模型接口审计](docs/vectorization_model_interface_0_4_1.md)。
+0.4.1 已增加结构化向量化配置、确定性向量空间 ID、OpenAI-compatible 批量生成、
+NSG 全量/增量原子重建，以及检索时由 Core 将查询文本向量化的主路径。原始向量接口
+继续作为低级兼容能力保留。详见
+[向量化模型接口规范](docs/vectorization_model_interface_0_4_1.md)。
 
 ## Scope 标识
 

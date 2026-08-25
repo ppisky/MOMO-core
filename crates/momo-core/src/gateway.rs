@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use futures_util::StreamExt;
 use momo_domain::MessageRole;
@@ -13,11 +13,22 @@ const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
 const MAX_STREAM_CONTENT_BYTES: usize = 64 * 1024 * 1024;
 const RESERVED_REQUEST_FIELDS: [&str; 4] = ["model", "messages", "temperature", "stream"];
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderEndpoint {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+}
+
+impl fmt::Debug for ProviderEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderEndpoint")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

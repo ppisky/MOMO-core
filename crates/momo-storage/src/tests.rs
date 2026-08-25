@@ -643,6 +643,55 @@ async fn nsg_vectors_are_scope_and_space_isolated_and_validate_input() {
 }
 
 #[tokio::test]
+async fn nsg_vector_snapshot_replacement_is_atomic_and_removes_stale_nodes() {
+    let store = TursoVectorStore::in_memory().await.expect("store");
+    let scope = new_id();
+    let space = "momo-embedding-v1:test";
+    let record = |node_id: &str, dimension: usize| NsgVectorRecord {
+        scope_id: scope,
+        node_id: node_id.to_owned(),
+        source_hash: "a".repeat(64),
+        vector_space_id: space.to_owned(),
+        dimension,
+        vector: vec![1.0; dimension],
+        created_at: Utc::now(),
+    };
+    store
+        .replace_nsg_vectors(scope, space, &[record("old", 2)])
+        .await
+        .expect("initial snapshot");
+    store
+        .replace_nsg_vectors(scope, space, &[record("new", 2)])
+        .await
+        .expect("replacement snapshot");
+    let stored = store
+        .list_nsg_vectors(scope, space)
+        .await
+        .expect("stored vectors");
+    assert_eq!(
+        stored
+            .iter()
+            .map(|item| item.node_id.as_str())
+            .collect::<Vec<_>>(),
+        ["new"]
+    );
+
+    let invalid = [record("a", 2), record("b", 3)];
+    assert!(matches!(
+        store.replace_nsg_vectors(scope, space, &invalid).await,
+        Err(StorageError::InvalidNsgVector(_))
+    ));
+    assert_eq!(
+        store
+            .list_nsg_vectors(scope, space)
+            .await
+            .expect("snapshot after failed validation")[0]
+            .node_id,
+        "new"
+    );
+}
+
+#[tokio::test]
 async fn exact_vector_ranking_filters_stale_records_and_is_deterministic() {
     let store = TursoVectorStore::in_memory().await.expect("store");
     let scope = new_id();

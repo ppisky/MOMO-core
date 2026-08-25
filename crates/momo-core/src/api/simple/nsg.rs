@@ -79,6 +79,7 @@ pub async fn nsg_vector_status_json(
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&serde_json::json!({
+        "vector_space_id": status.vector_space_id,
         "node_count": status.node_count,
         "indexed_count": status.indexed_count,
         "stale_count": status.stale_count,

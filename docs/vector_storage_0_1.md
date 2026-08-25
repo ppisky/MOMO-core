@@ -1,7 +1,7 @@
 # MOMO Vector Storage Profile 0.3
 
 **Status:** implementation profile  
-**Updated:** 2026-08-16
+**Updated:** 2026-08-25
 
 ## Scope
 
@@ -13,9 +13,11 @@ NSG vector storage is accessed through `NsgVectorStore`. The contract covers:
 - deterministic top-k ordering;
 - replaceable storage and ranking backends.
 
-Embedding generation remains a caller responsibility. The caller supplies the
-vector-space identifier, query vector, and source vectors; Core validates and
-uses them through the storage contract.
+`NsgVectorStore` only owns persistence and ranking. Since 0.4.1, Core also
+provides a separate `EmbeddingProvider` boundary, an OpenAI-compatible
+implementation, atomic full or incremental index rebuilds, and query-text
+embedding. Advanced callers may still supply raw space identifiers and vectors.
+See `vectorization_model_interface_0_4_1.md` for that model-facing contract.
 
 ## Two-database runtime layout
 
@@ -56,5 +58,6 @@ table from `momo.sqlite3`; its cache records are deliberately not migrated.
 
 The Turso-backed exact-ranking tests cover scope isolation, vector-space
 isolation, input validation, stale hashes, status reporting, cosine ranking,
-and deterministic ties. The included benchmark is a local regression tool,
-not a product-level performance guarantee.
+deterministic ties, and atomic snapshot replacement that removes deleted
+nodes. The included benchmark is a local regression tool, not a product-level
+performance guarantee.

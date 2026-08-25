@@ -4,6 +4,7 @@ pub mod api;
 mod capability;
 mod character_compat;
 mod context;
+mod embedding;
 mod gateway;
 mod portable;
 
@@ -25,6 +26,11 @@ pub use character_compat::{
 pub use context::{
     ContextBudget, ContextRequest, ContextSections, PreparedContext, estimate_text_tokens,
     prepare_context, prepare_context_with_tokenizer,
+};
+pub use embedding::{
+    EmbeddingBatch, EmbeddingEndpoint, EmbeddingError, EmbeddingInput, EmbeddingNormalization,
+    EmbeddingProfile, EmbeddingProvider, EmbeddingPurpose, EmbeddingVector,
+    MAX_EMBEDDING_BATCH_SIZE, MAX_EMBEDDING_DIMENSION, OpenAiEmbeddingProvider,
 };
 pub use gateway::{
     ChatCompletion, ChatInput, ChatParameters, ChatStreamDelta, GatewayError, OpenAiGateway,

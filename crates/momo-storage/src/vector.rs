@@ -77,6 +77,58 @@ impl TursoVectorStore {
         };
         Ok(removed)
     }
+
+    /// Atomically replace one scope's complete vector-space snapshot.
+    ///
+    /// Callers build and validate the new index before invoking this method, so
+    /// a provider failure cannot destroy the last usable snapshot.
+    pub async fn replace_nsg_vectors(
+        &self,
+        scope_id: Uuid,
+        vector_space_id: &str,
+        records: &[NsgVectorRecord],
+    ) -> Result<(), StorageError> {
+        if vector_space_id.trim().is_empty() {
+            return Err(StorageError::InvalidNsgVector(
+                "vector space identity is required".to_owned(),
+            ));
+        }
+        let mut node_ids = std::collections::HashSet::new();
+        let mut dimension = None;
+        for record in records {
+            validate_nsg_vector(record).map_err(StorageError::InvalidNsgVector)?;
+            if record.scope_id != scope_id
+                || record.vector_space_id != vector_space_id
+                || !node_ids.insert(record.node_id.as_str())
+                || dimension.is_some_and(|expected| expected != record.dimension)
+            {
+                return Err(StorageError::InvalidNsgVector(
+                    "replacement records must have unique nodes and one matching scope, space, and dimension"
+                        .to_owned(),
+                ));
+            }
+            dimension = Some(record.dimension);
+        }
+
+        let connection = self.database.connect()?;
+        connection.execute("BEGIN IMMEDIATE", ()).await?;
+        let result = async {
+            connection
+                .execute(
+                    "DELETE FROM nsg_vectors WHERE scope_id=?1 AND vector_space_id=?2",
+                    (scope_id.to_string(), vector_space_id.to_owned()),
+                )
+                .await?;
+            insert_nsg_vectors(&connection, records).await
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = connection.execute("ROLLBACK", ()).await;
+            return Err(error);
+        }
+        connection.execute("COMMIT", ()).await?;
+        Ok(())
+    }
 }
 
 impl NsgVectorStore for TursoVectorStore {
@@ -86,32 +138,9 @@ impl NsgVectorStore for TursoVectorStore {
         }
         let connection = self.database.connect()?;
         connection.execute("BEGIN IMMEDIATE", ()).await?;
-        for record in records {
-            let result = connection
-                .execute(
-                    r#"INSERT INTO nsg_vectors
-                      (scope_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at)
-                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                      ON CONFLICT(scope_id, node_id, vector_space_id) DO UPDATE SET
-                        source_hash=excluded.source_hash,
-                        dimension=excluded.dimension,
-                        vector_json=excluded.vector_json,
-                        created_at=excluded.created_at"#,
-                    turso::params![
-                        record.scope_id.to_string(),
-                        record.node_id.clone(),
-                        record.source_hash.clone(),
-                        record.vector_space_id.clone(),
-                        record.dimension as i64,
-                        serde_json::to_string(&record.vector)?,
-                        record.created_at.to_rfc3339(),
-                    ],
-                )
-                .await;
-            if let Err(error) = result {
-                let _ = connection.execute("ROLLBACK", ()).await;
-                return Err(error.into());
-            }
+        if let Err(error) = insert_nsg_vectors(&connection, records).await {
+            let _ = connection.execute("ROLLBACK", ()).await;
+            return Err(error);
         }
         connection.execute("COMMIT", ()).await?;
         Ok(())
@@ -181,6 +210,36 @@ impl NsgVectorStore for TursoVectorStore {
             missing_count: current_hashes.len().saturating_sub(indexed),
         })
     }
+}
+
+async fn insert_nsg_vectors(
+    connection: &turso::Connection,
+    records: &[NsgVectorRecord],
+) -> Result<(), StorageError> {
+    for record in records {
+        connection
+            .execute(
+                r#"INSERT INTO nsg_vectors
+                  (scope_id, node_id, source_hash, vector_space_id, dimension, vector_json, created_at)
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                  ON CONFLICT(scope_id, node_id, vector_space_id) DO UPDATE SET
+                    source_hash=excluded.source_hash,
+                    dimension=excluded.dimension,
+                    vector_json=excluded.vector_json,
+                    created_at=excluded.created_at"#,
+                turso::params![
+                    record.scope_id.to_string(),
+                    record.node_id.clone(),
+                    record.source_hash.clone(),
+                    record.vector_space_id.clone(),
+                    record.dimension as i64,
+                    serde_json::to_string(&record.vector)?,
+                    record.created_at.to_rfc3339(),
+                ],
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 fn validate_nsg_vector(record: &NsgVectorRecord) -> Result<(), String> {

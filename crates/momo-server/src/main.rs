@@ -117,6 +117,8 @@ struct RetrieveScopedMemoryRequest {
     include_semantic_graph: bool,
     vector_space_id: Option<String>,
     query_vector: Option<Vec<f64>>,
+    #[serde(default)]
+    embedding: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -389,6 +391,7 @@ fn api_routes() -> Router<AppState> {
         .route("/chat/complete", post(chat_complete))
         .route("/chat/stream", post(chat_stream))
         .route("/chat/cancel/:request_id", post(cancel_chat))
+        .route("/embeddings/generate", post(generate_embeddings))
         .route("/capabilities/resolve", post(resolve_capability))
         .route("/context/prepare", post(prepare_context))
         .route("/mo-state/compile", post(compile_mo_state))
@@ -437,6 +440,10 @@ fn api_routes() -> Router<AppState> {
             post(reject_nsg_pending_candidate),
         )
         .route("/semantic-graph/vector-status", get(nsg_vector_status))
+        .route(
+            "/semantic-graph/vectors/rebuild",
+            post(rebuild_nsg_vector_index),
+        )
         .route("/runtime-config/export", post(export_runtime_config))
         .route("/runtime-config/import", post(import_runtime_config))
         .route("/moc/export", post(export_moc))
@@ -642,6 +649,10 @@ async fn cancel_chat(Path(request_id): Path<String>) -> Json<Value> {
     }))
 }
 
+async fn generate_embeddings(Json(request): Json<Value>) -> Result<Json<Value>, ApiError> {
+    json_result(simple::generate_embeddings_json(to_json_string(&request)?).await)
+}
+
 async fn prepare_context(
     Json(request): Json<PrepareContextRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -690,6 +701,7 @@ async fn retrieve_scoped_memory(
             "include_semantic_graph": request.include_semantic_graph,
             "vector_space_id": request.vector_space_id,
             "query_vector": request.query_vector,
+            "embedding": request.embedding,
         }))?)
         .await,
     )
@@ -861,6 +873,15 @@ async fn nsg_vector_status(
     )
 }
 
+async fn rebuild_nsg_vector_index(
+    State(state): State<AppState>,
+    Json(request): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    json_result(
+        simple::rebuild_nsg_vector_index_json(state.scope_id, to_json_string(&request)?).await,
+    )
+}
+
 async fn export_runtime_config(
     Json(request): Json<RuntimeConfigExportRequest>,
 ) -> Result<Json<OkResponse>, ApiError> {
@@ -1018,6 +1039,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{Method, Request, header},
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt;
 
     #[test]
@@ -1328,6 +1350,158 @@ mod tests {
             .await
             .expect("message response");
         assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/v1/semantic-graph/nodes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "target_file": "lore/vector-test.nsg",
+                            "node": {
+                                "id": "vector_test",
+                                "graph_id": "default",
+                                "type": "fact",
+                                "importance": 0.8,
+                                "mode": "canon",
+                                "status": "active",
+                                "zone": "2",
+                                "anchors": [],
+                                "condition": "",
+                                "trigger": "",
+                                "consequence": "The hidden lake is north of the village.",
+                                "constraint": "",
+                                "source_character_ids": [],
+                                "inject_character_ids": [],
+                                "edges": []
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("NSG write request"),
+            )
+            .await
+            .expect("NSG write response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let embedding_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("embedding listener");
+        let embedding_address = embedding_listener.local_addr().expect("embedding address");
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = embedding_listener.accept().await.expect("accept embedding");
+                let mut request = vec![0_u8; 32 * 1024];
+                let read = socket
+                    .read(&mut request)
+                    .await
+                    .expect("read embedding request");
+                let request = String::from_utf8_lossy(&request[..read]);
+                assert!(request.starts_with("POST /v1/embeddings "));
+                let body = json!({
+                    "model": "test-embedding",
+                    "data": [{"index": 0, "embedding": [1.0, 0.0, 0.0]}]
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write embedding response");
+            }
+        });
+        let embedding = json!({
+            "endpoint": {
+                "base_url": format!("http://{embedding_address}/v1")
+            },
+            "profile": {
+                "provider_id": "test",
+                "endpoint_id": "local-fixture",
+                "model": "test-embedding",
+                "dimension": 3,
+                "normalization": "l2"
+            },
+            "timeout_seconds": 10
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/semantic-graph/vectors/rebuild")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "embedding": embedding,
+                            "mode": "full",
+                            "batch_size": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("vector rebuild request"),
+            )
+            .await
+            .expect("vector rebuild response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let rebuilt: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("vector rebuild body"),
+        )
+        .expect("vector rebuild JSON");
+        assert_eq!(rebuilt["node_count"], 1);
+        assert_eq!(rebuilt["embedded_count"], 1);
+        assert!(
+            rebuilt["vector_space_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("momo-embedding-v1:"))
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/memory/retrieve-scoped")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "scopes": [{
+                                "scope_id": DEFAULT_SCOPE_ID,
+                                "label": "default",
+                                "weight": 1
+                            }],
+                            "query": "unrelated query text",
+                            "max_tokens": 1024,
+                            "include_memory": false,
+                            "include_semantic_graph": true,
+                            "embedding": embedding
+                        })
+                        .to_string(),
+                    ))
+                    .expect("vectorized retrieval request"),
+            )
+            .await
+            .expect("vectorized retrieval response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let retrieved: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 128 * 1024)
+                .await
+                .expect("vectorized retrieval body"),
+        )
+        .expect("vectorized retrieval JSON");
+        assert!(
+            retrieved
+                .as_array()
+                .is_some_and(|items| { items.iter().any(|item| item["id"] == "vector_test") })
+        );
 
         let response = app
             .clone()

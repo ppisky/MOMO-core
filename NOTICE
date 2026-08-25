@@ -6,25 +6,34 @@ This product is licensed under the Apache License, Version 2.0.
 This product uses the official Turso Rust database library, distributed under
 the MIT License: https://github.com/tursodatabase/turso
 
-This product includes reference copies and compatibility work based on the
-Character Card specifications maintained at:
+Character-card compatibility is based on the public format specifications at:
 
   https://github.com/malfoyslastname/character-card-spec-v2
   https://github.com/kwaroran/character-card-spec-v3
-  https://github.com/character-foundry/character-foundry/blob/master/docs/charx.md
 
 The Character Card v3 specification is Copyright (c) 2024 Kwaroran and is
 available under the MIT License. See docs/character-card-spec-v3.LICENSE.
 
-The Character Card v1/v2 specification repository did not declare a license
-when its reference snapshots were verified. Those reference documents remain
-the material of their upstream authors and are not relicensed under the Apache
-License, Version 2.0.
+The Character Card v1/v2 repository did not declare a license when verified.
+MOMO Core therefore links to it but does not redistribute its specification
+documents.
 
-The reference snapshot at docs/character-foundry_charx.md comes from Character
-Foundry commit 322fe8d940d1b91c978b43330b80ab2e115002e4. The upstream README
-declares the repository to be MIT licensed, but that commit has no standalone
-root LICENSE file or more specific copyright notice. Copyright remains with
-the Character Foundry contributors. The snapshot is included for
-interoperability reference and is not relicensed under Apache-2.0. See
-docs/character-foundry-charx.LICENSE.
+RisuAI's GPL-3.0 source was reviewed only to identify de facto interoperability
+extensions such as CHARX-JPEG, x_meta, and module.risum:
+
+  https://github.com/kwaroran/Risuai
+
+MOMO Core does not include verbatim or mechanically translated RisuAI source
+code. The CHARX adapter was nevertheless written after public implementation
+sources had been reviewed, so this project does not describe that work as a
+clean-room implementation. This provenance statement is not a legal conclusion
+about derivative-work status; users and distributors must make their own
+licensing assessment.
+
+The downstream Character Foundry CHARX documentation was also reviewed as an
+interoperability reference:
+
+  https://github.com/character-foundry/character-foundry/blob/master/docs/charx.md
+
+The verified Character Foundry commit did not contain a root LICENSE file, so
+MOMO Core links to that document and does not redistribute it.

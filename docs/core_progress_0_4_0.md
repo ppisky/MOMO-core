@@ -16,8 +16,9 @@ container round-trip profile.
 - exports `ccv3_charx`, rebuilding `card.json` from the current MOMO character;
 - preserves embedded assets, `x_meta`, `module.risum`, and unknown safe entries;
 - carries the retained source container through the MOC `tavern_compat` module;
-- pins the Character Foundry CHARX reference and declares source precedence and
-  licensing boundaries.
+- declared the then-used Character Foundry compatibility reference. Version
+  0.4.1 replaces the redistributed snapshot with upstream links and a corrected
+  normative/reference-implementation hierarchy.
 
 The output archive is a standard ZIP. Compression bytes, timestamps, and entry
 ordering are not promised to match the source archive. A native MOMO character

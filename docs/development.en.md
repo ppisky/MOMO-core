@@ -48,10 +48,11 @@ dimensions, source hashes, and stable ordering. The index is disposable: the
 filesystem source documents are authoritative and MOC exports do not include
 the Turso database.
 
-`NsgVectorStore` is not an embedding-model provider. Version 0.4.0 has no
-OpenAI-compatible embeddings call or HTTP index-build workflow. The confirmed
-gap and proposed 0.4.1 boundary are documented in
-`vectorization_model_interface_0_4_1.md`.
+`NsgVectorStore` remains the persistence and ranking boundary rather than an
+embedding-model provider. Version 0.4.1 adds a separate `EmbeddingProvider`,
+an OpenAI-compatible implementation, HTTP batch generation, atomic full or
+incremental NSG index rebuilds, and query-text embedding. The implemented
+contract is documented in `vectorization_model_interface_0_4_1.md`.
 
 ## Runtime data and secrets
 

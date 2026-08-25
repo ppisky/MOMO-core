@@ -25,6 +25,8 @@ struct ScopedMemoryJsonRequest {
     include_semantic_graph: bool,
     vector_space_id: Option<String>,
     query_vector: Option<Vec<f64>>,
+    #[serde(default)]
+    embedding: Option<EmbeddingRequestConfig>,
 }
 
 struct VectorQuery {
@@ -61,9 +63,33 @@ pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String,
             return Err("vector_space_id and query_vector must be provided together".to_owned());
         }
     }
-    if !request.include_semantic_graph && request.vector_space_id.is_some() {
+    if request.embedding.is_some()
+        && (request.vector_space_id.is_some() || request.query_vector.is_some())
+    {
+        return Err(
+            "embedding configuration cannot be combined with a caller-supplied raw vector"
+                .to_owned(),
+        );
+    }
+    if !request.include_semantic_graph
+        && (request.vector_space_id.is_some() || request.embedding.is_some())
+    {
         return Err("vector retrieval requires semantic graph retrieval".to_owned());
     }
+
+    let generated_vector = if let Some(embedding) = request.embedding.as_ref() {
+        Some(embed_query(embedding, &request.query).await?)
+    } else {
+        None
+    };
+    let vector_space_id = generated_vector
+        .as_ref()
+        .map(|(space_id, _)| space_id)
+        .or(request.vector_space_id.as_ref());
+    let query_vector = generated_vector
+        .as_ref()
+        .map(|(_, vector)| vector)
+        .or(request.query_vector.as_ref());
 
     let budgets = weighted_scope_budgets(&request.scopes, request.max_tokens);
     let mut combined = Vec::new();
@@ -73,10 +99,8 @@ pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String,
         }
         let scope_id =
             uuid::Uuid::parse_str(&source.scope_id).map_err(|error| error.to_string())?;
-        let vector = request
-            .vector_space_id
-            .as_ref()
-            .zip(request.query_vector.as_ref())
+        let vector = vector_space_id
+            .zip(query_vector)
             .map(|(space_id, vector)| VectorQuery {
                 space_id: space_id.clone(),
                 vector: vector.clone(),

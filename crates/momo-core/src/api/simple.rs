@@ -2,6 +2,7 @@ mod capabilities;
 mod character_compat;
 mod chat;
 mod crypto;
+mod embeddings;
 mod fonts;
 mod local_data;
 mod memory;
@@ -13,6 +14,7 @@ pub use capabilities::*;
 pub use character_compat::*;
 pub use chat::*;
 pub use crypto::*;
+pub use embeddings::*;
 pub use fonts::*;
 pub use local_data::*;
 pub use memory::*;
@@ -34,8 +36,10 @@ use tokio::sync::OnceCell;
 
 use crate::{
     CapabilityDiscoveryDocument, CapabilityRegistry, ChatInput, ChatParameters, ContextBudget,
-    ContextRequest, ContextSections, GatewayError, MAX_DISCOVERY_TTL_SECONDS, MomoCore,
-    OpenAiGateway, ProviderEndpoint, fetch_capability_document, prepare_context,
+    ContextRequest, ContextSections, EmbeddingEndpoint, EmbeddingInput, EmbeddingProfile,
+    EmbeddingProvider, EmbeddingPurpose, GatewayError, MAX_DISCOVERY_TTL_SECONDS,
+    MAX_EMBEDDING_BATCH_SIZE, MomoCore, OpenAiEmbeddingProvider, OpenAiGateway, ProviderEndpoint,
+    fetch_capability_document, prepare_context,
 };
 use momo_storage::{DEFAULT_NSG_VECTOR_TOP_K, NsgVectorStore};
 

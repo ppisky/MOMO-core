@@ -1,64 +1,112 @@
-# 向量化模型接口审计与 0.4.1 修复计划
+# 向量化模型接口（0.4.1）
 
-**状态：** Confirmed Interface Gap / 0.4.1 Planned
-**审计日期：** 2026-08-25
+**状态：** Implemented Profile
+**更新日期：** 2026-08-25
 
 ## 结论
 
-0.4.0 的向量能力不是完整的“向量化模型接口”。当前实现只有向量记录、Turso 持久化、
-余弦排序与状态检查；文本转向量仍完全依赖宿主。Rust 宿主可以直接调用底层存储接口，
-但只使用本地 HTTP API 的调用方无法完成建库闭环。
+0.4.1 补齐了文本到向量、NSG 索引重建和查询文本向量化的闭环。低级原始向量接口仍然
+保留给 Rust 宿主和高级调用方，但普通 HTTP 调用方不再需要自行生成
+`query_vector` 或手工声明向量空间。
 
-因此 0.4.0 不得宣称支持 OpenAI-compatible embeddings，也不得把
-`NsgVectorStore` 描述成向量化模型适配器。
+## Rust 接口
 
-## 0.4.0 的实际接口
-
-- `NsgVectorStore::upsert_nsg_vectors` 写入调用方已经生成的向量；
-- `NsgVectorStore::rank_nsg_vectors` 对调用方已经生成的查询向量进行排序；
-- `POST /v1/memory/retrieve-scoped` 可选接收成对的 `vector_space_id` 与
-  `query_vector`；
-- `GET /v1/semantic-graph/vector-status` 只报告指定空间的索引状态；
-- `OpenAiGateway` 只实现 `chat/completions`，没有 `embeddings` 请求；
-- HTTP API 没有向量写入、批量生成或 NSG 索引重建入口。
-
-## 已确认的问题
-
-1. 文本查询与浮点向量同时由客户端负责，Core 不能保证索引向量与查询向量来自同一
-   模型、维度、归一化规则或模型修订版；
-2. `vector_space_id` 是未结构化字符串，调用方可自行声明，不能可靠证明兼容性；
-3. HTTP 调用方能够请求向量排序，却不能通过 HTTP 建立该索引；
-4. 维度从记录中间接推断，没有独立的模型能力发现或空间注册结果；
-5. 当前向量使用 `f64` JSON 边界，尚未明确供应商 `float`/base64 编码、批处理和输入
-   上限；
-6. NSG 源文档变化后只会表现为 stale/missing，Core 没有负责重新向量化的公开编排。
-
-## 0.4.1 目标契约（草案，不在 0.4.0 实现）
-
-0.4.1 应增加独立的 `EmbeddingProvider`，至少包含批量接口：
+向量供应商通过独立接口接入：
 
 ```rust
 pub trait EmbeddingProvider {
-    async fn embed_batch(
+    fn embed_batch(
         &self,
         profile: &EmbeddingProfile,
         inputs: &[EmbeddingInput],
-    ) -> Result<EmbeddingBatch, EmbeddingError>;
+    ) -> impl Future<Output = Result<EmbeddingBatch, EmbeddingError>> + Send;
 }
 ```
 
-`EmbeddingProfile` 必须结构化记录模型 ID、端点能力、维度、输入用途、编码格式、
-归一化规则和模型修订标识。`vector_space_id` 应由这些兼容性字段确定性生成，不能继续由
-HTTP 调用方任意拼接；API Key 仍只来自本机安全凭据存储，不进入 ID、日志、TOML 或 MOC。
+内置 `OpenAiEmbeddingProvider` 调用 OpenAI-compatible `POST /embeddings`。
+`EmbeddingProfile` 固定以下兼容性字段：
 
-计划增加的编排能力：
+- `provider_id` 与 `endpoint_id`；
+- `model` 与可选 `model_revision`；
+- `dimension`；
+- `normalization`（`l2` 或 `none`）；
+- 是否向供应商发送 `dimensions`；
+- 查询和文档的可选前缀。
 
-- 文本批量向量化；
-- NSG 全量/增量索引重建；
-- 查询文本在 Core 内向量化后检索；
-- 模型维度与响应数量验证；
-- 限流、超时、批大小和部分失败报告；
-- 保留低级“传入原始向量”Rust 接口用于测试和高级宿主，但不再把它作为普通 HTTP
-  客户端的主路径。
+Core 对这些字段的规范 JSON 做 SHA-256，生成
+`momo-embedding-v1:<digest>` 形式的 `vector_space_id`。端点 URL 和 API Key 不参与
+空间标识，避免部署位置或凭据变化破坏向量兼容性。
 
-0.4.1 实现前，具体 HTTP 路径与 JSON 字段均未冻结。
+## HTTP 接口
+
+### 生成向量
+
+`POST /v1/embeddings/generate`
+
+```json
+{
+  "embedding": {
+    "endpoint": {
+      "base_url": "http://127.0.0.1:8080/v1",
+      "api_key": "optional"
+    },
+    "profile": {
+      "provider_id": "local-openai-compatible",
+      "endpoint_id": "primary",
+      "model": "text-embedding-model",
+      "dimension": 1024,
+      "normalization": "l2",
+      "send_dimensions": true
+    }
+  },
+  "inputs": [
+    { "id": "node-1", "text": "source text", "purpose": "document" }
+  ]
+}
+```
+
+返回值包含确定性的 `vector_space_id`、模型、维度以及按输入 ID 恢复顺序后的向量。
+
+### 重建 NSG 向量索引
+
+`POST /v1/semantic-graph/vectors/rebuild`
+
+请求包含同样的 `embedding` 配置以及 `mode`；目标 scope 由当前本地服务实例的
+`scope_id` 决定：
+
+- `full`：重新向量化该 scope 的全部 NSG 节点；
+- `incremental`：复用相同空间内 `node_id`、`source_hash` 和维度均匹配的记录，只生成
+  已新增或已变化的节点。
+
+所有批次成功后，Core 才会在一个事务中替换该 scope 与向量空间的快照。任一上游请求
+失败时，旧快照保持不变；已从 NSG 删除的节点不会残留在新快照中。
+
+### 使用查询文本检索
+
+`POST /v1/memory/retrieve-scoped` 可传 `embedding` 配置。Core 会把请求中的 `query`
+按 `query` 用途向量化一次，并把得到的空间 ID 和查询向量用于所有目标 scope。
+`embedding` 不能与低级 `vector_space_id`/`query_vector` 同时出现。
+
+低级原始向量路径继续受同模型空间、维度、有限值和非零向量检查约束。
+
+### 查看索引状态
+
+`GET /v1/semantic-graph/vector-status?vector_space_id=...`
+
+目标 scope 同样来自当前本地服务实例。响应明确回显 `vector_space_id`，并报告记录数、
+维度和 missing/stale 节点。
+
+## 验证与限制
+
+- 单批最多 128 条输入；
+- 单条文本最大 1 MiB，单批文本最大 4 MiB；
+- 供应商成功响应最大 64 MiB，错误响应最多保留 2000 字节；
+- 向量维度范围为 1–8192；
+- 请求超时范围为 1–600 秒，索引批大小范围为 1–128；
+- 输入 ID 必须唯一；供应商响应索引必须完整且唯一；
+- 返回数量、维度、模型、有限值和非零范数均经过校验；
+- `l2` 模式在 Core 内统一归一化，避免供应商默认行为差异。
+
+Core 从当前本地请求接收 API Key，并只把它转发到供应商请求的 `Authorization` 头；
+调试输出会将其脱敏。它不进入 `vector_space_id`、向量记录、MOC 或持久化配置。调用方
+仍应从本机安全凭据来源注入，而不是把密钥提交到仓库或可移植文档中。
