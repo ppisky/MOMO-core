@@ -41,6 +41,43 @@ pub struct ChatInput {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewayMessageRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayMessage {
+    pub role: GatewayMessageRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ChatToolCall>,
+}
+
+impl From<&ChatInput> for GatewayMessage {
+    fn from(message: &ChatInput) -> Self {
+        let role = match message.role {
+            MessageRole::System => GatewayMessageRole::System,
+            MessageRole::User => GatewayMessageRole::User,
+            MessageRole::Assistant => GatewayMessageRole::Assistant,
+        };
+        Self {
+            role,
+            content: Some(message.content.clone()),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatParameters {
     #[serde(default)]
@@ -127,6 +164,8 @@ pub enum GatewayError {
     InvalidBaseUrl(#[from] url::ParseError),
     #[error("invalid authorization header")]
     InvalidAuthorization,
+    #[error("invalid gateway message: {0}")]
+    InvalidMessage(String),
     #[error("model request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("model endpoint returned HTTP {status}: {body}")]
@@ -185,6 +224,21 @@ impl OpenAiGateway {
         messages: &[ChatInput],
         parameters: ChatParameters,
     ) -> Result<ChatCompletion, GatewayError> {
+        let messages = messages
+            .iter()
+            .map(GatewayMessage::from)
+            .collect::<Vec<_>>();
+        self.complete_messages(endpoint, &messages, parameters)
+            .await
+    }
+
+    pub async fn complete_messages(
+        &self,
+        endpoint: &ProviderEndpoint,
+        messages: &[GatewayMessage],
+        parameters: ChatParameters,
+    ) -> Result<ChatCompletion, GatewayError> {
+        validate_gateway_messages(messages)?;
         let url = completion_url(&endpoint.base_url)?;
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -232,11 +286,30 @@ impl OpenAiGateway {
         endpoint: &ProviderEndpoint,
         messages: &[ChatInput],
         parameters: ChatParameters,
+        on_delta: F,
+    ) -> Result<ChatCompletion, GatewayError>
+    where
+        F: FnMut(ChatStreamDelta) -> bool,
+    {
+        let messages = messages
+            .iter()
+            .map(GatewayMessage::from)
+            .collect::<Vec<_>>();
+        self.stream_messages(endpoint, &messages, parameters, on_delta)
+            .await
+    }
+
+    pub async fn stream_messages<F>(
+        &self,
+        endpoint: &ProviderEndpoint,
+        messages: &[GatewayMessage],
+        parameters: ChatParameters,
         mut on_delta: F,
     ) -> Result<ChatCompletion, GatewayError>
     where
         F: FnMut(ChatStreamDelta) -> bool,
     {
+        validate_gateway_messages(messages)?;
         let url = completion_url(&endpoint.base_url)?;
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -354,21 +427,74 @@ impl OpenAiGateway {
     }
 }
 
+fn validate_gateway_messages(messages: &[GatewayMessage]) -> Result<(), GatewayError> {
+    if messages.is_empty() {
+        return Err(GatewayError::InvalidMessage(
+            "at least one message is required".to_owned(),
+        ));
+    }
+    for message in messages {
+        let has_content = message
+            .content
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+        match message.role {
+            GatewayMessageRole::System | GatewayMessageRole::User => {
+                if !has_content || message.tool_call_id.is_some() || !message.tool_calls.is_empty()
+                {
+                    return Err(GatewayError::InvalidMessage(
+                        "system and user messages require content and cannot carry tool fields"
+                            .to_owned(),
+                    ));
+                }
+            }
+            GatewayMessageRole::Assistant => {
+                if (!has_content && message.tool_calls.is_empty()) || message.tool_call_id.is_some()
+                {
+                    return Err(GatewayError::InvalidMessage(
+                        "assistant messages require content or tool_calls".to_owned(),
+                    ));
+                }
+                for call in &message.tool_calls {
+                    if call.call_type != "function"
+                        || call.id.is_empty()
+                        || call.id.len() > 256
+                        || call.function.name.is_empty()
+                        || call.function.arguments.len() > MAX_RESPONSE_TOOL_ARGUMENT_BYTES
+                    {
+                        return Err(GatewayError::InvalidMessage(
+                            "assistant function call is invalid".to_owned(),
+                        ));
+                    }
+                }
+            }
+            GatewayMessageRole::Tool => {
+                if !has_content
+                    || message
+                        .tool_call_id
+                        .as_deref()
+                        .is_none_or(|value| value.is_empty() || value.len() > 256)
+                    || !message.tool_calls.is_empty()
+                {
+                    return Err(GatewayError::InvalidMessage(
+                        "tool messages require content and tool_call_id".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn completion_request(
     endpoint: &ProviderEndpoint,
-    messages: &[ChatInput],
+    messages: &[GatewayMessage],
     parameters: &ChatParameters,
     stream: bool,
 ) -> serde_json::Value {
     let mut request = serde_json::json!({
         "model": endpoint.model,
-        "messages": messages
-            .iter()
-            .map(|message| WireMessage {
-                role: message.role.as_str(),
-                content: &message.content,
-            })
-            .collect::<Vec<_>>(),
+        "messages": messages,
         "stream": stream,
     });
     let object = request
@@ -386,12 +512,6 @@ fn completion_request(
         }
     }
     request
-}
-
-#[derive(Serialize)]
-struct WireMessage<'a> {
-    role: &'static str,
-    content: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -602,9 +722,11 @@ mod tests {
                 api_key: None,
                 model: "default-model".to_owned(),
             },
-            &[ChatInput {
-                role: MessageRole::User,
-                content: "hello".to_owned(),
+            &[GatewayMessage {
+                role: GatewayMessageRole::User,
+                content: Some("hello".to_owned()),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
             }],
             &ChatParameters {
                 temperature: Some(0.7),

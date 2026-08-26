@@ -64,15 +64,60 @@ pub enum PortableError {
     Persist(#[from] tempfile::PersistError),
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct ExportSelection {
-    pub config: bool,
-    pub characters: bool,
-    pub conversations: bool,
-    pub memory: bool,
-    pub semantic_graph: bool,
-    /// Limits character export to one card for the role-directory shortcut.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum MocModule {
+    MomoConfig,
+    Characters,
+    Conversations,
+    Memory,
+    SemanticGraph,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MocCompatibility {
+    #[default]
+    None,
+    PreservedSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MocExportPlan {
+    pub modules: Vec<MocModule>,
+    /// Limits the `characters` module to one character. It is invalid unless
+    /// that module is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_id: Option<Uuid>,
+    #[serde(default)]
+    pub compatibility: MocCompatibility,
+}
+
+impl MocExportPlan {
+    fn validate(&self) -> Result<HashSet<MocModule>, PortableError> {
+        let modules = self.modules.iter().copied().collect::<HashSet<_>>();
+        if modules.is_empty() {
+            return Err(PortableError::EmptySelection);
+        }
+        if modules.len() != self.modules.len() {
+            return Err(PortableError::InvalidData(
+                "MOC export modules must not contain duplicates".to_owned(),
+            ));
+        }
+        if self.character_id.is_some() && !modules.contains(&MocModule::Characters) {
+            return Err(PortableError::InvalidData(
+                "character_id requires the characters module".to_owned(),
+            ));
+        }
+        if self.compatibility != MocCompatibility::None && !modules.contains(&MocModule::Characters)
+        {
+            return Err(PortableError::InvalidData(
+                "character compatibility requires the characters module".to_owned(),
+            ));
+        }
+        Ok(modules)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,39 +201,39 @@ pub async fn export_moc(
     output: impl AsRef<Path>,
     scope_id: Uuid,
     settings: &JsonValue,
-    selection: ExportSelection,
+    plan: &MocExportPlan,
 ) -> Result<Manifest, PortableError> {
-    if !selection.config
-        && !selection.characters
-        && !selection.conversations
-        && !selection.memory
-        && !selection.semantic_graph
-    {
-        return Err(PortableError::EmptySelection);
-    }
+    let selected = plan.validate()?;
     let staging = TempDir::new()?;
     let mut modules = Vec::new();
-    if selection.config {
+    if selected.contains(&MocModule::MomoConfig) {
         merged_runtime_config(core, settings)?.save(staging.path().join("config/runtime.toml"))?;
         modules.push(("config".to_owned(), PathBuf::from("config")));
     }
-    if selection.characters {
-        export_characters(core, staging.path(), scope_id, selection.character_id).await?;
+    if selected.contains(&MocModule::Characters) {
+        export_characters(
+            core,
+            staging.path(),
+            scope_id,
+            plan.character_id,
+            plan.compatibility,
+        )
+        .await?;
         modules.push(("characters".to_owned(), PathBuf::from("characters")));
         if staging.path().join("tavern_compat").exists() {
             modules.push(("tavern_compat".to_owned(), PathBuf::from("tavern_compat")));
         }
     }
-    if selection.conversations {
+    if selected.contains(&MocModule::Conversations) {
         export_conversations(core, staging.path(), scope_id).await?;
         modules.push(("conversations".to_owned(), PathBuf::from("conversations")));
     }
-    if selection.memory {
+    if selected.contains(&MocModule::Memory) {
         let memory = core.memory_for_scope(scope_id)?;
         copy_tree_filtered(memory.root(), &staging.path().join("memory"), false)?;
         modules.push(("memory".to_owned(), PathBuf::from("memory")));
     }
-    if selection.semantic_graph {
+    if selected.contains(&MocModule::SemanticGraph) {
         let memory = core.memory_for_scope(scope_id)?;
         copy_tree_filtered(memory.root(), &staging.path().join("semantic_graph"), true)?;
         modules.push(("semantic_graph".to_owned(), PathBuf::from("semantic_graph")));
@@ -210,7 +255,7 @@ pub async fn export_private_moc(
     output: impl AsRef<Path>,
     scope_id: Uuid,
     settings: &JsonValue,
-    selection: ExportSelection,
+    plan: &MocExportPlan,
     passphrase: &str,
 ) -> Result<Manifest, PortableError> {
     if passphrase.is_empty() {
@@ -218,7 +263,7 @@ pub async fn export_private_moc(
     }
     let temporary = TempDir::new()?;
     let inner_path = temporary.path().join("payload.moc");
-    export_moc(core, &inner_path, scope_id, settings, selection).await?;
+    export_moc(core, &inner_path, scope_id, settings, plan).await?;
     let metadata = fs::metadata(&inner_path)?;
     if metadata.len() > PRIVATE_MOC_MAX_BYTES {
         return Err(PortableError::PrivateMocTooLarge);
@@ -425,6 +470,7 @@ async fn export_characters(
     root: &Path,
     scope_id: Uuid,
     character_id: Option<Uuid>,
+    compatibility: MocCompatibility,
 ) -> Result<(), PortableError> {
     let mut characters = core.store().list_characters_for_scope(scope_id).await?;
     if let Some(character_id) = character_id {
@@ -502,10 +548,11 @@ async fn export_characters(
         if let Some(opening) = card.opening_markdown {
             atomic_write(&directory.join("opening.md"), opening.as_bytes())?;
         }
-        if let Some(external) = core
-            .store()
-            .portable_metadata("external_character_card", &card.id.to_string())
-            .await?
+        if compatibility == MocCompatibility::PreservedSource
+            && let Some(external) = core
+                .store()
+                .portable_metadata("external_character_card", &card.id.to_string())
+                .await?
         {
             serde_json::from_str::<serde_json::Value>(&external).map_err(|error| {
                 PortableError::InvalidData(format!(
@@ -514,12 +561,12 @@ async fn export_characters(
             })?;
             let compat_directory = root.join("tavern_compat").join(card.id.to_string());
             fs::create_dir_all(&compat_directory)?;
-            atomic_write(&compat_directory.join("source.json"), external.as_bytes())?;
-            crate::character_compat::export_preserved_charx_source(
+            atomic_write(&compat_directory.join("metadata.json"), external.as_bytes())?;
+            crate::character_compat::export_preserved_source_asset(
                 core,
                 card.id,
                 &external,
-                &compat_directory.join("source.charx"),
+                &compat_directory,
             )
             .map_err(|error| {
                 PortableError::InvalidData(format!(
@@ -688,16 +735,11 @@ async fn import_external_character_sources(
                 "tavern_compat source references unknown character {id}"
             )));
         }
-        let source = read_external_source_asset(&entry.path().join("source.json"))?;
-        crate::character_compat::import_preserved_charx_source(
-            core,
-            id,
-            &source,
-            &entry.path().join("source.charx"),
-        )
-        .map_err(|error| {
-            PortableError::InvalidData(format!("MOC CHARX source cannot be imported: {error}"))
-        })?;
+        let source = read_external_source_asset(&entry.path().join("metadata.json"))?;
+        crate::character_compat::import_preserved_source_asset(core, id, &source, &entry.path())
+            .map_err(|error| {
+                PortableError::InvalidData(format!("MOC CHARX source cannot be imported: {error}"))
+            })?;
         core.store()
             .save_portable_metadata("external_character_card", &id.to_string(), &source)
             .await?;
@@ -985,12 +1027,12 @@ fn read_external_source_asset(path: &Path) -> Result<String, PortableError> {
         || metadata.len() > EXTERNAL_SOURCE_MAX_BYTES
     {
         return Err(PortableError::InvalidData(
-            "tavern_compat source.json has an invalid type or size".to_owned(),
+            "tavern_compat metadata.json has an invalid type or size".to_owned(),
         ));
     }
     let source = fs::read_to_string(path)?;
     serde_json::from_str::<serde_json::Value>(&source).map_err(|error| {
-        PortableError::InvalidData(format!("tavern_compat source.json is invalid: {error}"))
+        PortableError::InvalidData(format!("tavern_compat metadata.json is invalid: {error}"))
     })?;
     Ok(source)
 }
@@ -1145,13 +1187,16 @@ mod tests {
             &output,
             original_scope,
             &settings,
-            ExportSelection {
-                config: true,
-                characters: true,
-                conversations: true,
-                memory: true,
-                semantic_graph: true,
+            &MocExportPlan {
+                modules: vec![
+                    MocModule::MomoConfig,
+                    MocModule::Characters,
+                    MocModule::Conversations,
+                    MocModule::Memory,
+                    MocModule::SemanticGraph,
+                ],
                 character_id: None,
+                compatibility: MocCompatibility::None,
             },
         )
         .await
@@ -1192,13 +1237,10 @@ mod tests {
             &second_output,
             new_scope,
             &settings,
-            ExportSelection {
-                config: false,
-                characters: true,
-                conversations: false,
-                memory: false,
-                semantic_graph: false,
+            &MocExportPlan {
+                modules: vec![MocModule::Characters],
                 character_id: None,
+                compatibility: MocCompatibility::None,
             },
         )
         .await
@@ -1238,13 +1280,10 @@ mod tests {
             &private_output,
             original_scope,
             &settings,
-            ExportSelection {
-                config: true,
-                characters: false,
-                conversations: false,
-                memory: false,
-                semantic_graph: false,
+            &MocExportPlan {
+                modules: vec![MocModule::MomoConfig],
                 character_id: None,
+                compatibility: MocCompatibility::None,
             },
             "private-password",
         )
@@ -1388,13 +1427,10 @@ name = "Creator"
             &output,
             scope_id,
             &serde_json::json!({}),
-            ExportSelection {
-                config: false,
-                characters: false,
-                conversations: true,
-                memory: false,
-                semantic_graph: false,
+            &MocExportPlan {
+                modules: vec![MocModule::Conversations],
                 character_id: None,
+                compatibility: MocCompatibility::None,
             },
         )
         .await
@@ -1520,13 +1556,10 @@ name = "Creator"
             &output,
             scope_id,
             &serde_json::json!({}),
-            ExportSelection {
-                config: false,
-                characters: true,
-                conversations: false,
-                memory: false,
-                semantic_graph: false,
+            &MocExportPlan {
+                modules: vec![MocModule::Characters],
                 character_id: Some(selected_id),
+                compatibility: MocCompatibility::None,
             },
         )
         .await

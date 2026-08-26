@@ -73,6 +73,71 @@ async fn response_operations_survive_reopen_semantics() {
 }
 
 #[tokio::test]
+async fn response_user_message_and_phase_marker_commit_atomically() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let scope_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let now = Utc::now();
+    store
+        .save_conversation(&Conversation {
+            id: conversation_id,
+            scope_id,
+            character_id: None,
+            title: "idempotency".to_owned(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("conversation");
+    store
+        .begin_response_operation(
+            "request-atomic",
+            "fingerprint-atomic",
+            &conversation_id.to_string(),
+        )
+        .await
+        .expect("operation");
+    let first = Message {
+        id: Uuid::new_v4(),
+        conversation_id,
+        role: MessageRole::User,
+        content: "only once".to_owned(),
+        created_at: now,
+    };
+    assert!(
+        store
+            .append_response_user_message("request-atomic", &first)
+            .await
+            .expect("first append")
+    );
+    let retry = Message {
+        id: Uuid::new_v4(),
+        ..first.clone()
+    };
+    assert!(
+        !store
+            .append_response_user_message("request-atomic", &retry)
+            .await
+            .expect("idempotent retry")
+    );
+    assert_eq!(
+        store
+            .list_messages(conversation_id)
+            .await
+            .expect("messages"),
+        vec![first]
+    );
+    assert!(
+        store
+            .response_operation("request-atomic")
+            .await
+            .expect("operation")
+            .expect("stored operation")
+            .user_written
+    );
+}
+
+#[tokio::test]
 async fn maintenance_turns_are_independently_acknowledged() {
     let store = LocalStore::in_memory().await.expect("store");
     let turn = MaintenanceTurn {

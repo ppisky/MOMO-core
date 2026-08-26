@@ -26,8 +26,7 @@ const MAX_CHARX_ENTRY_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_CHARX_EXPANDED_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_CHARX_ENTRIES: usize = 10_000;
 const EXTERNAL_METADATA_CATEGORY: &str = "external_character_card";
-const CHARX_SOURCE_DIRECTORY: &str = "character-packages";
-const CHARX_SOURCE_FILE: &str = "source.charx";
+const SOURCE_DIRECTORY: &str = "character-packages";
 
 #[derive(Debug, Error)]
 pub enum CharacterCompatError {
@@ -45,7 +44,7 @@ pub enum CharacterCompatError {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum ExternalCharacterSourceFormat {
+pub enum ExternalCharacterImportFormat {
     Ccv1Json,
     Ccv1Png,
     Ccv2Json,
@@ -55,7 +54,7 @@ enum ExternalCharacterSourceFormat {
     Ccv3Charx,
 }
 
-impl ExternalCharacterSourceFormat {
+impl ExternalCharacterImportFormat {
     const fn major(self) -> u8 {
         match self {
             Self::Ccv1Json | Self::Ccv1Png | Self::Ccv2Json | Self::Ccv2Png => 2,
@@ -89,11 +88,19 @@ impl std::str::FromStr for ExternalCharacterExportFormat {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredExternalCharacter {
-    source_format: ExternalCharacterSourceFormat,
+    source_format: ExternalCharacterImportFormat,
     card: Value,
     warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<StoredSourceFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     charx: Option<StoredCharxPackage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StoredSourceFile {
+    sha256: String,
+    size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,9 +121,18 @@ pub struct ExternalCharacterImport {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PreservedCharacterSourceExport {
+    pub character_id: Uuid,
+    pub source_format: String,
+    pub output_path: PathBuf,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
 #[derive(Debug)]
 struct ParsedExternalCharacter {
-    format: ExternalCharacterSourceFormat,
+    format: ExternalCharacterImportFormat,
     card: Value,
     name: String,
     author_name: String,
@@ -139,8 +155,11 @@ pub async fn import_external_character(
     core: &MomoCore,
     scope_id: Uuid,
     input_path: impl AsRef<Path>,
+    format: ExternalCharacterImportFormat,
 ) -> Result<ExternalCharacterImport, CharacterCompatError> {
-    let parsed = parse_external_path(input_path.as_ref())?;
+    let input_path = input_path.as_ref();
+    let parsed = parse_external_path(input_path, format)?;
+    let source_bytes = fs::read(input_path)?;
     let now = Utc::now();
     let character = CharacterCard {
         id: momo_domain::new_id(),
@@ -156,13 +175,15 @@ pub async fn import_external_character(
         updated_at: now,
     };
     core.store().stage_character(&character).await?;
-    if let Some(package) = &parsed.charx {
-        save_charx_source(core, character.id, &package.bytes)?;
-    }
+    save_preserved_source(core, character.id, parsed.format, &source_bytes)?;
     let stored = StoredExternalCharacter {
         source_format: parsed.format,
         card: parsed.card,
         warnings: parsed.warnings.clone(),
+        source: Some(StoredSourceFile {
+            sha256: hex::encode(Sha256::digest(&source_bytes)),
+            size: source_bytes.len() as u64,
+        }),
         charx: parsed.charx.as_ref().map(|package| package.info.clone()),
     };
     core.store()
@@ -177,6 +198,53 @@ pub async fn import_external_character(
         source_format: source_format_name(parsed.format).to_owned(),
         warnings: parsed.warnings,
     })
+}
+
+pub async fn export_preserved_character_source(
+    core: &MomoCore,
+    scope_id: Uuid,
+    character_id: Uuid,
+    output_path: impl AsRef<Path>,
+) -> Result<PreservedCharacterSourceExport, CharacterCompatError> {
+    if !core
+        .store()
+        .list_characters_for_scope(scope_id)
+        .await?
+        .iter()
+        .any(|character| character.id == character_id)
+    {
+        return Err(CharacterCompatError::Invalid(
+            "character does not exist in the requested scope".to_owned(),
+        ));
+    }
+    let stored = load_stored_external_character(core, character_id).await?;
+    let bytes = load_preserved_source(core, character_id, &stored)?;
+    atomic_write_bytes(output_path.as_ref(), &bytes)?;
+    let source = stored.source.ok_or_else(|| {
+        CharacterCompatError::Invalid(
+            "the imported character predates exact source preservation".to_owned(),
+        )
+    })?;
+    Ok(PreservedCharacterSourceExport {
+        character_id,
+        source_format: source_format_name(stored.source_format).to_owned(),
+        output_path: output_path.as_ref().to_path_buf(),
+        bytes: source.size,
+        sha256: source.sha256,
+    })
+}
+
+pub fn validate_external_charx(input_path: impl AsRef<Path>) -> Result<(), CharacterCompatError> {
+    let input_path = input_path.as_ref();
+    let metadata = fs::symlink_metadata(input_path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(CharacterCompatError::Invalid(
+            "CHARX input must be a regular file".to_owned(),
+        ));
+    }
+    ensure_size(metadata.len(), MAX_CHARX_BYTES, "CHARX")?;
+    parse_charx_package(fs::read(input_path)?)?;
+    Ok(())
 }
 
 pub async fn export_external_character(
@@ -207,12 +275,12 @@ pub async fn export_external_character(
         matches!(
             (source.source_format, format),
             (
-                ExternalCharacterSourceFormat::Ccv2Json | ExternalCharacterSourceFormat::Ccv2Png,
+                ExternalCharacterImportFormat::Ccv2Json | ExternalCharacterImportFormat::Ccv2Png,
                 ExternalCharacterExportFormat::Ccv2Json
             ) | (
-                ExternalCharacterSourceFormat::Ccv3Json
-                    | ExternalCharacterSourceFormat::Ccv3Png
-                    | ExternalCharacterSourceFormat::Ccv3Charx,
+                ExternalCharacterImportFormat::Ccv3Json
+                    | ExternalCharacterImportFormat::Ccv3Png
+                    | ExternalCharacterImportFormat::Ccv3Charx,
                 ExternalCharacterExportFormat::Ccv3Json | ExternalCharacterExportFormat::Ccv3Charx
             )
         )
@@ -255,7 +323,10 @@ pub async fn export_external_character(
     }))
 }
 
-fn parse_external_path(path: &Path) -> Result<ParsedExternalCharacter, CharacterCompatError> {
+fn parse_external_path(
+    path: &Path,
+    expected_format: ExternalCharacterImportFormat,
+) -> Result<ParsedExternalCharacter, CharacterCompatError> {
     let metadata = fs::metadata(path)?;
     if !metadata.is_file() {
         return Err(CharacterCompatError::Invalid(
@@ -267,17 +338,17 @@ fn parse_external_path(path: &Path) -> Result<ParsedExternalCharacter, Character
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    match extension.as_str() {
+    let parsed = match extension.as_str() {
         "json" => {
             ensure_size(metadata.len(), MAX_JSON_BYTES, "JSON")?;
             parse_external_json(&fs::read(path)?, None)
         }
-        "png" | "apng" => {
-            ensure_size(metadata.len(), MAX_IMAGE_BYTES, "PNG/APNG")?;
+        "png" => {
+            ensure_size(metadata.len(), MAX_IMAGE_BYTES, "PNG")?;
             let (json, chunk) = extract_png_card(&fs::read(path)?)?;
             let hinted = match chunk {
-                PngCardChunk::Ccv3 => Some(ExternalCharacterSourceFormat::Ccv3Png),
-                PngCardChunk::Chara => Some(ExternalCharacterSourceFormat::Ccv2Png),
+                PngCardChunk::Ccv3 => Some(ExternalCharacterImportFormat::Ccv3Png),
+                PngCardChunk::Chara => Some(ExternalCharacterImportFormat::Ccv2Png),
             };
             parse_external_json(&json, hinted)
         }
@@ -286,16 +357,24 @@ fn parse_external_path(path: &Path) -> Result<ParsedExternalCharacter, Character
             let package = read_charx_package(path)?;
             let mut parsed = parse_external_json(
                 &package.card_json,
-                Some(ExternalCharacterSourceFormat::Ccv3Charx),
+                Some(ExternalCharacterImportFormat::Ccv3Charx),
             )?;
             parsed.warnings.extend(package.warnings.clone());
             parsed.charx = Some(package);
             Ok(parsed)
         }
         _ => Err(CharacterCompatError::Invalid(format!(
-            "unsupported input extension {extension:?}; expected json, png, apng, or charx"
+            "unsupported input extension {extension:?}; expected json, png, or charx"
         ))),
+    }?;
+    if parsed.format != expected_format {
+        return Err(CharacterCompatError::Invalid(format!(
+            "declared import format {} does not match detected format {}",
+            source_format_name(expected_format),
+            source_format_name(parsed.format)
+        )));
     }
+    Ok(parsed)
 }
 
 fn ensure_size(actual: u64, limit: u64, label: &str) -> Result<(), CharacterCompatError> {
@@ -309,7 +388,7 @@ fn ensure_size(actual: u64, limit: u64, label: &str) -> Result<(), CharacterComp
 
 fn parse_external_json(
     bytes: &[u8],
-    hinted_format: Option<ExternalCharacterSourceFormat>,
+    hinted_format: Option<ExternalCharacterImportFormat>,
 ) -> Result<ParsedExternalCharacter, CharacterCompatError> {
     if bytes.len() as u64 > MAX_JSON_BYTES {
         return Err(CharacterCompatError::Invalid(
@@ -413,12 +492,12 @@ fn parse_external_json(
         );
     }
     let base_format = match detected {
-        1 => ExternalCharacterSourceFormat::Ccv1Json,
-        2 => ExternalCharacterSourceFormat::Ccv2Json,
-        _ => ExternalCharacterSourceFormat::Ccv3Json,
+        1 => ExternalCharacterImportFormat::Ccv1Json,
+        2 => ExternalCharacterImportFormat::Ccv2Json,
+        _ => ExternalCharacterImportFormat::Ccv3Json,
     };
     let format = match (hinted_format, detected) {
-        (Some(ExternalCharacterSourceFormat::Ccv2Png), 1) => ExternalCharacterSourceFormat::Ccv1Png,
+        (Some(ExternalCharacterImportFormat::Ccv2Png), 1) => ExternalCharacterImportFormat::Ccv1Png,
         (Some(hint), _) => hint,
         (None, _) => base_format,
     };
@@ -504,6 +583,7 @@ fn append_markdown_section(output: &mut String, heading: Option<&str>, value: &s
     output.push_str(value.trim());
 }
 
+#[derive(Debug)]
 enum PngCardChunk {
     Chara,
     Ccv3,
@@ -551,6 +631,12 @@ fn extract_png_card(bytes: &[u8]) -> Result<(Vec<u8>, PngCardChunk), CharacterCo
                 "PNG chunk CRC is invalid".to_owned(),
             ));
         }
+        if chunk_type == b"acTL" {
+            return Err(CharacterCompatError::Invalid(
+                "APNG character cards are not supported; select a static PNG frame explicitly"
+                    .to_owned(),
+            ));
+        }
         if chunk_type == b"tEXt"
             && let Some(separator) = data.iter().position(|byte| *byte == 0)
         {
@@ -574,7 +660,7 @@ fn extract_png_card(bytes: &[u8]) -> Result<(Vec<u8>, PngCardChunk), CharacterCo
         return Ok((json, PngCardChunk::Chara));
     }
     Err(CharacterCompatError::Invalid(
-        "PNG/APNG does not contain a ccv3 or chara tEXt chunk".to_owned(),
+        "PNG does not contain a ccv3 or chara tEXt chunk".to_owned(),
     ))
 }
 
@@ -778,19 +864,82 @@ fn embedded_asset_warnings(
     Ok(warnings)
 }
 
-fn charx_source_path(core: &MomoCore, character_id: Uuid) -> PathBuf {
-    core.data_dir()
-        .join(CHARX_SOURCE_DIRECTORY)
-        .join(character_id.to_string())
-        .join(CHARX_SOURCE_FILE)
+fn source_file_name(format: ExternalCharacterImportFormat) -> &'static str {
+    match format {
+        ExternalCharacterImportFormat::Ccv1Json
+        | ExternalCharacterImportFormat::Ccv2Json
+        | ExternalCharacterImportFormat::Ccv3Json => "source.json",
+        ExternalCharacterImportFormat::Ccv1Png
+        | ExternalCharacterImportFormat::Ccv2Png
+        | ExternalCharacterImportFormat::Ccv3Png => "source.png",
+        ExternalCharacterImportFormat::Ccv3Charx => "source.charx",
+    }
 }
 
-fn save_charx_source(
+fn preserved_source_path(
     core: &MomoCore,
     character_id: Uuid,
+    format: ExternalCharacterImportFormat,
+) -> PathBuf {
+    core.data_dir()
+        .join(SOURCE_DIRECTORY)
+        .join(character_id.to_string())
+        .join(source_file_name(format))
+}
+
+fn save_preserved_source(
+    core: &MomoCore,
+    character_id: Uuid,
+    format: ExternalCharacterImportFormat,
     bytes: &[u8],
 ) -> Result<(), CharacterCompatError> {
-    atomic_write_bytes(&charx_source_path(core, character_id), bytes)
+    atomic_write_bytes(&preserved_source_path(core, character_id, format), bytes)
+}
+
+async fn load_stored_external_character(
+    core: &MomoCore,
+    character_id: Uuid,
+) -> Result<StoredExternalCharacter, CharacterCompatError> {
+    let document = core
+        .store()
+        .portable_metadata(EXTERNAL_METADATA_CATEGORY, &character_id.to_string())
+        .await?
+        .ok_or_else(|| {
+            CharacterCompatError::Invalid("character has no preserved external source".to_owned())
+        })?;
+    Ok(serde_json::from_str(&document)?)
+}
+
+fn load_preserved_source(
+    core: &MomoCore,
+    character_id: Uuid,
+    stored: &StoredExternalCharacter,
+) -> Result<Vec<u8>, CharacterCompatError> {
+    let expected = stored.source.as_ref().ok_or_else(|| {
+        CharacterCompatError::Invalid(
+            "the imported character predates exact source preservation".to_owned(),
+        )
+    })?;
+    let path = preserved_source_path(core, character_id, stored.source_format);
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        CharacterCompatError::Invalid(format!(
+            "preserved source is unavailable at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != expected.size {
+        return Err(CharacterCompatError::Invalid(
+            "preserved source type or size does not match its metadata".to_owned(),
+        ));
+    }
+    ensure_size(metadata.len(), MAX_CHARX_BYTES, "preserved source")?;
+    let bytes = fs::read(path)?;
+    if hex::encode(Sha256::digest(&bytes)) != expected.sha256 {
+        return Err(CharacterCompatError::Invalid(
+            "preserved source hash does not match its metadata".to_owned(),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn load_charx_source(
@@ -798,22 +947,23 @@ fn load_charx_source(
     character_id: Uuid,
     expected: &StoredCharxPackage,
 ) -> Result<Vec<u8>, CharacterCompatError> {
-    let path = charx_source_path(core, character_id);
-    let metadata = fs::symlink_metadata(&path).map_err(|error| {
-        CharacterCompatError::Invalid(format!(
-            "preserved CHARX source is unavailable at {}: {error}",
-            path.display()
-        ))
-    })?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(CharacterCompatError::Invalid(
-            "preserved CHARX source is not a regular file".to_owned(),
-        ));
-    }
-    ensure_size(metadata.len(), MAX_CHARX_BYTES, "preserved CHARX")?;
-    let bytes = fs::read(path)?;
-    let actual_hash = hex::encode(Sha256::digest(&bytes));
-    if actual_hash != expected.archive_sha256 {
+    let stored = StoredExternalCharacter {
+        source_format: ExternalCharacterImportFormat::Ccv3Charx,
+        card: Value::Null,
+        warnings: Vec::new(),
+        source: Some(StoredSourceFile {
+            sha256: expected.archive_sha256.clone(),
+            size: fs::metadata(preserved_source_path(
+                core,
+                character_id,
+                ExternalCharacterImportFormat::Ccv3Charx,
+            ))?
+            .len(),
+        }),
+        charx: Some(expected.clone()),
+    };
+    let bytes = load_preserved_source(core, character_id, &stored)?;
+    if hex::encode(Sha256::digest(&bytes)) != expected.archive_sha256 {
         return Err(CharacterCompatError::Invalid(
             "preserved CHARX source hash does not match its metadata".to_owned(),
         ));
@@ -911,56 +1061,65 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), CharacterCompatEr
     Ok(())
 }
 
-pub(crate) fn export_preserved_charx_source(
+pub(crate) fn export_preserved_source_asset(
     core: &MomoCore,
     character_id: Uuid,
     metadata_document: &str,
-    output_path: &Path,
-) -> Result<bool, CharacterCompatError> {
+    output_directory: &Path,
+) -> Result<Option<String>, CharacterCompatError> {
     let stored: StoredExternalCharacter = serde_json::from_str(metadata_document)?;
-    let Some(info) = stored.charx.as_ref() else {
-        return Ok(false);
+    let Some(_) = stored.source.as_ref() else {
+        return Ok(None);
     };
-    let bytes = load_charx_source(core, character_id, info)?;
-    atomic_write_bytes(output_path, &bytes)?;
-    Ok(true)
+    let bytes = load_preserved_source(core, character_id, &stored)?;
+    let file_name = source_file_name(stored.source_format).to_owned();
+    atomic_write_bytes(&output_directory.join(&file_name), &bytes)?;
+    Ok(Some(file_name))
 }
 
-pub(crate) fn import_preserved_charx_source(
+pub(crate) fn import_preserved_source_asset(
     core: &MomoCore,
     character_id: Uuid,
     metadata_document: &str,
-    input_path: &Path,
-) -> Result<bool, CharacterCompatError> {
+    input_directory: &Path,
+) -> Result<Option<String>, CharacterCompatError> {
     let stored: StoredExternalCharacter = serde_json::from_str(metadata_document)?;
-    let Some(expected) = stored.charx.as_ref() else {
-        if input_path.exists() {
-            return Err(CharacterCompatError::Invalid(
-                "MOC contains a CHARX source without matching source metadata".to_owned(),
-            ));
-        }
-        return Ok(false);
+    let Some(expected_source) = stored.source.as_ref() else {
+        return Ok(None);
     };
-    let metadata = fs::symlink_metadata(input_path).map_err(|error| {
+    let file_name = source_file_name(stored.source_format);
+    let input_path = input_directory.join(file_name);
+    let metadata = fs::symlink_metadata(&input_path).map_err(|error| {
         CharacterCompatError::Invalid(format!(
-            "MOC is missing the declared CHARX source {}: {error}",
+            "MOC is missing the declared preserved source {}: {error}",
             input_path.display()
         ))
     })?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != expected_source.size
+    {
         return Err(CharacterCompatError::Invalid(
-            "MOC CHARX source is not a regular file".to_owned(),
+            "MOC preserved source type or size does not match metadata".to_owned(),
         ));
     }
-    ensure_size(metadata.len(), MAX_CHARX_BYTES, "MOC CHARX")?;
-    let parsed = parse_charx_package(fs::read(input_path)?)?;
-    if parsed.info != *expected {
+    ensure_size(metadata.len(), MAX_CHARX_BYTES, "MOC preserved source")?;
+    let bytes = fs::read(&input_path)?;
+    if hex::encode(Sha256::digest(&bytes)) != expected_source.sha256 {
         return Err(CharacterCompatError::Invalid(
-            "MOC CHARX source does not match its declared hash and structure".to_owned(),
+            "MOC preserved source does not match its declared hash".to_owned(),
         ));
     }
-    save_charx_source(core, character_id, &parsed.bytes)?;
-    Ok(true)
+    if let Some(expected_charx) = stored.charx.as_ref() {
+        let parsed = parse_charx_package(bytes.clone())?;
+        if parsed.info != *expected_charx {
+            return Err(CharacterCompatError::Invalid(
+                "MOC CHARX source does not match its declared structure".to_owned(),
+            ));
+        }
+    }
+    save_preserved_source(core, character_id, stored.source_format, &bytes)?;
+    Ok(Some(file_name.to_owned()))
 }
 
 fn export_ccv2(
@@ -1059,15 +1218,15 @@ fn atomic_write_json(path: &Path, value: &Value) -> Result<(), CharacterCompatEr
     Ok(())
 }
 
-const fn source_format_name(format: ExternalCharacterSourceFormat) -> &'static str {
+const fn source_format_name(format: ExternalCharacterImportFormat) -> &'static str {
     match format {
-        ExternalCharacterSourceFormat::Ccv1Json => "ccv1_json",
-        ExternalCharacterSourceFormat::Ccv1Png => "ccv1_png",
-        ExternalCharacterSourceFormat::Ccv2Json => "ccv2_json",
-        ExternalCharacterSourceFormat::Ccv2Png => "ccv2_png",
-        ExternalCharacterSourceFormat::Ccv3Json => "ccv3_json",
-        ExternalCharacterSourceFormat::Ccv3Png => "ccv3_png",
-        ExternalCharacterSourceFormat::Ccv3Charx => "ccv3_charx",
+        ExternalCharacterImportFormat::Ccv1Json => "ccv1_json",
+        ExternalCharacterImportFormat::Ccv1Png => "ccv1_png",
+        ExternalCharacterImportFormat::Ccv2Json => "ccv2_json",
+        ExternalCharacterImportFormat::Ccv2Png => "ccv2_png",
+        ExternalCharacterImportFormat::Ccv3Json => "ccv3_json",
+        ExternalCharacterImportFormat::Ccv3Png => "ccv3_png",
+        ExternalCharacterImportFormat::Ccv3Charx => "ccv3_charx",
     }
 }
 
@@ -1179,7 +1338,7 @@ mod tests {
     fn parses_legacy_ccv1_and_exports_v3() {
         let parsed =
             parse_external_json(&serde_json::to_vec(&ccv1()).expect("JSON"), None).expect("CCv1");
-        assert_eq!(parsed.format, ExternalCharacterSourceFormat::Ccv1Json);
+        assert_eq!(parsed.format, ExternalCharacterImportFormat::Ccv1Json);
         assert_eq!(parsed.author_name, "Unknown");
         let now = Utc::now();
         let character = CharacterCard {
@@ -1246,9 +1405,24 @@ mod tests {
             .await
             .expect("core");
         let scope_id = momo_domain::new_id();
-        let imported = import_external_character(&core, scope_id, &source)
-            .await
-            .expect("import");
+        let imported = import_external_character(
+            &core,
+            scope_id,
+            &source,
+            ExternalCharacterImportFormat::Ccv2Json,
+        )
+        .await
+        .expect("import");
+        let preserved = directory.path().join("preserved.json");
+        let preserved_report =
+            export_preserved_character_source(&core, scope_id, imported.character.id, &preserved)
+                .await
+                .expect("preserved source export");
+        assert_eq!(preserved_report.source_format, "ccv2_json");
+        assert_eq!(
+            fs::read(&preserved).expect("preserved bytes"),
+            fs::read(&source).expect("source bytes")
+        );
         let output = directory.path().join("output.json");
         let report = export_external_character(
             &core,
@@ -1271,13 +1445,10 @@ mod tests {
             &moc,
             scope_id,
             &json!({}),
-            crate::ExportSelection {
-                config: false,
-                characters: true,
-                conversations: false,
-                memory: false,
-                semantic_graph: false,
+            &crate::MocExportPlan {
+                modules: vec![crate::MocModule::Characters],
                 character_id: Some(imported.character.id),
+                compatibility: crate::MocCompatibility::PreservedSource,
             },
         )
         .await
@@ -1310,7 +1481,7 @@ mod tests {
     fn rejects_mismatched_png_chunk_and_spec() {
         let error = parse_external_json(
             &serde_json::to_vec(&ccv2()).expect("JSON"),
-            Some(ExternalCharacterSourceFormat::Ccv3Png),
+            Some(ExternalCharacterImportFormat::Ccv3Png),
         )
         .expect_err("mismatched format");
         assert!(error.to_string().contains("does not match"));
@@ -1321,7 +1492,7 @@ mod tests {
         let png = embedded_png(b"ccv3", &ccv3());
         let (json, chunk) = extract_png_card(&png).expect("embedded CCv3");
         assert!(matches!(chunk, PngCardChunk::Ccv3));
-        let parsed = parse_external_json(&json, Some(ExternalCharacterSourceFormat::Ccv3Png))
+        let parsed = parse_external_json(&json, Some(ExternalCharacterImportFormat::Ccv3Png))
             .expect("CCv3 PNG");
         assert_eq!(parsed.name, "Snowball");
 
@@ -1332,13 +1503,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_apng_instead_of_selecting_a_frame() {
+        let mut png = embedded_png(b"ccv3", &ccv3());
+        let iend = png
+            .windows(4)
+            .position(|window| window == b"IEND")
+            .expect("IEND")
+            - 4;
+        png.splice(iend..iend, png_chunk(b"acTL", &[0, 0, 0, 1, 0, 0, 0, 0]));
+        let error = extract_png_card(&png).expect_err("APNG must be rejected");
+        assert!(error.to_string().contains("APNG"));
+    }
+
+    #[test]
     fn reads_charx_card_and_validates_container() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("card.charx");
         fs::write(&path, charx_bytes(&ccv3(), &[])).expect("CHARX output");
 
-        let parsed = parse_external_path(&path).expect("CHARX import");
-        assert_eq!(parsed.format, ExternalCharacterSourceFormat::Ccv3Charx);
+        let parsed = parse_external_path(&path, ExternalCharacterImportFormat::Ccv3Charx)
+            .expect("CHARX import");
+        assert_eq!(parsed.format, ExternalCharacterImportFormat::Ccv3Charx);
         assert_eq!(parsed.name, "Snowball");
         let package = parsed.charx.expect("CHARX package");
         assert_eq!(package.info.entry_count, 1);
@@ -1385,9 +1570,14 @@ mod tests {
             .await
             .expect("core");
         let scope_id = momo_domain::new_id();
-        let imported = import_external_character(&core, scope_id, &input)
-            .await
-            .expect("CHARX import");
+        let imported = import_external_character(
+            &core,
+            scope_id,
+            &input,
+            ExternalCharacterImportFormat::Ccv3Charx,
+        )
+        .await
+        .expect("CHARX import");
         assert!(
             imported
                 .warnings
@@ -1424,13 +1614,10 @@ mod tests {
             &moc,
             scope_id,
             &json!({}),
-            crate::ExportSelection {
-                config: false,
-                characters: true,
-                conversations: false,
-                memory: false,
-                semantic_graph: false,
+            &crate::MocExportPlan {
+                modules: vec![crate::MocModule::Characters],
                 character_id: Some(imported.character.id),
+                compatibility: crate::MocCompatibility::PreservedSource,
             },
         )
         .await

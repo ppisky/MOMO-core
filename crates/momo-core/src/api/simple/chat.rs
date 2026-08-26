@@ -8,7 +8,7 @@ struct ChatJsonRequest {
     base_url: String,
     api_key: Option<String>,
     model: String,
-    messages: Vec<ChatInput>,
+    messages: Vec<crate::GatewayMessage>,
     #[serde(default)]
     temperature: Option<f32>,
     #[serde(default)]
@@ -77,7 +77,7 @@ pub async fn chat_complete_json(request_json: String) -> Result<String, String> 
         serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
     validate_chat_request(&request)?;
     let completion = OpenAiGateway::default()
-        .complete(&endpoint(&request), &request.messages, parameters(&request))
+        .complete_messages(&endpoint(&request), &request.messages, parameters(&request))
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&completion).map_err(|error| error.to_string())
@@ -123,7 +123,7 @@ pub async fn chat_stream_json(
     let result = {
         let gateway = OpenAiGateway::default();
         let endpoint = endpoint(&request.chat);
-        let stream = gateway.stream(
+        let stream = gateway.stream_messages(
             &endpoint,
             &request.chat.messages,
             parameters(&request.chat),

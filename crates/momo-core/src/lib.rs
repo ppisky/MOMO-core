@@ -23,7 +23,8 @@ pub use capability::{
 };
 pub use character_compat::{
     CharacterCompatError, ExternalCharacterExportFormat, ExternalCharacterImport,
-    export_external_character, import_external_character,
+    ExternalCharacterImportFormat, PreservedCharacterSourceExport, export_external_character,
+    export_preserved_character_source, import_external_character, validate_external_charx,
 };
 pub use context::{
     ContextBudget, ContextRequest, ContextSections, PreparedContext, estimate_text_tokens,
@@ -37,12 +38,13 @@ pub use embedding::{
 pub use gateway::{
     ChatCompletion, ChatFunctionCall, ChatInput, ChatParameters, ChatStreamDelta,
     ChatStreamFunctionCallDelta, ChatStreamToolCallDelta, ChatToolCall, ChatUsage, GatewayError,
-    OpenAiGateway, ProviderEndpoint, SseDecoder,
+    GatewayMessage, GatewayMessageRole, OpenAiGateway, ProviderEndpoint, SseDecoder,
 };
 pub use lsb::{
     LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,
-    LsbPayload, LsbPayloadType, MAX_LSB_IMAGE_PIXELS, MAX_LSB_PAYLOAD_BYTES, MAX_LSB_PNG_BYTES,
-    embed_lsb_carrier, embed_lsb_png, extract_lsb_carrier, extract_lsb_png, lsb_capacity,
+    LsbImageFormat, LsbPayload, LsbPayloadType, MAX_LSB_IMAGE_BYTES, MAX_LSB_IMAGE_PIXELS,
+    MAX_LSB_PAYLOAD_BYTES, embed_lsb_carrier, embed_lsb_image, embed_lsb_png, embed_lsb_webp,
+    extract_lsb_carrier, extract_lsb_image, extract_lsb_png, extract_lsb_webp, lsb_capacity,
 };
 pub use momo_config;
 pub use momo_crypto;
@@ -53,8 +55,8 @@ pub use momo_moc;
 pub use momo_storage;
 pub use momo_storage::{DEFAULT_NSG_VECTOR_TOP_K, MAX_NSG_VECTOR_TOP_K, NsgVectorStatus};
 pub use portable::{
-    ExportSelection, ImportReport, PortableError, export_moc, export_private_moc, import_moc,
-    import_moc_with_passphrase, moc_is_encrypted,
+    ImportReport, MocCompatibility, MocExportPlan, MocModule, PortableError, export_moc,
+    export_private_moc, import_moc, import_moc_with_passphrase, moc_is_encrypted,
 };
 pub use response::{
     MAX_GATEWAY_HOPS, MAX_RESPONSE_ID_BYTES, MAX_RESPONSE_IMAGE_REFERENCE_BYTES,

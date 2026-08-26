@@ -141,6 +141,7 @@ struct CreateCharacterRequest {
 #[serde(deny_unknown_fields)]
 struct ImportExternalCharacterRequest {
     input_path: String,
+    format: momo_core::ExternalCharacterImportFormat,
 }
 
 #[derive(Deserialize)]
@@ -148,6 +149,12 @@ struct ImportExternalCharacterRequest {
 struct ExportExternalCharacterRequest {
     output_path: String,
     format: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportPreservedCharacterSourceRequest {
+    output_path: String,
 }
 
 #[derive(Deserialize)]
@@ -320,16 +327,11 @@ struct MocExportRequest {
     output_path: String,
     #[serde(default)]
     settings: Value,
+    modules: Vec<momo_core::MocModule>,
     #[serde(default)]
-    include_config: bool,
+    compatibility: momo_core::MocCompatibility,
     #[serde(default)]
-    include_characters: bool,
-    #[serde(default)]
-    include_conversations: bool,
-    #[serde(default)]
-    include_memory: bool,
-    #[serde(default)]
-    include_semantic_graph: bool,
+    character_id: Option<String>,
     passphrase: Option<String>,
 }
 
@@ -597,6 +599,10 @@ fn api_routes() -> Router<AppState> {
             post(export_external_character),
         )
         .route(
+            "/characters/:id/export-stored-source",
+            post(export_preserved_character_source),
+        )
+        .route(
             "/characters/:id",
             put(update_character).delete(delete_character),
         )
@@ -676,6 +682,8 @@ fn api_routes() -> Router<AppState> {
         .route("/moc/export-character", post(export_character_moc))
         .route("/moc/import", post(import_moc))
         .route("/moc/encrypted", get(moc_is_encrypted))
+        .route("/lsb/embed", post(embed_lsb_image))
+        .route("/lsb/extract", post(extract_lsb_image))
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -747,6 +755,7 @@ async fn import_external_character(
             json!({
                 "scope_id": state.scope_id,
                 "input_path": request.input_path,
+                "format": request.format,
             })
             .to_string(),
         )
@@ -766,6 +775,24 @@ async fn export_external_character(
                 "character_id": id,
                 "output_path": request.output_path,
                 "format": request.format,
+            })
+            .to_string(),
+        )
+        .await,
+    )
+}
+
+async fn export_preserved_character_source(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ExportPreservedCharacterSourceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    json_result(
+        simple::export_preserved_character_source_json(
+            json!({
+                "scope_id": state.scope_id,
+                "character_id": id,
+                "output_path": request.output_path,
             })
             .to_string(),
         )
@@ -895,6 +922,52 @@ async fn create_response(
                 .await
                 {
                     Ok(response) => {
+                        let message_id = format!("msg_{request_id}");
+                        let _ = stream.send(json!({
+                            "type": "response.output_text.done",
+                            "request_id": request_id,
+                            "item_id": message_id.as_str(),
+                            "output_index": 0,
+                            "content_index": 0,
+                            "text": response.output_text.as_str(),
+                        }));
+                        let _ = stream.send(json!({
+                            "type": "response.content_part.done",
+                            "request_id": request_id,
+                            "item_id": message_id.as_str(),
+                            "output_index": 0,
+                            "content_index": 0,
+                            "part": {
+                                "type": "output_text",
+                                "text": response.output_text.as_str(),
+                                "annotations": [],
+                            },
+                        }));
+                        if let Some(item) = response.output.first() {
+                            let _ = stream.send(json!({
+                                "type": "response.output_item.done",
+                                "request_id": request_id,
+                                "output_index": 0,
+                                "item": item,
+                            }));
+                        }
+                        for (output_index, item) in response.output.iter().enumerate().skip(1) {
+                            if let ResponseOutputItem::FunctionCall { id, arguments, .. } = item {
+                                let _ = stream.send(json!({
+                                    "type": "response.function_call_arguments.done",
+                                    "request_id": request_id,
+                                    "item_id": id,
+                                    "output_index": output_index,
+                                    "arguments": arguments,
+                                }));
+                            }
+                            let _ = stream.send(json!({
+                                "type": "response.output_item.done",
+                                "request_id": request_id,
+                                "output_index": output_index,
+                                "item": item,
+                            }));
+                        }
                         let _ = stream.send(json!({
                             "type": "response.completed",
                             "request_id": request_id,
@@ -1140,7 +1213,6 @@ async fn orchestrate_response(
             .await
             .get(request_id)
             .cloned());
-    let is_retry = attempted_conversation.is_some();
     let conversation_id = if let Some(id) = request
         .momo
         .conversation_id
@@ -1187,15 +1259,15 @@ async fn orchestrate_response(
 
     let user_already_written = persisted
         .and_then(|operation| operation["user_written"].as_bool())
-        .unwrap_or(false)
-        || is_retry;
+        .unwrap_or(false);
     if !user_already_written {
-        simple::stage_message_json(conversation_id.clone(), "user".to_owned(), input.to_owned())
-            .await
-            .map_err(ApiError::internal)?;
-        simple::mark_response_user_written(request_id.to_owned())
-            .await
-            .map_err(ApiError::internal)?;
+        simple::append_response_user_message_json(
+            request_id.to_owned(),
+            conversation_id.clone(),
+            input.to_owned(),
+        )
+        .await
+        .map_err(ApiError::internal)?;
     }
 
     let mut warnings = Vec::new();
@@ -1289,6 +1361,14 @@ async fn orchestrate_response(
             }))
         })
         .collect::<Vec<_>>();
+    if request.input.is_structured()
+        && messages.last().is_some_and(|message| {
+            message.get("role").and_then(Value::as_str) == Some("user")
+                && message.get("content").and_then(Value::as_str) == Some(input)
+        })
+    {
+        messages.pop();
+    }
     if let Some(instructions) = request
         .instructions
         .as_deref()
@@ -1309,6 +1389,21 @@ async fn orchestrate_response(
         })
         .to_string(),
     ))?;
+    let mut gateway_messages = prepared
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if request.input.is_structured() {
+        gateway_messages.extend(
+            request
+                .input
+                .gateway_messages()
+                .map_err(|error| ApiError::bad_request(error.to_string()))?
+                .into_iter()
+                .map(|message| serde_json::to_value(message).expect("gateway message serializes")),
+        );
+    }
     let mut request_parameters = json!({
         "max_tokens": reserve_output_tokens,
         "momo_hop": 1,
@@ -1330,13 +1425,38 @@ async fn orchestrate_response(
         "base_url": state.gateway_origin,
         "api_key": state.gateway_api_key,
         "model": request.model,
-        "messages": prepared.get("messages").cloned().unwrap_or_else(|| json!([])),
+        "messages": gateway_messages,
         "request_parameters": request_parameters,
     });
     let completion = if let Some(stream) = stream {
         ensure_response_active(state, request_id).await?;
         let stream = stream.clone();
         let stream_request_id = request_id.to_owned();
+        let message_item_id = format!("msg_{request_id}");
+        stream
+            .send(json!({
+                "type": "response.output_item.added",
+                "request_id": request_id,
+                "output_index": 0,
+                "item": {
+                    "id": message_item_id.as_str(),
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
+            }))
+            .map_err(ApiError::internal)?;
+        stream
+            .send(json!({
+                "type": "response.content_part.added",
+                "request_id": request_id,
+                "item_id": message_item_id.as_str(),
+                "output_index": 0,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": []},
+            }))
+            .map_err(ApiError::internal)?;
         let streamed_tools = Arc::new(std::sync::Mutex::new(HashMap::<
             usize,
             (String, String, bool),
@@ -1355,6 +1475,9 @@ async fn orchestrate_response(
                 stream.send(json!({
                     "type": "response.output_text.delta",
                     "request_id": stream_request_id,
+                    "item_id": message_item_id.as_str(),
+                    "output_index": 0,
+                    "content_index": 0,
                     "delta": delta,
                 }))?;
             }
@@ -1379,7 +1502,7 @@ async fn orchestrate_response(
                     stream.send(json!({
                         "type": "response.output_item.added",
                         "request_id": stream_request_id,
-                        "output_index": index,
+                        "output_index": index + 1,
                         "item": {
                             "id": tool.0.as_str(),
                             "call_id": tool.0.as_str(),
@@ -1400,7 +1523,7 @@ async fn orchestrate_response(
                         "type": "response.function_call_arguments.delta",
                         "request_id": stream_request_id,
                         "item_id": tool.0.as_str(),
-                        "output_index": index,
+                        "output_index": index + 1,
                         "delta": arguments,
                     }))?;
                 }
@@ -1457,19 +1580,16 @@ async fn orchestrate_response(
         .map_err(ApiError::internal)?;
     }
 
-    let output_id = format!("msg_{}", simple::new_request_id());
-    let mut output = Vec::new();
-    if !content.is_empty() {
-        output.push(ResponseOutputItem::Message {
-            id: output_id,
-            role: "assistant".to_owned(),
-            status: "completed".to_owned(),
-            content: vec![ResponseOutputContent::OutputText {
-                text: content.clone(),
-                annotations: Vec::new(),
-            }],
-        });
-    }
+    let output_id = format!("msg_{request_id}");
+    let mut output = vec![ResponseOutputItem::Message {
+        id: output_id,
+        role: "assistant".to_owned(),
+        status: "completed".to_owned(),
+        content: vec![ResponseOutputContent::OutputText {
+            text: content.clone(),
+            annotations: Vec::new(),
+        }],
+    }];
     for call in tool_calls {
         let id = required_value_str(&call, "id")?.to_owned();
         let function = call
@@ -2199,11 +2319,9 @@ async fn export_moc(
             "output_path": request.output_path,
             "scope_id": state.scope_id,
             "settings": request.settings,
-            "include_config": request.include_config,
-            "include_characters": request.include_characters,
-            "include_conversations": request.include_conversations,
-            "include_memory": request.include_memory,
-            "include_semantic_graph": request.include_semantic_graph,
+            "modules": request.modules,
+            "compatibility": request.compatibility,
+            "character_id": request.character_id,
             "passphrase": request.passphrase,
         }))?)
         .await,
@@ -2247,6 +2365,14 @@ async fn moc_is_encrypted(Query(query): Query<MocEncryptedQuery>) -> Result<Json
     Ok(Json(json!({
         "encrypted": encrypted,
     })))
+}
+
+async fn embed_lsb_image(Json(request): Json<Value>) -> Result<Json<Value>, ApiError> {
+    json_result(simple::embed_lsb_image_json(to_json_string(&request)?).await)
+}
+
+async fn extract_lsb_image(Json(request): Json<Value>) -> Result<Json<Value>, ApiError> {
+    json_result(simple::extract_lsb_image_json(to_json_string(&request)?).await)
 }
 
 fn json_result(result: Result<String, String>) -> Result<Json<Value>, ApiError> {
@@ -2635,7 +2761,9 @@ mod tests {
                     .method(Method::POST)
                     .uri("/v1/characters/import-external")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(json!({"input_path": external_path}).to_string()))
+                    .body(Body::from(
+                        json!({"input_path": external_path, "format": "ccv2_json"}).to_string(),
+                    ))
                     .expect("external import request"),
             )
             .await
@@ -3257,18 +3385,36 @@ mod tests {
                 .iter()
                 .map(|event| event["sequence"].as_u64())
                 .collect::<Vec<_>>(),
-            vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)]
+            (0..events.len() as u64).map(Some).collect::<Vec<_>>()
         );
-        assert_eq!(events[1]["delta"], "Hel");
-        assert_eq!(events[2]["delta"], "lo");
-        assert_eq!(events[3]["type"], "response.output_item.added");
-        assert_eq!(events[3]["item"]["call_id"], "call_1");
-        assert_eq!(events[4]["type"], "response.function_call_arguments.delta");
-        assert_eq!(events[4]["delta"], "{\"city\":\"Shanghai\"}");
-        assert_eq!(events[5]["type"], "response.completed");
-        assert_eq!(events[5]["response"]["output_text"], "Hello");
-        assert_eq!(events[5]["response"]["output"][1]["call_id"], "call_1");
-        assert_eq!(events[5]["response"]["usage"]["total_tokens"], 7);
+        let deltas = events
+            .iter()
+            .filter(|event| event["type"] == "response.output_text.delta")
+            .collect::<Vec<_>>();
+        assert_eq!(deltas[0]["delta"], "Hel");
+        assert_eq!(deltas[1]["delta"], "lo");
+        assert_eq!(deltas[0]["output_index"], 0);
+        assert_eq!(deltas[0]["content_index"], 0);
+        assert!(deltas[0]["item_id"].as_str().is_some());
+        let tool_added = events
+            .iter()
+            .find(|event| {
+                event["type"] == "response.output_item.added"
+                    && event["item"]["type"] == "function_call"
+            })
+            .expect("tool item added");
+        assert_eq!(tool_added["item"]["call_id"], "call_1");
+        assert_eq!(tool_added["output_index"], 1);
+        let argument_delta = events
+            .iter()
+            .find(|event| event["type"] == "response.function_call_arguments.delta")
+            .expect("function arguments delta");
+        assert_eq!(argument_delta["delta"], "{\"city\":\"Shanghai\"}");
+        let completed = events.last().expect("completed event");
+        assert_eq!(completed["type"], "response.completed");
+        assert_eq!(completed["response"]["output_text"], "Hello");
+        assert_eq!(completed["response"]["output"][1]["call_id"], "call_1");
+        assert_eq!(completed["response"]["usage"]["total_tokens"], 7);
     }
 
     #[tokio::test]

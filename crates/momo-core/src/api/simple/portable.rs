@@ -24,11 +24,11 @@ struct ExportMocJsonRequest {
     scope_id: String,
     #[serde(default)]
     settings: serde_json::Value,
-    include_config: bool,
-    include_characters: bool,
-    include_conversations: bool,
-    include_memory: bool,
-    include_semantic_graph: bool,
+    modules: Vec<crate::MocModule>,
+    #[serde(default)]
+    compatibility: crate::MocCompatibility,
+    #[serde(default)]
+    character_id: Option<uuid::Uuid>,
     passphrase: Option<String>,
 }
 
@@ -36,13 +36,10 @@ pub async fn export_moc_json(request_json: String) -> Result<String, String> {
     let request: ExportMocJsonRequest =
         serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
     let scope_id = uuid::Uuid::parse_str(&request.scope_id).map_err(|error| error.to_string())?;
-    let selection = crate::ExportSelection {
-        config: request.include_config,
-        characters: request.include_characters,
-        conversations: request.include_conversations,
-        memory: request.include_memory,
-        semantic_graph: request.include_semantic_graph,
-        character_id: None,
+    let plan = crate::MocExportPlan {
+        modules: request.modules,
+        character_id: request.character_id,
+        compatibility: request.compatibility,
     };
     let manifest = if let Some(passphrase) = request.passphrase.filter(|value| !value.is_empty()) {
         crate::portable::export_private_moc(
@@ -50,7 +47,7 @@ pub async fn export_moc_json(request_json: String) -> Result<String, String> {
             request.output_path,
             scope_id,
             &request.settings,
-            selection,
+            &plan,
             &passphrase,
         )
         .await
@@ -60,7 +57,7 @@ pub async fn export_moc_json(request_json: String) -> Result<String, String> {
             request.output_path,
             scope_id,
             &request.settings,
-            selection,
+            &plan,
         )
         .await
     }
@@ -76,13 +73,10 @@ pub async fn export_character_moc_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let character_id = uuid::Uuid::parse_str(&character_id).map_err(|error| error.to_string())?;
-    let selection = crate::ExportSelection {
-        config: false,
-        characters: true,
-        conversations: false,
-        memory: false,
-        semantic_graph: false,
+    let plan = crate::MocExportPlan {
+        modules: vec![crate::MocModule::Characters],
         character_id: Some(character_id),
+        compatibility: crate::MocCompatibility::None,
     };
     let settings = serde_json::json!({});
     let manifest = if let Some(passphrase) = passphrase.filter(|value| !value.is_empty()) {
@@ -91,12 +85,12 @@ pub async fn export_character_moc_json(
             output_path,
             scope_id,
             &settings,
-            selection,
+            &plan,
             &passphrase,
         )
         .await
     } else {
-        crate::portable::export_moc(core()?, output_path, scope_id, &settings, selection).await
+        crate::portable::export_moc(core()?, output_path, scope_id, &settings, &plan).await
     }
     .map_err(|error| error.to_string())?;
     serde_json::to_string(&manifest).map_err(|error| error.to_string())

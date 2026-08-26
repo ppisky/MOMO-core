@@ -7,25 +7,34 @@
 use std::io::Cursor;
 
 use crc32fast::hash;
-use image::{DynamicImage, ImageFormat};
+use image::{DynamicImage, ImageEncoder, ImageFormat};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const LSB_CARRIER_MAGIC: &[u8; 8] = b"MOMOLSB1";
 pub const LSB_CARRIER_VERSION: u8 = 1;
 pub const LSB_HEADER_BYTES: usize = 24;
 pub const MAX_LSB_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
-pub const MAX_LSB_PNG_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_LSB_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_LSB_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
 
 const FLAG_ZSTD: u8 = 1;
 const KNOWN_FLAGS: u8 = FLAG_ZSTD;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum LsbPayloadType {
     CharacterData = 1,
     Moc = 2,
     Charx = 3,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LsbImageFormat {
+    Png,
+    WebpLossless,
 }
 
 impl TryFrom<u8> for LsbPayloadType {
@@ -85,9 +94,11 @@ pub enum LsbCarrierError {
     Compression(String),
     #[error("LSB payload decompression failed: {0}")]
     Decompression(String),
-    #[error("PNG carrier exceeds the image size limit")]
+    #[error("image carrier exceeds the image size limit")]
     ImageTooLarge,
-    #[error("invalid PNG carrier: {0}")]
+    #[error("animated image carriers are not supported")]
+    AnimatedImage,
+    #[error("invalid lossless image carrier: {0}")]
     InvalidImage(String),
 }
 
@@ -208,54 +219,213 @@ pub fn embed_lsb_png(
     payload: &[u8],
     compress: bool,
 ) -> Result<Vec<u8>, LsbCarrierError> {
-    let image = decode_bounded_png(png)?;
-    let mut rgba = image.to_rgba8();
-    embed_lsb_carrier(rgba.as_mut(), 4, payload_type, payload, compress)?;
-    encode_rgba_png(rgba)
+    embed_lsb_image(png, LsbImageFormat::Png, payload_type, payload, compress)
 }
 
 pub fn extract_lsb_png(png: &[u8]) -> Result<LsbPayload, LsbCarrierError> {
-    let image = decode_bounded_png(png)?;
+    extract_lsb_image(png, LsbImageFormat::Png)
+}
+
+pub fn embed_lsb_webp(
+    webp: &[u8],
+    payload_type: LsbPayloadType,
+    payload: &[u8],
+    compress: bool,
+) -> Result<Vec<u8>, LsbCarrierError> {
+    embed_lsb_image(
+        webp,
+        LsbImageFormat::WebpLossless,
+        payload_type,
+        payload,
+        compress,
+    )
+}
+
+pub fn extract_lsb_webp(webp: &[u8]) -> Result<LsbPayload, LsbCarrierError> {
+    extract_lsb_image(webp, LsbImageFormat::WebpLossless)
+}
+
+pub fn embed_lsb_image(
+    image_bytes: &[u8],
+    format: LsbImageFormat,
+    payload_type: LsbPayloadType,
+    payload: &[u8],
+    compress: bool,
+) -> Result<Vec<u8>, LsbCarrierError> {
+    let image = decode_bounded_image(image_bytes, format)?;
+    let mut rgba = image.to_rgba8();
+    embed_lsb_carrier(rgba.as_mut(), 4, payload_type, payload, compress)?;
+    encode_rgba_image(rgba, format)
+}
+
+pub fn extract_lsb_image(
+    image_bytes: &[u8],
+    format: LsbImageFormat,
+) -> Result<LsbPayload, LsbCarrierError> {
+    let image = decode_bounded_image(image_bytes, format)?;
     let rgba = image.to_rgba8();
     extract_lsb_carrier(rgba.as_raw(), 4)
 }
 
-fn decode_bounded_png(png: &[u8]) -> Result<DynamicImage, LsbCarrierError> {
-    if png.len() > MAX_LSB_PNG_BYTES {
+fn decode_bounded_image(
+    bytes: &[u8],
+    format: LsbImageFormat,
+) -> Result<DynamicImage, LsbCarrierError> {
+    if bytes.len() > MAX_LSB_IMAGE_BYTES {
         return Err(LsbCarrierError::ImageTooLarge);
     }
-    let (width, height) = png_dimensions(png)?;
+    reject_animation(bytes, format)?;
+    let image_format = match format {
+        LsbImageFormat::Png => ImageFormat::Png,
+        LsbImageFormat::WebpLossless => ImageFormat::WebP,
+    };
+    let (width, height) = match format {
+        LsbImageFormat::Png => png_dimensions(bytes)?,
+        LsbImageFormat::WebpLossless => {
+            image::ImageReader::with_format(Cursor::new(bytes), image_format)
+                .into_dimensions()
+                .map_err(|error| LsbCarrierError::InvalidImage(error.to_string()))?
+        }
+    };
     if width == 0
         || height == 0
         || u64::from(width).saturating_mul(u64::from(height)) > MAX_LSB_IMAGE_PIXELS
     {
         return Err(LsbCarrierError::ImageTooLarge);
     }
-    image::load_from_memory_with_format(png, ImageFormat::Png)
+    image::load_from_memory_with_format(bytes, image_format)
         .map_err(|error| LsbCarrierError::InvalidImage(error.to_string()))
 }
 
-fn png_dimensions(png: &[u8]) -> Result<(u32, u32), LsbCarrierError> {
-    if png.len() < 24
-        || &png[..8] != b"\x89PNG\r\n\x1a\n"
-        || &png[12..16] != b"IHDR"
-        || u32::from_be_bytes(png[8..12].try_into().expect("checked PNG header")) != 13
+fn reject_animation(bytes: &[u8], format: LsbImageFormat) -> Result<(), LsbCarrierError> {
+    match format {
+        LsbImageFormat::Png if png_contains_chunk(bytes, b"acTL")? => {
+            Err(LsbCarrierError::AnimatedImage)
+        }
+        LsbImageFormat::WebpLossless if webp_is_animated(bytes)? => {
+            Err(LsbCarrierError::AnimatedImage)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), LsbCarrierError> {
+    if bytes.len() < 24
+        || &bytes[..8] != b"\x89PNG\r\n\x1a\n"
+        || &bytes[12..16] != b"IHDR"
+        || u32::from_be_bytes(bytes[8..12].try_into().expect("checked PNG header")) != 13
     {
         return Err(LsbCarrierError::InvalidImage(
             "missing canonical PNG signature and IHDR".to_owned(),
         ));
     }
     Ok((
-        u32::from_be_bytes(png[16..20].try_into().expect("checked PNG header")),
-        u32::from_be_bytes(png[20..24].try_into().expect("checked PNG header")),
+        u32::from_be_bytes(bytes[16..20].try_into().expect("checked PNG header")),
+        u32::from_be_bytes(bytes[20..24].try_into().expect("checked PNG header")),
     ))
 }
 
-fn encode_rgba_png(image: image::RgbaImage) -> Result<Vec<u8>, LsbCarrierError> {
+fn png_contains_chunk(bytes: &[u8], wanted: &[u8; 4]) -> Result<bool, LsbCarrierError> {
+    if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return Err(LsbCarrierError::InvalidImage(
+            "invalid PNG signature".to_owned(),
+        ));
+    }
+    let mut cursor = 8_usize;
+    while cursor < bytes.len() {
+        if bytes.len().saturating_sub(cursor) < 12 {
+            return Err(LsbCarrierError::InvalidImage(
+                "truncated PNG chunk".to_owned(),
+            ));
+        }
+        let length = u32::from_be_bytes(
+            bytes[cursor..cursor + 4]
+                .try_into()
+                .expect("four-byte PNG length"),
+        ) as usize;
+        let end = cursor
+            .checked_add(12)
+            .and_then(|value| value.checked_add(length))
+            .ok_or_else(|| LsbCarrierError::InvalidImage("PNG chunk overflow".to_owned()))?;
+        if end > bytes.len() {
+            return Err(LsbCarrierError::InvalidImage(
+                "truncated PNG chunk".to_owned(),
+            ));
+        }
+        let kind = &bytes[cursor + 4..cursor + 8];
+        if kind == wanted {
+            return Ok(true);
+        }
+        cursor = end;
+        if kind == b"IEND" {
+            return Ok(false);
+        }
+    }
+    Err(LsbCarrierError::InvalidImage(
+        "PNG has no IEND chunk".to_owned(),
+    ))
+}
+
+fn webp_is_animated(bytes: &[u8]) -> Result<bool, LsbCarrierError> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return Err(LsbCarrierError::InvalidImage(
+            "invalid WebP signature".to_owned(),
+        ));
+    }
+    let mut cursor = 12_usize;
+    while cursor < bytes.len() {
+        if bytes.len().saturating_sub(cursor) < 8 {
+            return Err(LsbCarrierError::InvalidImage(
+                "truncated WebP chunk".to_owned(),
+            ));
+        }
+        let kind = &bytes[cursor..cursor + 4];
+        let length = u32::from_le_bytes(
+            bytes[cursor + 4..cursor + 8]
+                .try_into()
+                .expect("four-byte WebP length"),
+        ) as usize;
+        let data_start = cursor + 8;
+        let end = data_start
+            .checked_add(length)
+            .ok_or_else(|| LsbCarrierError::InvalidImage("WebP chunk overflow".to_owned()))?;
+        if end > bytes.len() {
+            return Err(LsbCarrierError::InvalidImage(
+                "truncated WebP chunk".to_owned(),
+            ));
+        }
+        if kind == b"ANIM" || kind == b"ANMF" {
+            return Ok(true);
+        }
+        if kind == b"VP8X" && length >= 1 && bytes[data_start] & 0x02 != 0 {
+            return Ok(true);
+        }
+        cursor = end + (length & 1);
+    }
+    Ok(false)
+}
+
+fn encode_rgba_image(
+    image: image::RgbaImage,
+    format: LsbImageFormat,
+) -> Result<Vec<u8>, LsbCarrierError> {
     let mut output = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(image)
-        .write_to(&mut output, ImageFormat::Png)
-        .map_err(|error| LsbCarrierError::InvalidImage(error.to_string()))?;
+    match format {
+        LsbImageFormat::Png => DynamicImage::ImageRgba8(image)
+            .write_to(&mut output, ImageFormat::Png)
+            .map_err(|error| LsbCarrierError::InvalidImage(error.to_string()))?,
+        LsbImageFormat::WebpLossless => {
+            let (width, height) = image.dimensions();
+            image::codecs::webp::WebPEncoder::new_lossless(&mut output)
+                .write_image(
+                    image.as_raw(),
+                    width,
+                    height,
+                    image::ExtendedColorType::Rgba8,
+                )
+                .map_err(|error| LsbCarrierError::InvalidImage(error.to_string()))?;
+        }
+    }
     Ok(output.into_inner())
 }
 
@@ -396,13 +566,25 @@ mod tests {
                 ((x * 3 + y * 5) % 256) as u8,
             ])
         });
-        encode_rgba_png(image).expect("fixture PNG")
+        encode_rgba_image(image, LsbImageFormat::Png).expect("fixture PNG")
+    }
+
+    fn webp_fixture() -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(128, 128, |x, y| {
+            image::Rgba([
+                (x % 251) as u8,
+                (y % 241) as u8,
+                ((x + y) % 239) as u8,
+                ((x * 3 + y * 5) % 256) as u8,
+            ])
+        });
+        encode_rgba_image(image, LsbImageFormat::WebpLossless).expect("fixture WebP")
     }
 
     #[test]
     fn png_tail_stripping_and_lossless_rewrap_preserve_carrier() {
         let original = png_fixture();
-        let original_pixels = decode_bounded_png(&original)
+        let original_pixels = decode_bounded_image(&original, LsbImageFormat::Png)
             .expect("original PNG")
             .to_rgba8();
         let mut tailed = original.clone();
@@ -413,7 +595,7 @@ mod tests {
         assert!(!carrier.ends_with(b"UNRELATED-TRAILING-ARCHIVE"));
         assert_eq!(extract_lsb_png(&carrier).expect("extract").bytes, payload);
 
-        let carrier_pixels = decode_bounded_png(&carrier)
+        let carrier_pixels = decode_bounded_image(&carrier, LsbImageFormat::Png)
             .expect("carrier PNG")
             .to_rgba8();
         assert_eq!(carrier_pixels.dimensions(), original_pixels.dimensions());
@@ -424,7 +606,8 @@ mod tests {
             }
         }
 
-        let rewrapped = encode_rgba_png(carrier_pixels).expect("lossless rewrap");
+        let rewrapped =
+            encode_rgba_image(carrier_pixels, LsbImageFormat::Png).expect("lossless rewrap");
         assert_eq!(
             extract_lsb_png(&rewrapped)
                 .expect("extract after rewrap")
@@ -439,5 +622,33 @@ mod tests {
         png[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
         png[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(extract_lsb_png(&png), Err(LsbCarrierError::ImageTooLarge));
+    }
+
+    #[test]
+    fn lossless_webp_round_trip_preserves_carrier() {
+        let payload = b"a complete MOC would be one opaque payload here";
+        let carrier = embed_lsb_webp(&webp_fixture(), LsbPayloadType::Moc, payload, true)
+            .expect("embed lossless WebP");
+        let extracted = extract_lsb_webp(&carrier).expect("extract lossless WebP");
+        assert_eq!(extracted.payload_type, LsbPayloadType::Moc);
+        assert_eq!(extracted.bytes, payload);
+    }
+
+    #[test]
+    fn rejects_apng_before_decoding_a_frame() {
+        let mut png = png_fixture();
+        let iend = png
+            .windows(4)
+            .position(|window| window == b"IEND")
+            .expect("IEND")
+            - 4;
+        let mut animation_control = Vec::new();
+        animation_control.extend_from_slice(&8_u32.to_be_bytes());
+        animation_control.extend_from_slice(b"acTL");
+        animation_control.extend_from_slice(&1_u32.to_be_bytes());
+        animation_control.extend_from_slice(&0_u32.to_be_bytes());
+        animation_control.extend_from_slice(&0_u32.to_be_bytes());
+        png.splice(iend..iend, animation_control);
+        assert_eq!(extract_lsb_png(&png), Err(LsbCarrierError::AnimatedImage));
     }
 }

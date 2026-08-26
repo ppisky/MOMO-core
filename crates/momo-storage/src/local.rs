@@ -251,6 +251,49 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Atomically appends the user message for a response operation and marks
+    /// that phase complete. A retry after any committed transaction observes
+    /// `user_written=1`; a crash before commit observes neither change.
+    pub async fn append_response_user_message(
+        &self,
+        request_id: &str,
+        message: &Message,
+    ) -> Result<bool, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT conversation_id, user_written FROM response_operations WHERE request_id=?",
+        )
+        .bind(request_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let conversation_id: String = row.try_get("conversation_id")?;
+        if conversation_id != message.conversation_id.to_string() {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "response operation conversation does not match user message".to_owned(),
+            )));
+        }
+        if row.try_get::<i64, _>("user_written")? != 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        if insert_message_immutable(&mut transaction, message).await? {
+            sqlx::query("UPDATE conversations SET updated_at=? WHERE id=?")
+                .bind(message.created_at.to_rfc3339())
+                .bind(message.conversation_id.to_string())
+                .execute(&mut *transaction)
+                .await?;
+        }
+        sqlx::query(
+            "UPDATE response_operations SET user_written=1, updated_at=? WHERE request_id=?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(request_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     pub async fn complete_response_operation(
         &self,
         request_id: &str,

@@ -69,6 +69,77 @@ impl ResponseInput {
         }
         Ok(())
     }
+
+    #[must_use]
+    pub const fn is_structured(&self) -> bool {
+        matches!(self, Self::Items(_))
+    }
+
+    pub fn gateway_messages(&self) -> Result<Vec<crate::GatewayMessage>, ResponseContractError> {
+        self.validate()?;
+        let mut messages = Vec::new();
+        match self {
+            Self::Text(text) => messages.push(crate::GatewayMessage {
+                role: crate::GatewayMessageRole::User,
+                content: Some(text.clone()),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }),
+            Self::Items(items) => {
+                for item in items {
+                    let message = match item {
+                        ResponseInputItem::Message { role, content } => crate::GatewayMessage {
+                            role: match role.as_str() {
+                                "system" => crate::GatewayMessageRole::System,
+                                "user" => crate::GatewayMessageRole::User,
+                                "assistant" => crate::GatewayMessageRole::Assistant,
+                                _ => {
+                                    return Err(ResponseContractError::InvalidRole(role.clone()));
+                                }
+                            },
+                            content: Some(content.texts().join("\n")),
+                            tool_call_id: None,
+                            tool_calls: Vec::new(),
+                        },
+                        ResponseInputItem::InputText { text } => crate::GatewayMessage {
+                            role: crate::GatewayMessageRole::User,
+                            content: Some(text.clone()),
+                            tool_call_id: None,
+                            tool_calls: Vec::new(),
+                        },
+                        ResponseInputItem::FunctionCall {
+                            call_id,
+                            name,
+                            arguments,
+                        } => crate::GatewayMessage {
+                            role: crate::GatewayMessageRole::Assistant,
+                            content: None,
+                            tool_call_id: None,
+                            tool_calls: vec![crate::ChatToolCall {
+                                id: call_id.clone(),
+                                call_type: "function".to_owned(),
+                                function: crate::ChatFunctionCall {
+                                    name: name.clone(),
+                                    arguments: arguments.clone(),
+                                },
+                            }],
+                        },
+                        ResponseInputItem::FunctionCallOutput { call_id, output } => {
+                            crate::GatewayMessage {
+                                role: crate::GatewayMessageRole::Tool,
+                                content: Some(output.clone()),
+                                tool_call_id: Some(call_id.clone()),
+                                tool_calls: Vec::new(),
+                            }
+                        }
+                        ResponseInputItem::InputImage { .. } => unreachable!("validated above"),
+                    };
+                    messages.push(message);
+                }
+            }
+        }
+        Ok(messages)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -189,7 +260,7 @@ impl ResponseInputItem {
     fn validate(&self, text_bytes: &mut usize) -> Result<(), ResponseContractError> {
         match self {
             Self::Message { role, content } => {
-                if !matches!(role.as_str(), "system" | "user" | "assistant" | "tool") {
+                if !matches!(role.as_str(), "system" | "user" | "assistant") {
                     return Err(ResponseContractError::InvalidRole(role.clone()));
                 }
                 content.validate(text_bytes)?;
@@ -673,5 +744,26 @@ mod tests {
             result,
             ResponseInputItem::FunctionCallOutput { call_id, .. } if call_id == "call_weather_1"
         ));
+    }
+
+    #[test]
+    fn tool_continuation_keeps_call_identity_at_the_gateway_boundary() {
+        let input = ResponseInput::Items(vec![
+            ResponseInputItem::FunctionCall {
+                call_id: "call_weather_1".to_owned(),
+                name: "lookup_weather".to_owned(),
+                arguments: r#"{"city":"Shanghai"}"#.to_owned(),
+            },
+            ResponseInputItem::FunctionCallOutput {
+                call_id: "call_weather_1".to_owned(),
+                output: r#"{"temperature":28}"#.to_owned(),
+            },
+        ]);
+        let messages = input.gateway_messages().expect("gateway messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, crate::GatewayMessageRole::Assistant);
+        assert_eq!(messages[0].tool_calls[0].id, "call_weather_1");
+        assert_eq!(messages[1].role, crate::GatewayMessageRole::Tool);
+        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_weather_1"));
     }
 }

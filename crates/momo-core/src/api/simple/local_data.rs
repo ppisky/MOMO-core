@@ -202,6 +202,32 @@ pub async fn stage_message_json(
     serde_json::to_string(&message).map_err(|error| error.to_string())
 }
 
+pub async fn append_response_user_message_json(
+    request_id: String,
+    conversation_id: String,
+    content: String,
+) -> Result<String, String> {
+    let conversation_id =
+        uuid::Uuid::parse_str(&conversation_id).map_err(|error| error.to_string())?;
+    let message = momo_domain::Message {
+        id: momo_domain::new_id(),
+        conversation_id,
+        role: momo_domain::MessageRole::User,
+        content,
+        created_at: chrono::Utc::now(),
+    };
+    let inserted = core()?
+        .store()
+        .append_response_user_message(&request_id, &message)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&serde_json::json!({
+        "inserted": inserted,
+        "message": message,
+    }))
+    .map_err(|error| error.to_string())
+}
+
 pub async fn stage_message_update_json(message_json: String) -> Result<String, String> {
     let message: momo_domain::Message =
         serde_json::from_str(&message_json).map_err(|error| error.to_string())?;
