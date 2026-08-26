@@ -72,6 +72,15 @@ usage，并让本地生成接口正确返回 400/502/504。该本地接口仍是
 OpenAI SDK 直接替换 base URL 的服务端接口。原始向量接口继续作为低级能力保留。详见
 [向量化模型接口规范](docs/vectorization_model_interface_0_4_2.md)。
 
+0.5.0 已加入版本化响应契约与 `POST /v1/responses`：一次请求完成消息持久化、
+DMW/NSG 检索、MO State、上下文预算、逻辑路由和助手持久化，并支持真正的上游增量 SSE、
+跨进程 request ID 幂等、Core 所有的 embedding profile，以及可重试的后台 DMW/NSG 维护。
+三协议工具调用已有共享 golden contract 和异协议增量转换；
+[MOMO LSB Carrier v1](docs/momo_lsb_carrier_v1.md) 已接入有界 PNG codec，并覆盖尾部剥离与
+无损重封装。0.5.0 发布候选还统一了错误 envelope、请求与流上限、取消/超时/限流、
+逻辑路由指标，以及 Core 直连和经 mobot 的真实进程 E2E。兼容变化和 1.0 门槛见
+[迁移说明](docs/migration_0_4_2_to_0_5_0.md)与[0.5.0 路线图](docs/roadmap_0_5_0.md)。
+
 ## Scope 标识
 
 `scope_id` 是公开领域模型、API、存储、向量记录、Patch Review 与 MOC 操作使用的

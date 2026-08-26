@@ -6,7 +6,9 @@ mod character_compat;
 mod context;
 mod embedding;
 mod gateway;
+mod lsb;
 mod portable;
+mod response;
 
 use std::path::{Path, PathBuf};
 
@@ -33,8 +35,14 @@ pub use embedding::{
     MAX_EMBEDDING_BATCH_SIZE, MAX_EMBEDDING_DIMENSION, OpenAiEmbeddingProvider,
 };
 pub use gateway::{
-    ChatCompletion, ChatInput, ChatParameters, ChatStreamDelta, GatewayError, OpenAiGateway,
-    ProviderEndpoint, SseDecoder,
+    ChatCompletion, ChatFunctionCall, ChatInput, ChatParameters, ChatStreamDelta,
+    ChatStreamFunctionCallDelta, ChatStreamToolCallDelta, ChatToolCall, ChatUsage, GatewayError,
+    OpenAiGateway, ProviderEndpoint, SseDecoder,
+};
+pub use lsb::{
+    LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,
+    LsbPayload, LsbPayloadType, MAX_LSB_IMAGE_PIXELS, MAX_LSB_PAYLOAD_BYTES, MAX_LSB_PNG_BYTES,
+    embed_lsb_carrier, embed_lsb_png, extract_lsb_carrier, extract_lsb_png, lsb_capacity,
 };
 pub use momo_config;
 pub use momo_crypto;
@@ -47,6 +55,16 @@ pub use momo_storage::{DEFAULT_NSG_VECTOR_TOP_K, MAX_NSG_VECTOR_TOP_K, NsgVector
 pub use portable::{
     ExportSelection, ImportReport, PortableError, export_moc, export_private_moc, import_moc,
     import_moc_with_passphrase, moc_is_encrypted,
+};
+pub use response::{
+    MAX_GATEWAY_HOPS, MAX_RESPONSE_ID_BYTES, MAX_RESPONSE_IMAGE_REFERENCE_BYTES,
+    MAX_RESPONSE_INPUT_BYTES, MAX_RESPONSE_INSTRUCTIONS_BYTES, MAX_RESPONSE_REQUEST_BYTES,
+    MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES, MAX_RESPONSE_TOOL_ARGUMENT_BYTES,
+    MAX_RESPONSE_TOOL_OUTPUT_BYTES, MAX_RESPONSE_TOOL_SCHEMA_BYTES, MAX_RESPONSE_TOOLS,
+    MOMO_RESPONSE_SCHEMA, MomoResponse, MomoResponseEvent, MomoResponseExtension,
+    MomoResponseMetadata, MomoResponseRequest, ResponseContentBlock, ResponseContractError,
+    ResponseError, ResponseInput, ResponseInputItem, ResponseMessageContent, ResponseOutputContent,
+    ResponseOutputItem, ResponseTool, ResponseUsage,
 };
 
 #[derive(Debug, Error)]

@@ -43,6 +43,29 @@ pub struct NsgVectorStatus {
     pub missing_count: usize,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ResponseOperation {
+    pub request_id: String,
+    pub request_fingerprint: String,
+    pub conversation_id: String,
+    pub user_written: bool,
+    pub response_json: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MaintenanceTurn {
+    pub request_id: String,
+    pub scope_id: String,
+    pub user_content: String,
+    pub assistant_content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceKind {
+    Memory,
+    SemanticGraph,
+}
+
 pub const DEFAULT_NSG_VECTOR_TOP_K: usize = 64;
 pub const MAX_NSG_VECTOR_TOP_K: usize = 512;
 

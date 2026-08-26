@@ -1,4 +1,4 @@
-use std::{fmt, time::Duration};
+use std::{collections::BTreeMap, fmt, time::Duration};
 
 use futures_util::StreamExt;
 use momo_domain::MessageRole;
@@ -9,8 +9,12 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
-const MAX_STREAM_CONTENT_BYTES: usize = 64 * 1024 * 1024;
+use crate::response::{
+    MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES, MAX_RESPONSE_TOOL_ARGUMENT_BYTES,
+};
+
+const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_UPSTREAM_ERROR_BYTES: usize = 8 * 1024;
 const RESERVED_REQUEST_FIELDS: [&str; 4] = ["model", "messages", "temperature", "stream"];
 
 #[derive(Clone)]
@@ -39,7 +43,8 @@ pub struct ChatInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatParameters {
-    pub temperature: f32,
+    #[serde(default)]
+    pub temperature: Option<f32>,
     #[serde(default)]
     pub request_parameters: serde_json::Map<String, serde_json::Value>,
 }
@@ -47,7 +52,7 @@ pub struct ChatParameters {
 impl Default for ChatParameters {
     fn default() -> Self {
         Self {
-            temperature: 0.7,
+            temperature: None,
             request_parameters: serde_json::Map::new(),
         }
     }
@@ -56,13 +61,64 @@ impl Default for ChatParameters {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatCompletion {
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ChatToolCall>,
     pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ChatUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: ChatFunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatFunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatUsage {
+    #[serde(default, alias = "prompt_tokens")]
+    pub input_tokens: u64,
+    #[serde(default, alias = "completion_tokens")]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatStreamDelta {
     pub delta: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ChatStreamToolCallDelta>,
     pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatStreamToolCallDelta {
+    pub index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub call_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<ChatStreamFunctionCallDelta>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatStreamFunctionCallDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -85,15 +141,23 @@ pub enum GatewayError {
     Cancelled,
     #[error("model stream ended before the [DONE] event")]
     IncompleteStream,
-    #[error("model stream exceeded the {MAX_STREAM_CONTENT_BYTES} byte response limit")]
+    #[error("model response exceeded the {MAX_RESPONSE_BODY_BYTES} byte limit")]
+    ResponseTooLarge,
+    #[error("model stream exceeded the {MAX_RESPONSE_STREAM_BYTES} byte response limit")]
     StreamTooLarge,
+    #[error(
+        "model stream tool arguments exceeded the {MAX_RESPONSE_TOOL_ARGUMENT_BYTES} byte limit"
+    )]
+    ToolArgumentsTooLarge,
+    #[error("model stream tool call {index} is missing {field}")]
+    IncompleteToolCall { index: usize, field: &'static str },
 }
 
 #[derive(Debug, Error)]
 pub enum SseDecodeError {
     #[error("event contains invalid UTF-8: {0}")]
     InvalidUtf8(#[from] std::str::Utf8Error),
-    #[error("event exceeded the {MAX_SSE_EVENT_BYTES} byte limit")]
+    #[error("event exceeded the {MAX_RESPONSE_SSE_EVENT_BYTES} byte limit")]
     EventTooLarge,
 }
 
@@ -139,21 +203,27 @@ impl OpenAiGateway {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = read_bounded_text(response, MAX_UPSTREAM_ERROR_BYTES).await?;
             return Err(GatewayError::Http {
                 status: status.as_u16(),
-                body: body.chars().take(2_000).collect(),
+                body,
             });
         }
-        let response: CompletionResponse = response.json().await?;
+        let header_request_id = upstream_request_id(response.headers());
+        let body = read_bounded_bytes(response, MAX_RESPONSE_BODY_BYTES).await?;
+        let response: CompletionResponse = serde_json::from_slice(&body)?;
+        let upstream_request_id = header_request_id.or(response.id.clone());
         let choice = response
             .choices
             .into_iter()
             .next()
             .ok_or(GatewayError::MissingChoice)?;
         Ok(ChatCompletion {
-            content: choice.message.content,
+            content: choice.message.content.unwrap_or_default(),
+            tool_calls: choice.message.tool_calls,
             finish_reason: choice.finish_reason,
+            usage: response.usage,
+            upstream_request_id,
         })
     }
 
@@ -185,42 +255,94 @@ impl OpenAiGateway {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = read_bounded_text(response, MAX_UPSTREAM_ERROR_BYTES).await?;
             return Err(GatewayError::Http {
                 status: status.as_u16(),
-                body: body.chars().take(2_000).collect(),
+                body,
             });
         }
 
+        let mut upstream_request_id = upstream_request_id(response.headers());
         let mut bytes = response.bytes_stream();
         let mut decoder = SseDecoder::new();
         let mut content = String::new();
+        let mut tool_calls = BTreeMap::<usize, PendingToolCall>::new();
+        let mut stream_content_bytes = 0_usize;
         let mut finish_reason = None;
+        let mut usage = None;
         while let Some(chunk) = bytes.next().await {
             for event in decoder.push_bytes(&chunk?)? {
                 if event == "[DONE]" {
+                    let tool_calls = complete_tool_calls(tool_calls)?;
                     return Ok(ChatCompletion {
                         content,
+                        tool_calls,
                         finish_reason,
+                        usage,
+                        upstream_request_id,
                     });
                 }
                 let response: StreamResponse = serde_json::from_str(&event)?;
+                if upstream_request_id.is_none() {
+                    upstream_request_id = response.id;
+                }
+                if response.usage.is_some() {
+                    usage = response.usage;
+                }
                 let Some(choice) = response.choices.into_iter().next() else {
                     continue;
                 };
                 let delta = choice.delta.content.unwrap_or_default();
+                let tool_deltas = choice.delta.tool_calls;
+                let added_bytes = delta.len().saturating_add(
+                    tool_deltas
+                        .iter()
+                        .map(|call| {
+                            call.id.as_deref().map_or(0, str::len)
+                                + call.call_type.as_deref().map_or(0, str::len)
+                                + call.function.as_ref().map_or(0, |function| {
+                                    function.name.as_deref().map_or(0, str::len)
+                                        + function.arguments.as_deref().map_or(0, str::len)
+                                })
+                        })
+                        .sum::<usize>(),
+                );
+                stream_content_bytes = stream_content_bytes.saturating_add(added_bytes);
+                if stream_content_bytes > MAX_RESPONSE_STREAM_BYTES {
+                    return Err(GatewayError::StreamTooLarge);
+                }
                 if !delta.is_empty() {
-                    if content.len().saturating_add(delta.len()) > MAX_STREAM_CONTENT_BYTES {
-                        return Err(GatewayError::StreamTooLarge);
-                    }
                     content.push_str(&delta);
+                }
+                for call in &tool_deltas {
+                    let pending = tool_calls.entry(call.index).or_default();
+                    if let Some(id) = &call.id {
+                        pending.id.get_or_insert_with(|| id.clone());
+                    }
+                    if let Some(call_type) = &call.call_type {
+                        pending.call_type.get_or_insert_with(|| call_type.clone());
+                    }
+                    if let Some(function) = &call.function {
+                        if let Some(name) = &function.name {
+                            pending.name.get_or_insert_with(|| name.clone());
+                        }
+                        if let Some(arguments) = &function.arguments {
+                            if pending.arguments.len().saturating_add(arguments.len())
+                                > MAX_RESPONSE_TOOL_ARGUMENT_BYTES
+                            {
+                                return Err(GatewayError::ToolArgumentsTooLarge);
+                            }
+                            pending.arguments.push_str(arguments);
+                        }
+                    }
                 }
                 if choice.finish_reason.is_some() {
                     finish_reason.clone_from(&choice.finish_reason);
                 }
-                if (!delta.is_empty() || choice.finish_reason.is_some())
+                if (!delta.is_empty() || !tool_deltas.is_empty() || choice.finish_reason.is_some())
                     && !on_delta(ChatStreamDelta {
                         delta,
+                        tool_calls: tool_deltas,
                         finish_reason: choice.finish_reason,
                     })
                 {
@@ -247,12 +369,14 @@ fn completion_request(
                 content: &message.content,
             })
             .collect::<Vec<_>>(),
-        "temperature": parameters.temperature,
         "stream": stream,
     });
     let object = request
         .as_object_mut()
         .expect("completion request is always a JSON object");
+    if let Some(temperature) = parameters.temperature {
+        object.insert("temperature".to_owned(), serde_json::json!(temperature));
+    }
     for (key, value) in &parameters.request_parameters {
         // These fields define MOMO's protocol and request lifecycle. Keeping
         // the guard here as well as at the API boundary prevents another
@@ -272,7 +396,11 @@ struct WireMessage<'a> {
 
 #[derive(Deserialize)]
 struct CompletionResponse {
+    #[serde(default)]
+    id: Option<String>,
     choices: Vec<CompletionChoice>,
+    #[serde(default)]
+    usage: Option<ChatUsage>,
 }
 
 #[derive(Deserialize)]
@@ -283,13 +411,63 @@ struct CompletionChoice {
 
 #[derive(Deserialize)]
 struct CompletionMessage {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ChatToolCall>,
 }
 
 #[derive(Deserialize)]
 struct StreamResponse {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<ChatUsage>,
+}
+
+fn upstream_request_id(headers: &HeaderMap) -> Option<String> {
+    ["x-request-id", "request-id", "openai-request-id"]
+        .into_iter()
+        .find_map(|name| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .map(str::to_owned)
+        })
+}
+
+async fn read_bounded_bytes(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, GatewayError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(GatewayError::ResponseTooLarge);
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(GatewayError::ResponseTooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn read_bounded_text(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<String, GatewayError> {
+    let bytes = read_bounded_bytes(response, limit).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[derive(Deserialize)]
@@ -300,7 +478,41 @@ struct StreamChoice {
 
 #[derive(Deserialize)]
 struct StreamMessage {
+    #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ChatStreamToolCallDelta>,
+}
+
+#[derive(Default)]
+struct PendingToolCall {
+    id: Option<String>,
+    call_type: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+fn complete_tool_calls(
+    pending: BTreeMap<usize, PendingToolCall>,
+) -> Result<Vec<ChatToolCall>, GatewayError> {
+    pending
+        .into_iter()
+        .map(|(index, call)| {
+            Ok(ChatToolCall {
+                id: call
+                    .id
+                    .ok_or(GatewayError::IncompleteToolCall { index, field: "id" })?,
+                call_type: call.call_type.unwrap_or_else(|| "function".to_owned()),
+                function: ChatFunctionCall {
+                    name: call.name.ok_or(GatewayError::IncompleteToolCall {
+                        index,
+                        field: "function.name",
+                    })?,
+                    arguments: call.arguments,
+                },
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Default)]
@@ -323,7 +535,7 @@ impl SseDecoder {
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
         while let Some((boundary, delimiter_len)) = find_event_boundary(&self.buffer) {
-            if boundary > MAX_SSE_EVENT_BYTES {
+            if boundary > MAX_RESPONSE_SSE_EVENT_BYTES {
                 return Err(SseDecodeError::EventTooLarge);
             }
             let raw = std::str::from_utf8(&self.buffer[..boundary])?;
@@ -338,7 +550,7 @@ impl SseDecoder {
                 events.push(data);
             }
         }
-        if self.buffer.len() > MAX_SSE_EVENT_BYTES {
+        if self.buffer.len() > MAX_RESPONSE_SSE_EVENT_BYTES {
             return Err(SseDecodeError::EventTooLarge);
         }
         Ok(events)
@@ -395,7 +607,7 @@ mod tests {
                 content: "hello".to_owned(),
             }],
             &ChatParameters {
-                temperature: 0.7,
+                temperature: Some(0.7),
                 request_parameters: serde_json::from_value(serde_json::json!({
                     "temperature": 1.25,
                     "model": "attacker-selected-model",
@@ -420,10 +632,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_non_text_function_call_completions() {
+        let response: CompletionResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_weather_1",
+                        "type": "function",
+                        "function": {"name": "lookup_weather", "arguments": "{\"city\":\"Shanghai\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }))
+        .expect("tool completion");
+        let choice = response.choices.into_iter().next().expect("choice");
+        assert_eq!(choice.message.content, None);
+        assert_eq!(choice.message.tool_calls[0].id, "call_weather_1");
+        assert_eq!(choice.message.tool_calls[0].function.name, "lookup_weather");
+    }
+
+    #[test]
     fn rejects_an_unbounded_sse_event() {
         let mut decoder = SseDecoder::new();
         let error = decoder
-            .push_bytes(&vec![b'a'; MAX_SSE_EVENT_BYTES + 1])
+            .push_bytes(&vec![b'a'; MAX_RESPONSE_SSE_EVENT_BYTES + 1])
             .expect_err("oversized event");
         assert!(matches!(error, SseDecodeError::EventTooLarge));
     }
@@ -480,11 +715,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_cross_repository_chat_stream_fixture() {
+        let fixture = include_str!("../../../contracts/0.5/chat_stream.sse");
+        let mut decoder = SseDecoder::new();
+        let mut events = Vec::new();
+        for byte in fixture.as_bytes() {
+            events.extend(decoder.push_bytes(&[*byte]).expect("fixture byte"));
+        }
+        assert_eq!(events.last().map(String::as_str), Some("[DONE]"));
+        assert!(events.iter().any(|event| event.contains("Hello")));
+        assert!(events.iter().any(|event| event.contains("total_tokens")));
+    }
+
+    #[test]
     fn rejects_oversized_sse_event_when_delimiter_arrives() {
         let mut decoder = SseDecoder::new();
-        let mut payload = Vec::with_capacity(MAX_SSE_EVENT_BYTES + 16);
+        let mut payload = Vec::with_capacity(MAX_RESPONSE_SSE_EVENT_BYTES + 16);
         payload.extend_from_slice(b"data: ");
-        payload.extend(vec![b'a'; MAX_SSE_EVENT_BYTES]);
+        payload.extend(vec![b'a'; MAX_RESPONSE_SSE_EVENT_BYTES]);
         payload.extend_from_slice(b"\n\n");
         let error = decoder
             .push_bytes(&payload)
@@ -508,7 +756,7 @@ mod tests {
                 "data: [DONE]\n\n"
             );
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Request-ID: upstream-stream-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -544,6 +792,117 @@ mod tests {
         assert_eq!(deltas.concat(), "你好");
         assert_eq!(completion.content, "你好");
         assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(
+            completion.upstream_request_id.as_deref(),
+            Some("upstream-stream-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_non_streaming_response_before_reading_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = vec![0_u8; 8_192];
+            let _ = socket.read(&mut request).await.expect("request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_RESPONSE_BODY_BYTES + 1
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("response");
+        });
+        let gateway = OpenAiGateway {
+            client: Client::builder().no_proxy().build().expect("client"),
+        };
+        let error = gateway
+            .complete(
+                &ProviderEndpoint {
+                    base_url: format!("http://{address}/v1"),
+                    api_key: None,
+                    model: "test-model".to_owned(),
+                },
+                &[ChatInput {
+                    role: MessageRole::User,
+                    content: "hello".to_owned(),
+                }],
+                ChatParameters::default(),
+            )
+            .await
+            .expect_err("oversized response");
+        assert!(matches!(error, GatewayError::ResponseTooLarge));
+    }
+
+    #[tokio::test]
+    async fn streams_tool_calls_without_buffering_argument_deltas() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = vec![0_u8; 8_192];
+            let _ = socket.read(&mut request).await.expect("read request");
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Shanghai\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4,\"total_tokens\":12}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let gateway = OpenAiGateway {
+            client: Client::builder().no_proxy().build().expect("test client"),
+        };
+        let mut argument_deltas = Vec::new();
+        let completion = gateway
+            .stream(
+                &ProviderEndpoint {
+                    base_url: format!("http://{address}/v1"),
+                    api_key: None,
+                    model: "test-model".to_owned(),
+                },
+                &[ChatInput {
+                    role: MessageRole::User,
+                    content: "weather".to_owned(),
+                }],
+                ChatParameters::default(),
+                |event| {
+                    argument_deltas.extend(event.tool_calls.into_iter().filter_map(|call| {
+                        call.function
+                            .and_then(|function| function.arguments)
+                            .filter(|arguments| !arguments.is_empty())
+                    }));
+                    true
+                },
+            )
+            .await
+            .expect("tool stream");
+        assert_eq!(argument_deltas, ["{\"city\":", "\"Shanghai\"}"]);
+        assert!(completion.content.is_empty());
+        assert_eq!(completion.tool_calls[0].id, "call_1");
+        assert_eq!(completion.tool_calls[0].function.name, "weather");
+        assert_eq!(
+            completion.tool_calls[0].function.arguments,
+            "{\"city\":\"Shanghai\"}"
+        );
+        assert_eq!(completion.usage.expect("usage").total_tokens, 12);
     }
 
     #[tokio::test]

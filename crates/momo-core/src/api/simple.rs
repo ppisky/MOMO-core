@@ -32,6 +32,7 @@ use std::{
 };
 
 use serde_json::json;
+use tokio::sync::Notify;
 use tokio::sync::OnceCell;
 
 use crate::{
@@ -43,7 +44,12 @@ use crate::{
 };
 use momo_storage::{DEFAULT_NSG_VECTOR_TOP_K, NsgVectorStore};
 
-static CANCELLATIONS: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+struct CancellationSignal {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+static CANCELLATIONS: LazyLock<Mutex<HashMap<String, Arc<CancellationSignal>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static CORE: OnceCell<MomoCore> = OnceCell::const_new();
 static CAPABILITIES: LazyLock<tokio::sync::RwLock<CapabilityRegistry>> =
@@ -80,7 +86,8 @@ pub fn cancel_chat(request_id: String) -> bool {
     let Some(cancelled) = cancellations.get(&request_id) else {
         return false;
     };
-    cancelled.store(true, Ordering::Release);
+    cancelled.cancelled.store(true, Ordering::Release);
+    cancelled.notify.notify_one();
     true
 }
 

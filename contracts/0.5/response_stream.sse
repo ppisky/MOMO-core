@@ -1,0 +1,8 @@
+data: {"type":"response.created","response":{"id":"resp_contract","object":"response","status":"in_progress","model":"conversation","output":[]}}
+
+data: {"type":"response.output_text.delta","item_id":"msg_contract","output_index":0,"content_index":0,"delta":"Hello"}
+
+data: {"type":"response.output_text.delta","item_id":"msg_contract","output_index":0,"content_index":0,"delta":"!"}
+
+data: {"type":"response.completed","response":{"id":"resp_contract","object":"response","status":"completed","model":"conversation","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}
+

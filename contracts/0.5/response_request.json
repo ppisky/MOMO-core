@@ -1,0 +1,14 @@
+{
+  "model": "conversation",
+  "input": "Hello from the cross-repository contract.",
+  "stream": false,
+  "max_output_tokens": 1024,
+  "momo": {
+    "schema": "momo.responses/0.5",
+    "request_id": "contract-request-0001",
+    "scope_id": "00000000-0000-4000-8000-000000000001",
+    "memory": true,
+    "semantic_graph": true,
+    "mo_state": true
+  }
+}

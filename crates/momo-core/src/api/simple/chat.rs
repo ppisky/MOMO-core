@@ -9,7 +9,8 @@ struct ChatJsonRequest {
     api_key: Option<String>,
     model: String,
     messages: Vec<ChatInput>,
-    temperature: f32,
+    #[serde(default)]
+    temperature: Option<f32>,
     #[serde(default)]
     request_parameters: serde_json::Map<String, serde_json::Value>,
 }
@@ -42,7 +43,10 @@ struct PrepareContextJsonRequest {
 }
 
 fn validate_chat_request(request: &ChatJsonRequest) -> Result<(), String> {
-    if !(0.0..=2.0).contains(&request.temperature) {
+    if request
+        .temperature
+        .is_some_and(|temperature| !(0.0..=2.0).contains(&temperature))
+    {
         return Err("temperature must be between 0 and 2".to_owned());
     }
     if request.request_parameters.contains_key("messages")
@@ -102,24 +106,29 @@ pub fn prepare_context_json(request_json: String) -> Result<String, String> {
 pub async fn chat_stream_json(
     request_json: String,
     sink: impl ChatEventSink,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let request: ChatStreamJsonRequest =
         serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
     validate_chat_request(&request.chat)?;
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(CancellationSignal {
+        cancelled: AtomicBool::new(false),
+        notify: Notify::new(),
+    });
     CANCELLATIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .insert(request.request_id.clone(), Arc::clone(&cancelled));
 
     let mut sequence = 0_u64;
-    let result = OpenAiGateway::default()
-        .stream(
-            &endpoint(&request.chat),
+    let result = {
+        let gateway = OpenAiGateway::default();
+        let endpoint = endpoint(&request.chat);
+        let stream = gateway.stream(
+            &endpoint,
             &request.chat.messages,
             parameters(&request.chat),
             |event| {
-                if cancelled.load(Ordering::Acquire) {
+                if cancelled.cancelled.load(Ordering::Acquire) {
                     return false;
                 }
                 sequence += 1;
@@ -129,14 +138,26 @@ pub async fn chat_stream_json(
                         "request_id": request.request_id,
                         "sequence": sequence,
                         "delta": event.delta,
+                        "tool_calls": event.tool_calls,
                         "finish_reason": event.finish_reason,
                     })
                     .to_string(),
                 )
                 .is_ok()
             },
-        )
-        .await;
+        );
+        tokio::pin!(stream);
+        let cancellation = async {
+            if !cancelled.cancelled.load(Ordering::Acquire) {
+                cancelled.notify.notified().await;
+            }
+        };
+        tokio::pin!(cancellation);
+        tokio::select! {
+            result = &mut stream => result,
+            () = &mut cancellation => Err(GatewayError::Cancelled),
+        }
+    };
 
     CANCELLATIONS
         .lock()
@@ -151,13 +172,14 @@ pub async fn chat_stream_json(
                     "request_id": request.request_id,
                     "sequence": sequence,
                     "finish_reason": completion.finish_reason,
+                    "usage": completion.usage,
                 })
                 .to_string(),
             )
             .map_err(|error| error.to_string())?;
-            Ok(())
+            serde_json::to_string(&completion).map_err(|error| error.to_string())
         }
-        Err(GatewayError::Cancelled) if cancelled.load(Ordering::Acquire) => {
+        Err(GatewayError::Cancelled) if cancelled.cancelled.load(Ordering::Acquire) => {
             sequence += 1;
             sink.add(
                 json!({
@@ -168,8 +190,88 @@ pub async fn chat_stream_json(
                 .to_string(),
             )
             .map_err(|error| error.to_string())?;
-            Ok(())
+            Err("model request was cancelled".to_owned())
         }
         Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn cancellation_drops_a_stalled_upstream_stream_immediately() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = vec![0_u8; 8_192];
+            let _ = socket.read(&mut request).await.expect("request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("headers");
+            socket.flush().await.expect("flush");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        });
+
+        let request_id = format!("cancel-{}", new_request_id());
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink_events = Arc::clone(&events);
+        let request_id_for_task = request_id.clone();
+        let task = tokio::spawn(async move {
+            chat_stream_json(
+                json!({
+                    "request_id": request_id_for_task,
+                    "base_url": format!("http://{address}/v1"),
+                    "api_key": null,
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "wait"}],
+                    "request_parameters": {},
+                })
+                .to_string(),
+                move |event| {
+                    sink_events
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(event);
+                    Ok(())
+                },
+            )
+            .await
+        });
+
+        let mut registered = false;
+        for _ in 0..100 {
+            if cancel_chat(request_id.clone()) {
+                registered = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            registered,
+            "request must register cancellation before streaming"
+        );
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), task)
+            .await
+            .expect("cancellation must not wait for the next upstream chunk")
+            .expect("task");
+        assert_eq!(
+            result.expect_err("cancelled result"),
+            "model request was cancelled"
+        );
+        let events = events.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("\"type\":\"cancelled\""))
+        );
     }
 }

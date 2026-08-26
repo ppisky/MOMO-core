@@ -195,6 +195,163 @@ impl LocalStore {
         Ok(())
     }
 
+    pub async fn response_operation(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<ResponseOperation>, StorageError> {
+        let row = sqlx::query(
+            "SELECT request_id, request_fingerprint, conversation_id, user_written, response_json \
+             FROM response_operations WHERE request_id=?",
+        )
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(ResponseOperation {
+                request_id: row.try_get("request_id")?,
+                request_fingerprint: row.try_get("request_fingerprint")?,
+                conversation_id: row.try_get("conversation_id")?,
+                user_written: row.try_get::<i64, _>("user_written")? != 0,
+                response_json: row.try_get("response_json")?,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn begin_response_operation(
+        &self,
+        request_id: &str,
+        request_fingerprint: &str,
+        conversation_id: &str,
+    ) -> Result<(), StorageError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO response_operations \
+             (request_id, request_fingerprint, conversation_id, user_written, created_at, updated_at) \
+             VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(request_id) DO NOTHING",
+        )
+        .bind(request_id)
+        .bind(request_fingerprint)
+        .bind(conversation_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_response_user_written(&self, request_id: &str) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE response_operations SET user_written=1, updated_at=? WHERE request_id=?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn complete_response_operation(
+        &self,
+        request_id: &str,
+        response_json: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE response_operations SET response_json=?, updated_at=? WHERE request_id=?",
+        )
+        .bind(response_json)
+        .bind(Utc::now().to_rfc3339())
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn append_maintenance_turn(
+        &self,
+        turn: &MaintenanceTurn,
+        memory_enabled: bool,
+        nsg_enabled: bool,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO maintenance_turns \
+             (request_id, scope_id, user_content, assistant_content, memory_done, nsg_done, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING",
+        )
+        .bind(&turn.request_id)
+        .bind(&turn.scope_id)
+        .bind(&turn.user_content)
+        .bind(&turn.assistant_content)
+        .bind(i64::from(!memory_enabled))
+        .bind(i64::from(!nsg_enabled))
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn pending_maintenance_turns(
+        &self,
+        scope_id: &str,
+        kind: MaintenanceKind,
+        limit: usize,
+    ) -> Result<Vec<MaintenanceTurn>, StorageError> {
+        let query = match kind {
+            MaintenanceKind::Memory => {
+                "SELECT request_id, scope_id, user_content, assistant_content \
+                 FROM maintenance_turns WHERE scope_id=? AND memory_done=0 \
+                 ORDER BY created_at, request_id LIMIT ?"
+            }
+            MaintenanceKind::SemanticGraph => {
+                "SELECT request_id, scope_id, user_content, assistant_content \
+                 FROM maintenance_turns WHERE scope_id=? AND nsg_done=0 \
+                 ORDER BY created_at, request_id LIMIT ?"
+            }
+        };
+        let rows = sqlx::query(query)
+            .bind(scope_id)
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(MaintenanceTurn {
+                    request_id: row.try_get("request_id")?,
+                    scope_id: row.try_get("scope_id")?,
+                    user_content: row.try_get("user_content")?,
+                    assistant_content: row.try_get("assistant_content")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn mark_maintenance_turns_done(
+        &self,
+        request_ids: &[String],
+        kind: MaintenanceKind,
+    ) -> Result<(), StorageError> {
+        if request_ids.is_empty() {
+            return Ok(());
+        }
+        let mut transaction = self.pool.begin().await?;
+        let query = match kind {
+            MaintenanceKind::Memory => {
+                "UPDATE maintenance_turns SET memory_done=1 WHERE request_id=?"
+            }
+            MaintenanceKind::SemanticGraph => {
+                "UPDATE maintenance_turns SET nsg_done=1 WHERE request_id=?"
+            }
+        };
+        for request_id in request_ids {
+            sqlx::query(query)
+                .bind(request_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn stage_message(&self, message: &Message) -> Result<(), StorageError> {
         self.append_message(message).await
     }

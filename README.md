@@ -86,6 +86,19 @@ MOMO orchestration API, not a drop-in OpenAI server. Raw-vector APIs remain a
 low-level compatibility path. See the
 [embedding interface profile](docs/vectorization_model_interface_0_4_2.md).
 
+Version 0.5.0 includes the versioned response wire contract,
+true upstream-to-client SSE deltas, persistent request-ID replay, Core-owned
+embedding profiles and background DMW/NSG maintenance. Function tools have a
+shared cross-protocol golden contract, and the codec-independent
+[MOMO LSB Carrier v1](docs/momo_lsb_carrier_v1.md) includes bounded PNG codec
+integration and lossless rewrap regression coverage. The 0.5.0 release
+candidate also unifies error envelopes and request/stream bounds, adds
+cancellation, timeout, rate-limit and logical-route metrics, and verifies both
+direct Core and mobot gateway deployments with real-process E2E tests. See the
+[0.5.0 roadmap](docs/roadmap_0_5_0.md) and
+[migration guide](docs/migration_0_4_2_to_0_5_0.md) for compatibility details
+and the 1.0 stability gates.
+
 ## Scope identity
 
 `scope_id` is the only namespace identifier used by public models, APIs,

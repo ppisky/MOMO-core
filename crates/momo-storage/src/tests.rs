@@ -24,6 +24,97 @@ async fn migrated_schema_uses_scope_id_exclusively() {
         .expect("legacy vector table info");
     assert!(vector_columns.is_empty());
 }
+
+#[tokio::test]
+async fn response_operations_survive_reopen_semantics() {
+    let store = LocalStore::in_memory().await.expect("store");
+    store
+        .begin_response_operation("request-1", "fingerprint-1", "conversation-1")
+        .await
+        .expect("begin response");
+    let pending = store
+        .response_operation("request-1")
+        .await
+        .expect("read pending")
+        .expect("pending operation");
+    assert!(!pending.user_written);
+    assert!(pending.response_json.is_none());
+
+    store
+        .mark_response_user_written("request-1")
+        .await
+        .expect("mark user message");
+    store
+        .complete_response_operation("request-1", r#"{"status":"completed"}"#)
+        .await
+        .expect("complete response");
+    let completed = store
+        .response_operation("request-1")
+        .await
+        .expect("read completed")
+        .expect("completed operation");
+    assert!(completed.user_written);
+    assert_eq!(
+        completed.response_json.as_deref(),
+        Some(r#"{"status":"completed"}"#)
+    );
+
+    store
+        .begin_response_operation("request-1", "different", "different")
+        .await
+        .expect("duplicate begin is idempotent");
+    let unchanged = store
+        .response_operation("request-1")
+        .await
+        .expect("read unchanged")
+        .expect("unchanged operation");
+    assert_eq!(unchanged.request_fingerprint, "fingerprint-1");
+    assert_eq!(unchanged.conversation_id, "conversation-1");
+}
+
+#[tokio::test]
+async fn maintenance_turns_are_independently_acknowledged() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let turn = MaintenanceTurn {
+        request_id: "request-maintenance-1".to_owned(),
+        scope_id: "scope-1".to_owned(),
+        user_content: "The moon gate requires a key.".to_owned(),
+        assistant_content: "I will remember that rule.".to_owned(),
+    };
+    store
+        .append_maintenance_turn(&turn, true, true)
+        .await
+        .expect("append turn");
+    assert_eq!(
+        store
+            .pending_maintenance_turns("scope-1", MaintenanceKind::Memory, 10)
+            .await
+            .expect("memory pending"),
+        std::slice::from_ref(&turn)
+    );
+    store
+        .mark_maintenance_turns_done(
+            std::slice::from_ref(&turn.request_id),
+            MaintenanceKind::Memory,
+        )
+        .await
+        .expect("ack memory");
+    assert!(
+        store
+            .pending_maintenance_turns("scope-1", MaintenanceKind::Memory, 10)
+            .await
+            .expect("memory done")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .pending_maintenance_turns("scope-1", MaintenanceKind::SemanticGraph, 10)
+            .await
+            .expect("nsg remains")
+            .len(),
+        1
+    );
+}
 use momo_domain::new_id;
 
 #[tokio::test]

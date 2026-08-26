@@ -10,6 +10,95 @@ pub async fn initialize_core(data_dir: String) -> Result<String, String> {
     Ok(core.data_dir().to_string_lossy().into_owned())
 }
 
+pub async fn response_operation_json(request_id: String) -> Result<Option<String>, String> {
+    core()?
+        .store()
+        .response_operation(&request_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|operation| serde_json::to_string(&operation).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+pub async fn begin_response_operation(
+    request_id: String,
+    request_fingerprint: String,
+    conversation_id: String,
+) -> Result<(), String> {
+    core()?
+        .store()
+        .begin_response_operation(&request_id, &request_fingerprint, &conversation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn mark_response_user_written(request_id: String) -> Result<(), String> {
+    core()?
+        .store()
+        .mark_response_user_written(&request_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn complete_response_operation(
+    request_id: String,
+    response_json: String,
+) -> Result<(), String> {
+    core()?
+        .store()
+        .complete_response_operation(&request_id, &response_json)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn append_maintenance_turn_json(
+    turn_json: String,
+    memory_enabled: bool,
+    nsg_enabled: bool,
+) -> Result<(), String> {
+    let turn: momo_storage::MaintenanceTurn =
+        serde_json::from_str(&turn_json).map_err(|error| error.to_string())?;
+    core()?
+        .store()
+        .append_maintenance_turn(&turn, memory_enabled, nsg_enabled)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn pending_maintenance_turns_json(
+    scope_id: String,
+    kind: String,
+    limit: usize,
+) -> Result<String, String> {
+    let kind = match kind.as_str() {
+        "memory" => momo_storage::MaintenanceKind::Memory,
+        "semantic_graph" => momo_storage::MaintenanceKind::SemanticGraph,
+        _ => return Err("unknown maintenance kind".to_owned()),
+    };
+    let turns = core()?
+        .store()
+        .pending_maintenance_turns(&scope_id, kind, limit)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&turns).map_err(|error| error.to_string())
+}
+
+pub async fn mark_maintenance_turns_done(
+    request_ids: Vec<String>,
+    kind: String,
+) -> Result<(), String> {
+    let kind = match kind.as_str() {
+        "memory" => momo_storage::MaintenanceKind::Memory,
+        "semantic_graph" => momo_storage::MaintenanceKind::SemanticGraph,
+        _ => return Err("unknown maintenance kind".to_owned()),
+    };
+    core()?
+        .store()
+        .mark_maintenance_turns_done(&request_ids, kind)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub async fn cache_character_json(character_json: String) -> Result<(), String> {
     let character = serde_json::from_str(&character_json).map_err(|error| error.to_string())?;
     core()?
