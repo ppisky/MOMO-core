@@ -171,14 +171,6 @@ pub async fn local_conversations_json(scope_id: String) -> Result<String, String
     serde_json::to_string(&conversations).map_err(|error| error.to_string())
 }
 
-pub async fn migrate_guest_data_json(
-    _guest_scope_id: String,
-    _account_scope_id: String,
-    _account_author_name: String,
-) -> Result<String, String> {
-    Err("账号迁移已禁用：当前 MOMO Core 只支持本地单用户数据空间".to_owned())
-}
-
 pub async fn stage_message_json(
     conversation_id: String,
     role: String,

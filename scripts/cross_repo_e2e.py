@@ -261,8 +261,8 @@ def main() -> None:
                     "mo_state": True,
                 },
             }
-            first = json_request("POST", f"{core_origin}/v1/responses", payload)
-            replay = json_request("POST", f"{core_origin}/v1/responses", payload)
+            first = json_request("POST", f"{core_origin}/v1/momo/responses", payload)
+            replay = json_request("POST", f"{core_origin}/v1/momo/responses", payload)
             assert first == replay
             assert first["output_text"] == "cross-repo-ok"
             assert first["finish_reason"] == "stop"
@@ -309,7 +309,7 @@ def main() -> None:
             )
             direct = json_request(
                 "POST",
-                f"{direct_origin}/v1/responses",
+                f"{direct_origin}/v1/momo/responses",
                 {
                     "model": "chat-model",
                     "input": "Run the direct deployment flow.",

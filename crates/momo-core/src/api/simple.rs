@@ -1,7 +1,6 @@
 mod capabilities;
 mod character_compat;
 mod chat;
-mod crypto;
 mod embeddings;
 mod fonts;
 mod local_data;
@@ -9,12 +8,10 @@ mod lsb;
 mod memory;
 mod nsg;
 mod portable;
-mod sync;
 
 pub use capabilities::*;
 pub use character_compat::*;
 pub use chat::*;
-pub use crypto::*;
 pub use embeddings::*;
 pub use fonts::*;
 pub use local_data::*;
@@ -22,7 +19,6 @@ pub use lsb::*;
 pub use memory::*;
 pub use nsg::*;
 pub use portable::*;
-pub use sync::*;
 
 use std::{
     collections::HashMap,
@@ -98,16 +94,6 @@ fn core() -> Result<&'static MomoCore, String> {
         .ok_or_else(|| "MOMO Core has not been initialized".to_owned())
 }
 
-async fn stage_memory_snapshot(scope_id: uuid::Uuid) -> Result<(), String> {
-    let _ = scope_id;
-    Ok(())
-}
-
-async fn stage_semantic_graph_snapshot(scope_id: uuid::Uuid) -> Result<(), String> {
-    let _ = scope_id;
-    Ok(())
-}
-
 async fn approve_memory_patch_review(
     scope_id: uuid::Uuid,
     review_id: uuid::Uuid,
@@ -141,7 +127,6 @@ async fn approve_memory_patch_review(
             .map_err(|storage_error| storage_error.to_string())?;
         return Err(message);
     }
-    stage_memory_snapshot(scope_id).await?;
     let resolved = core()?
         .store()
         .resolve_memory_patch_review(

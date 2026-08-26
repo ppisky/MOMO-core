@@ -16,7 +16,7 @@ struct ExportExternalCharacterRequest {
     scope_id: String,
     character_id: String,
     output_path: String,
-    format: String,
+    format: crate::ExternalCharacterExportFormat,
 }
 
 #[derive(serde::Deserialize)]
@@ -44,14 +44,16 @@ pub async fn export_external_character_json(request_json: String) -> Result<Stri
     let scope_id = uuid::Uuid::parse_str(&request.scope_id).map_err(|error| error.to_string())?;
     let character_id =
         uuid::Uuid::parse_str(&request.character_id).map_err(|error| error.to_string())?;
-    let format = request
-        .format
-        .parse()
-        .map_err(|error: crate::CharacterCompatError| error.to_string())?;
-    crate::export_external_character(core()?, scope_id, character_id, request.output_path, format)
-        .await
-        .map(|report| report.to_string())
-        .map_err(|error| error.to_string())
+    crate::export_external_character(
+        core()?,
+        scope_id,
+        character_id,
+        request.output_path,
+        request.format,
+    )
+    .await
+    .map(|report| report.to_string())
+    .map_err(|error| error.to_string())
 }
 
 pub async fn export_preserved_character_source_json(

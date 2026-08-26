@@ -60,8 +60,9 @@ pub use momo_moc;
 pub use momo_storage;
 pub use momo_storage::{DEFAULT_NSG_VECTOR_TOP_K, MAX_NSG_VECTOR_TOP_K, NsgVectorStatus};
 pub use portable::{
-    ImportReport, MocCompatibility, MocExportPlan, MocModule, PortableError, export_moc,
-    export_private_moc, import_moc, import_moc_with_passphrase, moc_is_encrypted,
+    ConflictMode, ImportReport, MocCompatibility, MocExportPlan, MocModule, MocProtection,
+    PortableError, export_moc, export_private_moc, import_moc, import_moc_with_passphrase,
+    moc_is_encrypted,
 };
 pub use response::{
     MAX_GATEWAY_HOPS, MAX_RESPONSE_ID_BYTES, MAX_RESPONSE_IMAGE_REFERENCE_BYTES,

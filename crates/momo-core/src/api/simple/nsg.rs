@@ -100,9 +100,7 @@ pub async fn run_memory_maintenance_json(scope_id: String) -> Result<String, Str
     if !report.decayed_ids.is_empty()
         || !report.archived_ids.is_empty()
         || !report.forgotten_ids.is_empty()
-    {
-        stage_memory_snapshot(scope_id).await?;
-    }
+    {}
     serde_json::to_string(&report).map_err(|error| error.to_string())
 }
 
@@ -123,7 +121,6 @@ pub async fn apply_nsg_patch_json(
         nsg.apply_patch(&patch_yaml)
     }
     .map_err(|error| error.to_string())?;
-    stage_semantic_graph_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
@@ -153,7 +150,6 @@ pub async fn approve_nsg_pending_candidate_json(
         .map_err(|error| error.to_string())?
         .approve_pending_candidate(&pending_path)
         .map_err(|error| error.to_string())?;
-    stage_semantic_graph_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
@@ -169,7 +165,6 @@ pub async fn reject_nsg_pending_candidate_json(
         .map_err(|error| error.to_string())?
         .reject_pending_candidate(&pending_path)
         .map_err(|error| error.to_string())?;
-    stage_semantic_graph_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
@@ -204,7 +199,6 @@ pub async fn write_nsg_node_json(
         .map_err(|error| error.to_string())?;
     nsg.write_node(&target_file, node)
         .map_err(|error| error.to_string())?;
-    stage_semantic_graph_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
@@ -220,7 +214,6 @@ pub async fn archive_nsg_node_json(
         .map_err(|error| error.to_string())?;
     nsg.archive_node(&target_file)
         .map_err(|error| error.to_string())?;
-    stage_semantic_graph_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
@@ -233,6 +226,5 @@ pub async fn delete_nsg_node_json(scope_id: String, target_file: String) -> Resu
         .map_err(|error| error.to_string())?;
     nsg.delete_node(&target_file)
         .map_err(|error| error.to_string())?;
-    stage_semantic_graph_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }

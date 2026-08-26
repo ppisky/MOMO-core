@@ -13,39 +13,23 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use walkdir::WalkDir;
 
-pub const CONTAINER_ENCODING: &str = "tar.zstd";
+pub const CONTAINER_ENCODING: &str = "tar+zstandard";
 pub const FORMAT_NAME: &str = "momo-container";
 pub const FORMAT_VERSION: u32 = 2;
 pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
 pub const DEFAULT_MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub format: String,
     pub format_version: u32,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
-    pub package_type: PackageType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_sequence: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub through_sequence: Option<i64>,
-    #[serde(default)]
     pub module_definitions: Vec<ModuleDefinition>,
     pub modules: Vec<ModuleEntry>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deletions: Vec<DeletionRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption: Option<EncryptionMetadata>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PackageType {
-    #[default]
-    Snapshot,
-    Incremental,
-    Deletion,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,15 +39,6 @@ pub struct ModuleDefinition {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<String>,
     pub import_order: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeletionRecord {
-    pub module: String,
-    pub object_id: String,
-    pub revision: i64,
-    pub change_sequence: i64,
-    pub deleted_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,8 +89,6 @@ pub enum MocError {
     UnsupportedFormat,
     #[error("unsupported MOC format version {found}; this build supports version {supported}")]
     UnsupportedFormatVersion { found: u32, supported: u32 },
-    #[error("MOC v1 must be migrated explicitly before import")]
-    LegacyMigrationRequired,
     #[error("invalid MOC manifest: {0}")]
     InvalidManifest(String),
     #[error("MOC extraction limit exceeded")]
@@ -183,12 +156,8 @@ pub fn create_with_encryption(
         format: FORMAT_NAME.to_owned(),
         format_version: FORMAT_VERSION,
         created_at: Utc::now(),
-        package_type: PackageType::Snapshot,
-        base_sequence: None,
-        through_sequence: None,
         module_definitions,
         modules: entries,
-        deletions: Vec::new(),
         encryption,
     };
     validate_v2_manifest(&manifest)?;
@@ -424,45 +393,6 @@ fn validate_v2_manifest(manifest: &Manifest) -> Result<(), MocError> {
             )));
         }
     }
-    for deletion in &manifest.deletions {
-        if !definitions.contains_key(&deletion.module)
-            || deletion.object_id.trim().is_empty()
-            || deletion.revision < 1
-            || deletion.change_sequence < 1
-        {
-            return Err(MocError::InvalidManifest(
-                "invalid deletion record".to_owned(),
-            ));
-        }
-    }
-    match manifest.package_type {
-        PackageType::Snapshot => {
-            if manifest.base_sequence.is_some()
-                || manifest.through_sequence.is_some()
-                || !manifest.deletions.is_empty()
-            {
-                return Err(MocError::InvalidManifest(
-                    "snapshot packages cannot carry sequence bounds or deletions".to_owned(),
-                ));
-            }
-        }
-        PackageType::Incremental => {
-            validate_sequence_range(manifest)?;
-            if manifest.modules.is_empty() && manifest.deletions.is_empty() {
-                return Err(MocError::InvalidManifest(
-                    "incremental packages cannot be empty".to_owned(),
-                ));
-            }
-        }
-        PackageType::Deletion => {
-            validate_sequence_range(manifest)?;
-            if !manifest.modules.is_empty() || manifest.deletions.is_empty() {
-                return Err(MocError::InvalidManifest(
-                    "deletion packages contain deletion records and no payload files".to_owned(),
-                ));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -474,15 +404,6 @@ fn validate_native_v2_module_id(module: &str) -> Result<(), MocError> {
         )));
     }
     Ok(())
-}
-
-fn validate_sequence_range(manifest: &Manifest) -> Result<(), MocError> {
-    match (manifest.base_sequence, manifest.through_sequence) {
-        (Some(base), Some(through)) if base >= 0 && through > base => Ok(()),
-        _ => Err(MocError::InvalidManifest(
-            "incremental and deletion packages require an increasing sequence range".to_owned(),
-        )),
-    }
 }
 
 fn validate_module_id(module: &str) -> Result<(), MocError> {
@@ -639,7 +560,6 @@ mod tests {
         )
         .expect("create MOC");
         assert_eq!(manifest.format_version, FORMAT_VERSION);
-        assert_eq!(manifest.package_type, PackageType::Snapshot);
         assert_eq!(manifest.modules.len(), 1);
         assert_eq!(
             manifest.module_definitions,
@@ -709,9 +629,6 @@ mod tests {
             format: FORMAT_NAME.to_owned(),
             format_version: FORMAT_VERSION,
             created_at: Utc::now(),
-            package_type: PackageType::Snapshot,
-            base_sequence: None,
-            through_sequence: None,
             module_definitions: vec![ModuleDefinition {
                 id: "config".to_owned(),
                 path: "config".to_owned(),
@@ -719,7 +636,6 @@ mod tests {
                 import_order: 10,
             }],
             modules: vec![module.clone(), module],
-            deletions: Vec::new(),
             encryption: None,
         };
         write_raw_container(
@@ -751,9 +667,6 @@ mod tests {
             format: FORMAT_NAME.to_owned(),
             format_version: 1,
             created_at: Utc::now(),
-            package_type: PackageType::Snapshot,
-            base_sequence: None,
-            through_sequence: None,
             module_definitions: Vec::new(),
             modules: vec![ModuleEntry {
                 module: "character".to_owned(),
@@ -761,7 +674,6 @@ mod tests {
                 size: character.len() as u64,
                 sha256: hex::encode(Sha256::digest(character)),
             }],
-            deletions: Vec::new(),
             encryption: None,
         };
         write_raw_container(
@@ -794,34 +706,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_higher_versions_and_invalid_deletion_packages() {
+    fn rejects_higher_versions() {
         let manifest = Manifest {
             format: FORMAT_NAME.to_owned(),
             format_version: FORMAT_VERSION + 1,
             created_at: Utc::now(),
-            package_type: PackageType::Snapshot,
-            base_sequence: None,
-            through_sequence: None,
             module_definitions: Vec::new(),
             modules: Vec::new(),
-            deletions: Vec::new(),
             encryption: None,
         };
         assert!(matches!(
             validate_manifest(&manifest),
             Err(MocError::UnsupportedFormatVersion { .. })
-        ));
-
-        let invalid_deletion = Manifest {
-            format_version: FORMAT_VERSION,
-            package_type: PackageType::Deletion,
-            base_sequence: Some(10),
-            through_sequence: Some(11),
-            ..manifest
-        };
-        assert!(matches!(
-            validate_v2_manifest(&invalid_deletion),
-            Err(MocError::InvalidManifest(_))
         ));
     }
 }

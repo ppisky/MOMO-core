@@ -54,8 +54,6 @@ pub enum PortableError {
     EncryptedMocProfile,
     #[error("encrypted MOC failed: {0}")]
     Crypto(#[from] momo_crypto::CryptoError),
-    #[error("unsupported conflict mode: {0}")]
-    ConflictMode(String),
     #[error("invalid portable data: {0}")]
     InvalidData(String),
     #[error("directory traversal failed: {0}")]
@@ -80,6 +78,9 @@ pub enum MocCompatibility {
     #[default]
     None,
     PreservedSource,
+    GeneratedCcv2Json,
+    GeneratedCcv3Json,
+    GeneratedCcv3Charx,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,18 +121,29 @@ impl MocExportPlan {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConflictMode {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictMode {
     KeepExisting,
     Replace,
 }
 
-impl ConflictMode {
-    fn parse(value: &str) -> Result<Self, PortableError> {
-        match value {
-            "keep_existing" => Ok(Self::KeepExisting),
-            "replace" => Ok(Self::Replace),
-            _ => Err(PortableError::ConflictMode(value.to_owned())),
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MocProtection {
+    #[default]
+    None,
+    Passphrase {
+        value: String,
+    },
+}
+
+impl MocProtection {
+    #[must_use]
+    pub fn passphrase(&self) -> Option<&str> {
+        match self {
+            Self::None => None,
+            Self::Passphrase { value } => Some(value),
         }
     }
 }
@@ -145,7 +157,6 @@ pub struct ImportReport {
     pub messages_imported: usize,
     pub memory_files_imported: usize,
     pub semantic_graph_files_imported: usize,
-    pub deletions_applied: usize,
     pub skipped_conflicts: usize,
     pub unknown_modules_preserved: Vec<String>,
     pub runtime_config: Option<JsonValue>,
@@ -245,7 +256,7 @@ pub async fn import_moc(
     core: &MomoCore,
     input: impl AsRef<Path>,
     scope_id: Uuid,
-    conflict_mode: &str,
+    conflict_mode: ConflictMode,
 ) -> Result<ImportReport, PortableError> {
     import_moc_with_passphrase(core, input, scope_id, conflict_mode, None).await
 }
@@ -299,10 +310,10 @@ pub async fn import_moc_with_passphrase(
     core: &MomoCore,
     input: impl AsRef<Path>,
     scope_id: Uuid,
-    conflict_mode: &str,
+    conflict_mode: ConflictMode,
     passphrase: Option<&str>,
 ) -> Result<ImportReport, PortableError> {
-    let mode = ConflictMode::parse(conflict_mode)?;
+    let mode = conflict_mode;
     let outer = TempDir::new()?;
     let manifest = momo_moc::extract(input, outer.path(), ExtractionLimits::default())?;
     let mut payload_manifest = manifest.clone();
@@ -360,7 +371,6 @@ pub async fn import_moc_with_passphrase(
         messages_imported: 0,
         memory_files_imported: 0,
         semantic_graph_files_imported: 0,
-        deletions_applied: 0,
         skipped_conflicts: 0,
         unknown_modules_preserved,
         runtime_config: None,
@@ -488,7 +498,8 @@ async fn export_characters(
         &serde_json::to_vec_pretty(&characters.iter().map(|card| card.id).collect::<Vec<_>>())?,
     )?;
     for card in characters {
-        let directory = root_directory.join(card.id.to_string());
+        let card_id = card.id;
+        let directory = root_directory.join(card_id.to_string());
         fs::create_dir_all(&directory)?;
         let metadata = CharacterMetadata {
             id: format!("urn:uuid:{}", card.id),
@@ -511,7 +522,7 @@ async fn export_characters(
             .ok_or_else(|| PortableError::InvalidData("character metadata".to_owned()))?;
         let mut metadata_values = if let Some(original) = core
             .store()
-            .portable_metadata("character", &card.id.to_string())
+            .portable_metadata("character", &card_id.to_string())
             .await?
         {
             ConfigDocument::parse(&original)?.values().clone()
@@ -548,31 +559,68 @@ async fn export_characters(
         if let Some(opening) = card.opening_markdown {
             atomic_write(&directory.join("opening.md"), opening.as_bytes())?;
         }
-        if compatibility == MocCompatibility::PreservedSource
-            && let Some(external) = core
-                .store()
-                .portable_metadata("external_character_card", &card.id.to_string())
-                .await?
-        {
-            serde_json::from_str::<serde_json::Value>(&external).map_err(|error| {
-                PortableError::InvalidData(format!(
-                    "stored external character metadata is invalid: {error}"
-                ))
-            })?;
-            let compat_directory = root.join("tavern_compat").join(card.id.to_string());
-            fs::create_dir_all(&compat_directory)?;
-            atomic_write(&compat_directory.join("metadata.json"), external.as_bytes())?;
-            crate::character_compat::export_preserved_source_asset(
-                core,
-                card.id,
-                &external,
-                &compat_directory,
-            )
-            .map_err(|error| {
-                PortableError::InvalidData(format!(
-                    "stored CHARX source cannot be exported: {error}"
-                ))
-            })?;
+        let compat_directory = root.join("tavern_compat").join(card_id.to_string());
+        match compatibility {
+            MocCompatibility::None => {}
+            MocCompatibility::PreservedSource => {
+                if let Some(external) = core
+                    .store()
+                    .portable_metadata("external_character_card", &card_id.to_string())
+                    .await?
+                {
+                    serde_json::from_str::<serde_json::Value>(&external).map_err(|error| {
+                        PortableError::InvalidData(format!(
+                            "stored external character metadata is invalid: {error}"
+                        ))
+                    })?;
+                    fs::create_dir_all(&compat_directory)?;
+                    atomic_write(&compat_directory.join("metadata.json"), external.as_bytes())?;
+                    crate::character_compat::export_preserved_source_asset(
+                        core,
+                        card_id,
+                        &external,
+                        &compat_directory,
+                    )
+                    .map_err(|error| {
+                        PortableError::InvalidData(format!(
+                            "stored external character source cannot be exported: {error}"
+                        ))
+                    })?;
+                }
+            }
+            MocCompatibility::GeneratedCcv2Json
+            | MocCompatibility::GeneratedCcv3Json
+            | MocCompatibility::GeneratedCcv3Charx => {
+                let (format, file_name) = match compatibility {
+                    MocCompatibility::GeneratedCcv2Json => (
+                        crate::ExternalCharacterExportFormat::Ccv2Json,
+                        "generated.ccv2.json",
+                    ),
+                    MocCompatibility::GeneratedCcv3Json => (
+                        crate::ExternalCharacterExportFormat::Ccv3Json,
+                        "generated.ccv3.json",
+                    ),
+                    MocCompatibility::GeneratedCcv3Charx => (
+                        crate::ExternalCharacterExportFormat::Ccv3Charx,
+                        "generated.ccv3.charx",
+                    ),
+                    MocCompatibility::None | MocCompatibility::PreservedSource => unreachable!(),
+                };
+                fs::create_dir_all(&compat_directory)?;
+                crate::export_external_character(
+                    core,
+                    scope_id,
+                    card_id,
+                    compat_directory.join(file_name),
+                    format,
+                )
+                .await
+                .map_err(|error| {
+                    PortableError::InvalidData(format!(
+                        "generated character compatibility export failed: {error}"
+                    ))
+                })?;
+            }
         }
     }
     Ok(())
@@ -735,7 +783,14 @@ async fn import_external_character_sources(
                 "tavern_compat source references unknown character {id}"
             )));
         }
-        let source = read_external_source_asset(&entry.path().join("metadata.json"))?;
+        let metadata_path = entry.path().join("metadata.json");
+        if !metadata_path.exists() {
+            // A generated compatibility profile accompanies the native
+            // character for external export only. It is not provenance and
+            // must not be imported back as the character's stored source.
+            continue;
+        }
+        let source = read_external_source_asset(&metadata_path)?;
         crate::character_compat::import_preserved_source_asset(core, id, &source, &entry.path())
             .map_err(|error| {
                 PortableError::InvalidData(format!("MOC CHARX source cannot be imported: {error}"))
@@ -1216,7 +1271,7 @@ mod tests {
             .await
             .expect("destination core");
         let new_scope = new_id();
-        let report = import_moc(&destination, &output, new_scope, "replace")
+        let report = import_moc(&destination, &output, new_scope, ConflictMode::Replace)
             .await
             .expect("import");
         assert_eq!(report.characters_imported, 1);
@@ -1295,7 +1350,7 @@ mod tests {
                 &destination,
                 &private_output,
                 new_scope,
-                "keep_existing",
+                ConflictMode::KeepExisting,
                 Some("wrong-password")
             )
             .await,
@@ -1307,7 +1362,7 @@ mod tests {
             &destination,
             &private_output,
             new_scope,
-            "keep_existing",
+            ConflictMode::KeepExisting,
             Some("private-password"),
         )
         .await
@@ -1364,7 +1419,7 @@ name = "Creator"
             .await
             .expect("target core");
         let scope_id = new_id();
-        let report = import_moc(&target, &output, scope_id, "replace")
+        let report = import_moc(&target, &output, scope_id, ConflictMode::Replace)
             .await
             .expect("import moc");
 
@@ -1440,7 +1495,7 @@ name = "Creator"
         let destination = MomoCore::initialize(destination_directory.path())
             .await
             .expect("destination core");
-        let report = import_moc(&destination, &output, new_id(), "replace")
+        let report = import_moc(&destination, &output, new_id(), ConflictMode::Replace)
             .await
             .expect("conversation-only import");
         assert_eq!(report.conversations_imported, 1);

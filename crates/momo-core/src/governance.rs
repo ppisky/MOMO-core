@@ -30,6 +30,8 @@ pub struct RequestOverridePolicy {
     pub instructions: OverrideMode,
     #[serde(default)]
     pub visual_description_prompt: OverrideMode,
+    #[serde(default = "allow")]
+    pub tools: OverrideMode,
     #[serde(default)]
     pub allowed_parameters: BTreeSet<String>,
 }
@@ -42,6 +44,7 @@ impl Default for RequestOverridePolicy {
             sampling: OverrideMode::Ignore,
             instructions: OverrideMode::Allow,
             visual_description_prompt: OverrideMode::Ignore,
+            tools: OverrideMode::Allow,
             allowed_parameters: BTreeSet::new(),
         }
     }
@@ -172,6 +175,7 @@ pub struct RequestedOverrides<'a> {
     pub instructions: Option<&'a str>,
     pub visual_description_prompt: Option<&'a str>,
     pub parameters: &'a Map<String, Value>,
+    pub tool_configuration_requested: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +186,7 @@ pub struct GovernedOverrides {
     pub instructions: Option<String>,
     pub visual_description_prompt: Option<String>,
     pub parameters: Map<String, Value>,
+    pub allow_tools: bool,
     pub audit: Value,
 }
 
@@ -248,6 +253,17 @@ impl RequestOverridePolicy {
             &mut applied,
             &mut ignored,
         )?;
+        let allow_tools = match (self.tools, requested.tool_configuration_requested) {
+            (_, false) | (OverrideMode::Allow, true) => true,
+            (OverrideMode::Ignore, true) => {
+                ignored.push("tools");
+                false
+            }
+            (OverrideMode::Reject, true) => return Err(GovernanceError::Rejected("tools")),
+        };
+        if requested.tool_configuration_requested && allow_tools {
+            applied.push("tools");
+        }
         let mut parameters = Map::new();
         for (key, value) in requested.parameters {
             if self.allowed_parameters.contains(key) {
@@ -270,6 +286,7 @@ impl RequestOverridePolicy {
             instructions,
             visual_description_prompt,
             parameters,
+            allow_tools,
             audit: json!({
                 "capability_context_window": capability_context_window,
                 "route_max_output_tokens": route_max_output_tokens,
@@ -387,6 +404,7 @@ mod tests {
             sampling: OverrideMode::Reject,
             instructions: OverrideMode::Allow,
             visual_description_prompt: OverrideMode::Ignore,
+            tools: OverrideMode::Allow,
             allowed_parameters: BTreeSet::from(["seed".to_owned()]),
         };
         let parameters = Map::from_iter([("seed".to_owned(), json!(42))]);
@@ -401,6 +419,7 @@ mod tests {
                     instructions: Some("request instructions"),
                     visual_description_prompt: Some("request vision prompt"),
                     parameters: &parameters,
+                    tool_configuration_requested: false,
                 },
             )
             .expect("governed request");
@@ -440,6 +459,7 @@ prompt = "Describe the visible scene."
                     instructions: None,
                     visual_description_prompt: None,
                     parameters: &parameters,
+                    tool_configuration_requested: false,
                 },
             )
             .expect("governed request");

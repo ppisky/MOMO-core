@@ -1457,9 +1457,14 @@ mod tests {
             .await
             .expect("destination");
         let destination_scope = momo_domain::new_id();
-        crate::import_moc(&destination, &moc, destination_scope, "replace")
-            .await
-            .expect("MOC import");
+        crate::import_moc(
+            &destination,
+            &moc,
+            destination_scope,
+            crate::ConflictMode::Replace,
+        )
+        .await
+        .expect("MOC import");
         let round_trip = directory.path().join("round-trip.json");
         let report = export_external_character(
             &destination,
@@ -1626,9 +1631,14 @@ mod tests {
             .await
             .expect("destination");
         let destination_scope = momo_domain::new_id();
-        crate::import_moc(&destination, &moc, destination_scope, "replace")
-            .await
-            .expect("MOC import");
+        crate::import_moc(
+            &destination,
+            &moc,
+            destination_scope,
+            crate::ConflictMode::Replace,
+        )
+        .await
+        .expect("MOC import");
         let round_trip = directory.path().join("round-trip.charx");
         export_external_character(
             &destination,

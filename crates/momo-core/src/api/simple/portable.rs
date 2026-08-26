@@ -29,7 +29,8 @@ struct ExportMocJsonRequest {
     compatibility: crate::MocCompatibility,
     #[serde(default)]
     character_id: Option<uuid::Uuid>,
-    passphrase: Option<String>,
+    #[serde(default)]
+    protection: crate::MocProtection,
 }
 
 pub async fn export_moc_json(request_json: String) -> Result<String, String> {
@@ -41,7 +42,7 @@ pub async fn export_moc_json(request_json: String) -> Result<String, String> {
         character_id: request.character_id,
         compatibility: request.compatibility,
     };
-    let manifest = if let Some(passphrase) = request.passphrase.filter(|value| !value.is_empty()) {
+    let manifest = if let Some(passphrase) = request.protection.passphrase() {
         crate::portable::export_private_moc(
             core()?,
             request.output_path,
@@ -65,63 +66,26 @@ pub async fn export_moc_json(request_json: String) -> Result<String, String> {
     serde_json::to_string(&manifest).map_err(|error| error.to_string())
 }
 
-pub async fn export_character_moc_json(
-    output_path: String,
-    scope_id: String,
-    character_id: String,
-    passphrase: Option<String>,
-) -> Result<String, String> {
-    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
-    let character_id = uuid::Uuid::parse_str(&character_id).map_err(|error| error.to_string())?;
-    let plan = crate::MocExportPlan {
-        modules: vec![crate::MocModule::Characters],
-        character_id: Some(character_id),
-        compatibility: crate::MocCompatibility::None,
-    };
-    let settings = serde_json::json!({});
-    let manifest = if let Some(passphrase) = passphrase.filter(|value| !value.is_empty()) {
-        crate::portable::export_private_moc(
-            core()?,
-            output_path,
-            scope_id,
-            &settings,
-            &plan,
-            &passphrase,
-        )
-        .await
-    } else {
-        crate::portable::export_moc(core()?, output_path, scope_id, &settings, &plan).await
-    }
-    .map_err(|error| error.to_string())?;
-    serde_json::to_string(&manifest).map_err(|error| error.to_string())
-}
-
 pub async fn import_moc_json(
     input_path: String,
     scope_id: String,
-    conflict_mode: String,
-    passphrase: Option<String>,
+    conflict_mode: crate::ConflictMode,
+    protection: crate::MocProtection,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
-    let report = if let Some(passphrase) = passphrase {
+    let report = if let Some(passphrase) = protection.passphrase() {
         crate::portable::import_moc_with_passphrase(
             core()?,
             input_path,
             scope_id,
-            &conflict_mode,
+            conflict_mode,
             Some(&passphrase),
         )
         .await
     } else {
-        crate::portable::import_moc(core()?, input_path, scope_id, &conflict_mode).await
+        crate::portable::import_moc(core()?, input_path, scope_id, conflict_mode).await
     }
     .map_err(|error| error.to_string())?;
-    if report.memory_files_imported > 0 {
-        stage_memory_snapshot(scope_id).await?;
-    }
-    if report.semantic_graph_files_imported > 0 {
-        stage_semantic_graph_snapshot(scope_id).await?;
-    }
     serde_json::to_string(&report).map_err(|error| error.to_string())
 }
 

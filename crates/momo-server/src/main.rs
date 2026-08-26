@@ -335,22 +335,17 @@ struct MocExportRequest {
     compatibility: momo_core::MocCompatibility,
     #[serde(default)]
     character_id: Option<String>,
-    passphrase: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct CharacterMocExportRequest {
-    output_path: String,
-    character_id: String,
-    passphrase: Option<String>,
+    #[serde(default)]
+    protection: momo_core::MocProtection,
 }
 
 #[derive(Deserialize)]
 struct MocImportRequest {
     input_path: String,
     #[serde(default = "default_conflict_mode")]
-    conflict_mode: String,
-    passphrase: Option<String>,
+    conflict_mode: momo_core::ConflictMode,
+    #[serde(default)]
+    protection: momo_core::MocProtection,
 }
 
 #[derive(Deserialize)]
@@ -628,8 +623,8 @@ fn api_routes() -> Router<AppState> {
         .route("/conversations/:id/messages", get(list_messages))
         .route("/messages", post(create_message))
         .route("/messages/:id", put(update_message).delete(delete_message))
-        .route("/responses", post(create_response))
-        .route("/responses/:request_id/cancel", post(cancel_response))
+        .route("/momo/responses", post(create_response))
+        .route("/momo/responses/:request_id/cancel", post(cancel_response))
         .route("/metrics", get(metrics))
         .route("/chat/complete", post(chat_complete))
         .route("/chat/stream", post(chat_stream))
@@ -687,10 +682,9 @@ fn api_routes() -> Router<AppState> {
             "/semantic-graph/vectors/rebuild",
             post(rebuild_nsg_vector_index),
         )
-        .route("/runtime-config/export", post(export_runtime_config))
-        .route("/runtime-config/import", post(import_runtime_config))
+        .route("/momo-config/export", post(export_runtime_config))
+        .route("/momo-config/import", post(import_runtime_config))
         .route("/moc/export", post(export_moc))
-        .route("/moc/export-character", post(export_character_moc))
         .route("/moc/import", post(import_moc))
         .route("/moc/encrypted", get(moc_is_encrypted))
         .route("/lsb/embed", post(embed_lsb_image))
@@ -1303,6 +1297,8 @@ async fn orchestrate_response(
                 instructions: request.instructions.as_deref(),
                 visual_description_prompt: request.visual_description_prompt.as_deref(),
                 parameters: &request.parameters,
+                tool_configuration_requested: !request.tools.is_empty()
+                    || request.tool_choice.is_some(),
             },
         )
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
@@ -1437,10 +1433,12 @@ async fn orchestrate_response(
         .as_object_mut()
         .expect("request parameters are an object");
     parameter_object.extend(governed.parameters.clone());
-    if !request.tools.is_empty() {
-        parameter_object.insert("tools".to_owned(), response_tools_to_chat(request)?);
+    if governed.allow_tools && !request.tools.is_empty() {
+        parameter_object.insert("tools".to_owned(), response_tools_to_chat(&request.tools)?);
     }
-    if let Some(choice) = &request.tool_choice {
+    if governed.allow_tools
+        && let Some(choice) = &request.tool_choice
+    {
         parameter_object.insert(
             "tool_choice".to_owned(),
             response_tool_choice_to_chat(choice)?,
@@ -1732,9 +1730,9 @@ fn joined_bodies(values: &[Value]) -> String {
         .join("\n\n")
 }
 
-fn response_tools_to_chat(request: &MomoResponseRequest) -> Result<Value, ApiError> {
-    let tools = serde_json::to_value(&request.tools)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+fn response_tools_to_chat(tools: &[momo_core::ResponseTool]) -> Result<Value, ApiError> {
+    let tools =
+        serde_json::to_value(tools).map_err(|error| ApiError::bad_request(error.to_string()))?;
     let tools = tools
         .as_array()
         .ok_or_else(|| ApiError::bad_request("tools must be an array"))?;
@@ -2349,23 +2347,8 @@ async fn export_moc(
             "modules": request.modules,
             "compatibility": request.compatibility,
             "character_id": request.character_id,
-            "passphrase": request.passphrase,
+            "protection": request.protection,
         }))?)
-        .await,
-    )
-}
-
-async fn export_character_moc(
-    State(state): State<AppState>,
-    Json(request): Json<CharacterMocExportRequest>,
-) -> Result<Json<Value>, ApiError> {
-    json_result(
-        simple::export_character_moc_json(
-            request.output_path,
-            state.scope_id,
-            request.character_id,
-            request.passphrase,
-        )
         .await,
     )
 }
@@ -2379,7 +2362,7 @@ async fn import_moc(
             request.input_path,
             state.scope_id,
             request.conflict_mode,
-            request.passphrase,
+            request.protection,
         )
         .await,
     )
@@ -2492,8 +2475,8 @@ fn default_reserve_output_tokens() -> usize {
     1_024
 }
 
-fn default_conflict_mode() -> String {
-    "rename".to_owned()
+const fn default_conflict_mode() -> momo_core::ConflictMode {
+    momo_core::ConflictMode::KeepExisting
 }
 
 fn to_io_error(message: String) -> std::io::Error {
@@ -2589,7 +2572,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/v1/responses")
+                    .uri("/v1/momo/responses")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from("{"))
                     .expect("request"),
@@ -3359,7 +3342,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/v1/responses")
+                    .uri("/v1/momo/responses")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
@@ -3567,7 +3550,7 @@ mod tests {
         let invoke = || {
             Request::builder()
                 .method(Method::POST)
-                .uri("/v1/responses")
+                .uri("/v1/momo/responses")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(request_body))
                 .expect("response request")
@@ -3620,7 +3603,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/v1/responses")
+                    .uri("/v1/momo/responses")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(request_body.replace(
                         "Hello from the cross-repository contract.",

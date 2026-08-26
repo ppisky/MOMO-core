@@ -312,7 +312,6 @@ pub async fn apply_memory_patch_json(
     workspace
         .apply_patch(&patch_yaml)
         .map_err(|error| error.to_string())?;
-    stage_memory_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
@@ -477,7 +476,6 @@ pub async fn update_memory_document_json(
     workspace
         .replace_document_body(&document_id, &markdown)
         .map_err(|error| error.to_string())?;
-    stage_memory_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
@@ -504,7 +502,6 @@ pub async fn archive_memory_document_json(
     workspace
         .run_maintenance()
         .map_err(|error| error.to_string())?;
-    stage_memory_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
@@ -519,7 +516,6 @@ pub async fn restore_memory_document_json(
     workspace
         .restore_archived_authorized(&document_id)
         .map_err(|error| error.to_string())?;
-    stage_memory_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
@@ -534,7 +530,6 @@ pub async fn delete_memory_document_json(
     workspace
         .delete_document_authorized(&document_id)
         .map_err(|error| error.to_string())?;
-    stage_memory_snapshot(scope_id).await?;
     Ok("ok".to_owned())
 }
 
