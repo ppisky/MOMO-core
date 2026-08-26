@@ -207,7 +207,7 @@ pub async fn export_moc(
     let staging = TempDir::new()?;
     let mut modules = Vec::new();
     if selected.contains(&MocModule::MomoConfig) {
-        merged_runtime_config(core, settings)?.save(staging.path().join("config/runtime.toml"))?;
+        merged_runtime_config(core, settings)?.save(staging.path().join("config/momo.toml"))?;
         modules.push(("config".to_owned(), PathBuf::from("config")));
     }
     if selected.contains(&MocModule::Characters) {
@@ -370,7 +370,7 @@ pub async fn import_moc_with_passphrase(
         .iter()
         .any(|entry| entry.module == "config")
     {
-        let path = extracted.join("config/runtime.toml");
+        let path = extracted.join("config/momo.toml");
         if path.exists() {
             report.runtime_config = Some(import_runtime_config(core, path)?);
         }
@@ -942,7 +942,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), PortableError> {
 }
 
 fn runtime_config_path(core: &MomoCore) -> PathBuf {
-    core.data_dir().join("config/runtime.toml")
+    core.data_dir().join("config/momo.toml")
 }
 
 fn parse_character_id(value: &str) -> Result<Uuid, PortableError> {

@@ -365,6 +365,14 @@ pub struct MomoResponseRequest {
     #[serde(default)]
     pub max_output_tokens: Option<usize>,
     #[serde(default)]
+    pub context_window: Option<usize>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub parameters: serde_json::Map<String, Value>,
+    #[serde(default)]
+    pub visual_description_prompt: Option<String>,
+    #[serde(default)]
     pub tools: Vec<ResponseTool>,
     #[serde(default)]
     pub tool_choice: Option<Value>,
@@ -396,6 +404,21 @@ impl MomoResponseRequest {
                 MAX_RESPONSE_INSTRUCTIONS_BYTES,
                 "instructions",
             )?;
+        }
+        if self
+            .visual_description_prompt
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_RESPONSE_INSTRUCTIONS_BYTES)
+        {
+            return Err(ResponseContractError::FieldTooLarge(
+                "visual description prompt",
+            ));
+        }
+        if self
+            .temperature
+            .is_some_and(|temperature| !temperature.is_finite())
+        {
+            return Err(ResponseContractError::InvalidTemperature);
         }
         if self.tools.len() > MAX_RESPONSE_TOOLS {
             return Err(ResponseContractError::TooManyTools);
@@ -493,6 +516,8 @@ pub struct MomoResponseMetadata {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub state_audit: Value,
+    #[serde(default)]
+    pub request_audit: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -547,6 +572,8 @@ pub enum ResponseContractError {
     EmptyContentBlocks,
     #[error("image detail must be auto, low, or high")]
     InvalidImageDetail,
+    #[error("temperature must be finite")]
+    InvalidTemperature,
     #[error("{0} input is reserved for a future capability and is not enabled in 0.5")]
     UnsupportedInputModality(&'static str),
     #[error(

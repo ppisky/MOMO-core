@@ -701,7 +701,7 @@ mod tests {
         let declared = b"declared";
         let module = ModuleEntry {
             module: "config".to_owned(),
-            path: "config/runtime.toml".to_owned(),
+            path: "config/momo.toml".to_owned(),
             size: declared.len() as u64,
             sha256: hex::encode(Sha256::digest(declared)),
         };
@@ -726,7 +726,7 @@ mod tests {
             &output,
             &manifest,
             &[
-                ("config/runtime.toml", declared),
+                ("config/momo.toml", declared),
                 ("private/unlisted.txt", b"must not be accepted"),
             ],
         );
@@ -734,11 +734,11 @@ mod tests {
         let destination = tempfile::tempdir().expect("destination");
         assert!(matches!(
             extract(&output, destination.path(), ExtractionLimits::default()),
-            Err(MocError::DuplicatePath(path)) if path == "config/runtime.toml"
+            Err(MocError::DuplicatePath(path)) if path == "config/momo.toml"
         ));
         assert!(matches!(
             inspect(&output),
-            Err(MocError::DuplicatePath(path)) if path == "config/runtime.toml"
+            Err(MocError::DuplicatePath(path)) if path == "config/momo.toml"
         ));
     }
 

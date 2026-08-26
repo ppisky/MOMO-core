@@ -3,6 +3,7 @@ use std::{
     convert::Infallible,
     env,
     net::SocketAddr,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -21,8 +22,9 @@ use axum::{
 };
 use momo_core::{
     EmbeddingNormalization, EmbeddingProfile, MAX_RESPONSE_REQUEST_BYTES,
-    MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES, MomoResponse, MomoResponseMetadata,
-    MomoResponseRequest, ResponseError, ResponseOutputContent, ResponseOutputItem, ResponseUsage,
+    MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES, MomoConfig, MomoResponse,
+    MomoResponseMetadata, MomoResponseRequest, RequestedOverrides, ResponseError,
+    ResponseOutputContent, ResponseOutputItem, ResponseUsage,
     api::simple,
     momo_domain::{CharacterCard, Conversation, Message},
 };
@@ -57,6 +59,7 @@ struct AppState {
     metrics: Arc<Mutex<HashMap<String, RouteMetrics>>>,
     memory_distill_every: usize,
     nsg_govern_every: usize,
+    momo_config: Arc<MomoConfig>,
 }
 
 #[derive(Clone)]
@@ -458,6 +461,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initialized_dir = simple::initialize_core(data_dir)
         .await
         .map_err(to_io_error)?;
+    let momo_config_path = env::var_os("MOMO_CONFIG_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&initialized_dir).join("config/momo.toml"));
+    let momo_config = Arc::new(
+        MomoConfig::load_or_default(&momo_config_path)
+            .map_err(|error| to_io_error(error.to_string()))?,
+    );
     let state = AppState {
         data_dir: initialized_dir,
         scope_id,
@@ -489,6 +499,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics: Arc::new(Mutex::new(HashMap::new())),
         memory_distill_every: env_usize("MOMO_MEMORY_DISTILL_EVERY", 12, 1, 200)?,
         nsg_govern_every: env_usize("MOMO_NSG_GOVERN_EVERY", 12, 1, 200)?,
+        momo_config,
     };
 
     let app = build_app(state);
@@ -1272,18 +1283,31 @@ async fn orchestrate_response(
 
     let mut warnings = Vec::new();
     ensure_response_active(state, request_id).await?;
-    let (context_window, route_output_tokens) = match gateway_response_budget(state).await {
-        Ok(value) => value,
-        Err(error) => {
-            warnings.push(format!("capability discovery degraded: {error}"));
-            (8_192, 1_024)
-        }
-    };
-    let reserve_output_tokens = request
-        .max_output_tokens
-        .unwrap_or(route_output_tokens)
-        .min(route_output_tokens)
-        .max(1);
+    let (capability_context_window, route_output_tokens) =
+        match gateway_response_budget(state).await {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(format!("capability discovery degraded: {error}"));
+                (8_192, 1_024)
+            }
+        };
+    let governed = state
+        .momo_config
+        .govern(
+            capability_context_window,
+            route_output_tokens,
+            RequestedOverrides {
+                context_window: request.context_window,
+                max_output_tokens: request.max_output_tokens,
+                temperature: request.temperature,
+                instructions: request.instructions.as_deref(),
+                visual_description_prompt: request.visual_description_prompt.as_deref(),
+                parameters: &request.parameters,
+            },
+        )
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let context_window = governed.context_window;
+    let reserve_output_tokens = governed.max_output_tokens;
     let query_embedding = if request.momo.semantic_graph || request.momo.mo_state {
         ensure_response_active(state, request_id).await?;
         match generate_query_embedding(state, input).await {
@@ -1369,7 +1393,7 @@ async fn orchestrate_response(
     {
         messages.pop();
     }
-    if let Some(instructions) = request
+    if let Some(instructions) = governed
         .instructions
         .as_deref()
         .filter(|value| !value.trim().is_empty())
@@ -1412,6 +1436,7 @@ async fn orchestrate_response(
     let parameter_object = request_parameters
         .as_object_mut()
         .expect("request parameters are an object");
+    parameter_object.extend(governed.parameters.clone());
     if !request.tools.is_empty() {
         parameter_object.insert("tools".to_owned(), response_tools_to_chat(request)?);
     }
@@ -1426,6 +1451,7 @@ async fn orchestrate_response(
         "api_key": state.gateway_api_key,
         "model": request.model,
         "messages": gateway_messages,
+        "temperature": governed.temperature,
         "request_parameters": request_parameters,
     });
     let completion = if let Some(stream) = stream {
@@ -1629,6 +1655,7 @@ async fn orchestrate_response(
                 .get("audit")
                 .cloned()
                 .unwrap_or_else(|| json!({})),
+            request_audit: governed.audit,
         },
     })
 }
@@ -2556,6 +2583,7 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
+            momo_config: Arc::new(MomoConfig::default()),
         });
         let response = app
             .oneshot(
@@ -2598,6 +2626,7 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
+            momo_config: Arc::new(MomoConfig::default()),
         });
 
         let response = app
@@ -3324,6 +3353,7 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
+            momo_config: Arc::new(MomoConfig::default()),
         });
         let response = app
             .oneshot(
@@ -3531,6 +3561,7 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
+            momo_config: Arc::new(MomoConfig::default()),
         });
         let request_body = include_str!("../../../contracts/0.5/response_request.json");
         let invoke = || {
@@ -3570,6 +3601,7 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
+            momo_config: Arc::new(MomoConfig::default()),
         });
         let replay = restarted_app
             .clone()
@@ -3675,6 +3707,7 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 1,
             nsg_govern_every: 1,
+            momo_config: Arc::new(MomoConfig::default()),
         };
         run_background_maintenance(state.clone(), scope_id.clone(), "memory", 1)
             .await

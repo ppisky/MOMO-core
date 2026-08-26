@@ -6,6 +6,7 @@ mod character_compat;
 mod context;
 mod embedding;
 mod gateway;
+mod governance;
 mod lsb;
 mod portable;
 mod response;
@@ -39,6 +40,10 @@ pub use gateway::{
     ChatCompletion, ChatFunctionCall, ChatInput, ChatParameters, ChatStreamDelta,
     ChatStreamFunctionCallDelta, ChatStreamToolCallDelta, ChatToolCall, ChatUsage, GatewayError,
     GatewayMessage, GatewayMessageRole, OpenAiGateway, ProviderEndpoint, SseDecoder,
+};
+pub use governance::{
+    GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION, MomoConfig, OverrideMode,
+    RequestOverridePolicy, RequestedOverrides, VisionDescriptionConfig,
 };
 pub use lsb::{
     LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,
