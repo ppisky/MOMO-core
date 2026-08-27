@@ -1,9 +1,13 @@
 //! Client-independent implementation of the native high-level MomoApi response pipeline.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex as SyncMutex, Weak},
+};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -16,6 +20,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MomoApiErrorKind {
     BadRequest,
+    Conflict,
+    Cancelled,
     Model,
     Internal,
 }
@@ -42,6 +48,20 @@ impl MomoApiError {
         }
     }
 
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            kind: MomoApiErrorKind::Conflict,
+            message: message.into(),
+        }
+    }
+
+    fn cancelled() -> Self {
+        Self {
+            kind: MomoApiErrorKind::Cancelled,
+            message: "response request was cancelled".to_owned(),
+        }
+    }
+
     fn internal(message: impl Into<String>) -> Self {
         Self {
             kind: MomoApiErrorKind::Internal,
@@ -54,6 +74,21 @@ pub trait MomoResponseEventSink: Send + Sync {
     fn send(&self, event: Value) -> Result<(), String>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceKind {
+    Memory,
+    SemanticGraph,
+}
+
+impl MaintenanceKind {
+    const fn storage_name(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::SemanticGraph => "semantic_graph",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MomoApiService {
     default_scope_id: String,
@@ -62,6 +97,36 @@ pub struct MomoApiService {
     gateway_client: reqwest::Client,
     config: Arc<MomoConfig>,
     response_attempts: Arc<Mutex<HashMap<String, String>>>,
+    operation_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+    operation_states: Arc<SyncMutex<HashMap<String, OperationState>>>,
+    maintenance_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+}
+
+#[derive(Debug, Default)]
+struct OperationState {
+    active: usize,
+    cancelled: bool,
+}
+
+struct OperationGuard {
+    request_id: String,
+    states: Arc<SyncMutex<HashMap<String, OperationState>>>,
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        let mut states = self
+            .states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = states.get_mut(&self.request_id) else {
+            return;
+        };
+        state.active -= 1;
+        if state.active == 0 {
+            states.remove(&self.request_id);
+        }
+    }
 }
 
 impl MomoApiService {
@@ -80,15 +145,312 @@ impl MomoApiService {
             gateway_client,
             config,
             response_attempts: Arc::new(Mutex::new(HashMap::new())),
+            operation_locks: Arc::new(Mutex::new(HashMap::new())),
+            operation_states: Arc::new(SyncMutex::new(HashMap::new())),
+            maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub async fn clear_attempts(&self) {
-        self.response_attempts.lock().await.clear();
+    /// Executes one idempotent native response operation.
+    ///
+    /// The caller owns transport limits and event serialization. Core owns the
+    /// request identity, replay, cancellation, persistence, and maintenance state.
+    pub async fn execute(
+        &self,
+        request: &MomoResponseRequest,
+        request_id: &str,
+        input: &str,
+        stream: Option<&dyn MomoResponseEventSink>,
+    ) -> Result<MomoResponse, MomoApiError> {
+        let _operation = self.enter_operation(request_id);
+        self.execute_active(request, request_id, input, stream)
+            .await
     }
 
-    /// Executes Core's domain pipeline without requiring an HTTP server.
-    pub async fn respond(
+    /// Cancels a currently active response and its upstream model request.
+    pub fn cancel(&self, request_id: &str) -> bool {
+        let known = {
+            let mut states = self
+                .operation_states
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            states.get_mut(request_id).is_some_and(|state| {
+                state.cancelled = true;
+                state.active > 0
+            })
+        };
+        let upstream = simple::cancel_chat(request_id.to_owned());
+        known || upstream
+    }
+
+    async fn execute_active(
+        &self,
+        request: &MomoResponseRequest,
+        request_id: &str,
+        input: &str,
+        stream: Option<&dyn MomoResponseEventSink>,
+    ) -> Result<MomoResponse, MomoApiError> {
+        self.ensure_active(request_id)?;
+        let request_lock = {
+            let mut locks = self.operation_locks.lock().await;
+            if locks.len() >= 1_024 {
+                locks.retain(|_, lock| lock.strong_count() > 0);
+            }
+            if let Some(lock) = locks.get(request_id).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(request_id.to_owned(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let _request_guard = request_lock.lock().await;
+        self.ensure_active(request_id)?;
+        let fingerprint = response_request_fingerprint(request)?;
+        let persisted = load_response_operation(request_id).await?;
+        if let Some(operation) = &persisted {
+            if operation["request_fingerprint"].as_str() != Some(fingerprint.as_str()) {
+                return Err(MomoApiError::conflict(
+                    "request_id was already used with a different response request",
+                ));
+            }
+            if let Some(response_json) = operation["response_json"].as_str() {
+                return serde_json::from_str(response_json)
+                    .map_err(|error| MomoApiError::internal(error.to_string()));
+            }
+        }
+
+        let mut response = self
+            .respond(
+                request,
+                request_id,
+                &fingerprint,
+                persisted.as_ref(),
+                input,
+                stream,
+            )
+            .await?;
+        self.ensure_active(request_id)?;
+        let scope_id = request
+            .momo
+            .scope_id
+            .clone()
+            .unwrap_or_else(|| self.default_scope_id.clone());
+        let memory =
+            !response.output_text.is_empty() && (request.momo.memory || request.momo.mo_state);
+        let semantic_graph = !response.output_text.is_empty()
+            && (request.momo.semantic_graph || request.momo.mo_state);
+        let maintenance_registered = if memory || semantic_graph {
+            match simple::append_maintenance_turn_json(
+                json!({
+                    "request_id": request_id,
+                    "scope_id": scope_id,
+                    "user_content": input,
+                    "assistant_content": response.output_text,
+                })
+                .to_string(),
+                memory,
+                semantic_graph,
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    response.momo.warnings.push(format!(
+                        "background maintenance was not registered: {error}"
+                    ));
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        simple::complete_response_operation(
+            request_id.to_owned(),
+            serde_json::to_string(&response)
+                .map_err(|error| MomoApiError::internal(error.to_string()))?,
+        )
+        .await
+        .map_err(MomoApiError::internal)?;
+        if maintenance_registered {
+            self.schedule_maintenance(scope_id);
+        }
+        Ok(response)
+    }
+
+    fn enter_operation(&self, request_id: &str) -> OperationGuard {
+        let mut states = self
+            .operation_states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        states.entry(request_id.to_owned()).or_default().active += 1;
+        OperationGuard {
+            request_id: request_id.to_owned(),
+            states: Arc::clone(&self.operation_states),
+        }
+    }
+
+    fn ensure_active(&self, request_id: &str) -> Result<(), MomoApiError> {
+        if self
+            .operation_states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(request_id)
+            .is_some_and(|state| state.cancelled)
+        {
+            Err(MomoApiError::cancelled())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn schedule_maintenance(&self, scope_id: String) {
+        for (kind, enabled, threshold) in [
+            (
+                MaintenanceKind::Memory,
+                self.config.runtime.memory_distillation_enabled,
+                self.config.runtime.memory_distill_every_turns,
+            ),
+            (
+                MaintenanceKind::SemanticGraph,
+                self.config.runtime.semantic_graph_enabled,
+                self.config.runtime.nsg_govern_every_turns,
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
+            let service = self.clone();
+            let scope_id = scope_id.clone();
+            tokio::spawn(async move {
+                if let Err(error) = service.maintain(&scope_id, kind, threshold).await {
+                    tracing::warn!(?kind, %error, "background response maintenance failed; turns remain pending");
+                }
+            });
+        }
+    }
+
+    /// Runs one governed Core maintenance batch. Callers only choose when to schedule it.
+    pub async fn maintain(
+        &self,
+        scope_id: &str,
+        kind: MaintenanceKind,
+        threshold: usize,
+    ) -> Result<bool, MomoApiError> {
+        if threshold == 0 {
+            return Err(MomoApiError::bad_request(
+                "maintenance threshold must be positive",
+            ));
+        }
+        let storage_kind = kind.storage_name();
+        let lock_key = format!("{scope_id}:{storage_kind}");
+        let task_lock = {
+            let mut locks = self.maintenance_locks.lock().await;
+            if locks.len() >= 1_024 {
+                locks.retain(|_, lock| lock.strong_count() > 0);
+            }
+            if let Some(lock) = locks.get(&lock_key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(lock_key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let _guard = task_lock.lock().await;
+        let pending = simple::pending_maintenance_turns_json(
+            scope_id.to_owned(),
+            storage_kind.to_owned(),
+            threshold,
+        )
+        .await
+        .map_err(MomoApiError::internal)?;
+        let turns: Vec<Value> = serde_json::from_str(&pending)
+            .map_err(|error| MomoApiError::internal(error.to_string()))?;
+        if turns.len() < threshold {
+            return Ok(false);
+        }
+        let transcript = turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                format!(
+                    "Turn {}\nUser:\n{}\nAssistant:\n{}",
+                    index + 1,
+                    turn.get("user_content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    turn.get("assistant_content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let (route, system) = match kind {
+            MaintenanceKind::Memory => (
+                "memory_distillation",
+                concat!(
+                    "You are the MOMO DMW memory distiller. Output YAML only with root key patches. ",
+                    "Store only explicit durable facts useful in future conversations. Never store guesses, ",
+                    "questions, greetings, transient mood, secrets, or a general transcript summary. ",
+                    "Supported operations are create, append, replace, and update_frontmatter. ",
+                    "Use safe relative .md targets. If nothing qualifies, output exactly: patches: []"
+                ),
+            ),
+            MaintenanceKind::SemanticGraph => (
+                "semantic_graph_governance",
+                concat!(
+                    "You are the MOMO NSG governor. Output YAML only with root key patches. ",
+                    "Create only durable narrative rules, lore, causal relations, or constraints. ",
+                    "Automatic create_node operations must use mode draft, status active, and zone auto. ",
+                    "Never directly modify Canon; use revision_candidate with evidence. ",
+                    "If nothing qualifies, output exactly: patches: []"
+                ),
+            ),
+        };
+        let completion = simple::chat_complete_json(
+            json!({
+                "base_url": self.gateway_origin,
+                "api_key": self.gateway_api_key,
+                "model": route,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": transcript}
+                ],
+                "request_parameters": {"max_tokens": 2048, "momo_hop": 1}
+            })
+            .to_string(),
+        )
+        .await
+        .map_err(MomoApiError::model)?;
+        let completion: Value = serde_json::from_str(&completion)
+            .map_err(|error| MomoApiError::model(error.to_string()))?;
+        let patch = completion
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| MomoApiError::model("maintenance model returned no text"))?;
+        match kind {
+            MaintenanceKind::Memory => {
+                simple::apply_memory_patch_json(scope_id.to_owned(), patch.to_owned()).await
+            }
+            MaintenanceKind::SemanticGraph => {
+                simple::apply_nsg_patch_json(scope_id.to_owned(), patch.to_owned(), false).await
+            }
+        }
+        .map_err(MomoApiError::internal)?;
+        let request_ids = turns
+            .iter()
+            .filter_map(|turn| turn.get("request_id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        simple::mark_maintenance_turns_done(request_ids, storage_kind.to_owned())
+            .await
+            .map_err(MomoApiError::internal)?;
+        Ok(true)
+    }
+
+    async fn respond(
         &self,
         request: &MomoResponseRequest,
         request_id: &str,
@@ -165,6 +527,7 @@ impl MomoApiService {
         )
         .await
         .map_err(MomoApiError::internal)?;
+        self.response_attempts.lock().await.remove(request_id);
 
         let user_already_written = persisted
             .and_then(|operation| operation["user_written"].as_bool())
@@ -610,6 +973,26 @@ impl MomoApiService {
     }
 }
 
+async fn load_response_operation(request_id: &str) -> Result<Option<Value>, MomoApiError> {
+    simple::response_operation_json(request_id.to_owned())
+        .await
+        .map_err(MomoApiError::internal)?
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| MomoApiError::internal(error.to_string()))
+        })
+        .transpose()
+}
+
+fn response_request_fingerprint(request: &MomoResponseRequest) -> Result<String, MomoApiError> {
+    let mut normalized = request.clone();
+    normalized.stream = false;
+    normalized.momo.stream = false;
+    normalized.momo.request_id = None;
+    let encoded = serde_json::to_vec(&normalized)
+        .map_err(|error| MomoApiError::bad_request(error.to_string()))?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GatewayEmbeddingProfile {
@@ -692,5 +1075,36 @@ fn response_usage(completion: &Value) -> ResponseUsage {
         input_tokens,
         output_tokens,
         total_tokens,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_state_is_active_only_and_drop_safe() {
+        let service = MomoApiService::new(
+            "00000000-0000-4000-8000-000000000001",
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+            Arc::new(MomoConfig::default()),
+        );
+        assert!(!service.cancel("request-1"));
+        let operation = service.enter_operation("request-1");
+        assert!(service.cancel("request-1"));
+        assert!(matches!(
+            service.ensure_active("request-1"),
+            Err(MomoApiError {
+                kind: MomoApiErrorKind::Cancelled,
+                ..
+            })
+        ));
+        drop(operation);
+        assert!(!service.cancel("request-1"));
+        service
+            .ensure_active("request-1")
+            .expect("dropped operations leave no stale cancellation marker");
     }
 }

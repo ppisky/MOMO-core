@@ -1,4 +1,4 @@
-//! Client-independent orchestration and OpenAI-compatible model access.
+//! Client-independent MOMO orchestration and outbound model-adapter access.
 
 pub mod api;
 mod capability;
@@ -43,8 +43,9 @@ pub use gateway::{
     GatewayMessage, GatewayMessageRole, OpenAiGateway, ProviderEndpoint, SseDecoder,
 };
 pub use governance::{
-    GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION, MomoConfig, OverrideMode,
-    RequestOverridePolicy, RequestedOverrides, VisionDescriptionConfig, validate_momo_document,
+    GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION, MomoConfig, MomoRuntimeConfig,
+    OverrideMode, RequestOverridePolicy, RequestedOverrides, VisionDescriptionConfig,
+    validate_momo_document,
 };
 pub use lsb::{
     LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,
@@ -60,7 +61,9 @@ pub use momo_memory::{MoStateAudit, MoStateContext};
 pub use momo_moc;
 pub use momo_storage;
 pub use momo_storage::{DEFAULT_NSG_VECTOR_TOP_K, MAX_NSG_VECTOR_TOP_K, NsgVectorStatus};
-pub use orchestration::{MomoApiError, MomoApiErrorKind, MomoApiService, MomoResponseEventSink};
+pub use orchestration::{
+    MaintenanceKind, MomoApiError, MomoApiErrorKind, MomoApiService, MomoResponseEventSink,
+};
 pub use portable::{
     ConflictMode, ImportReport, MocCompatibility, MocExportPlan, MocModule, MocProtection,
     PortableError, export_moc, export_momo_config, export_private_moc, import_moc,

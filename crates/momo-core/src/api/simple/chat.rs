@@ -72,7 +72,7 @@ fn parameters(request: &ChatJsonRequest) -> ChatParameters {
     }
 }
 
-pub async fn chat_complete_json(request_json: String) -> Result<String, String> {
+pub(crate) async fn chat_complete_json(request_json: String) -> Result<String, String> {
     let request: ChatJsonRequest =
         serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
     validate_chat_request(&request)?;
@@ -103,7 +103,7 @@ pub fn prepare_context_json(request_json: String) -> Result<String, String> {
     serde_json::to_string(&prepared).map_err(|error| error.to_string())
 }
 
-pub async fn chat_stream_json(
+pub(crate) async fn chat_stream_json(
     request_json: String,
     sink: impl ChatEventSink,
 ) -> Result<String, String> {

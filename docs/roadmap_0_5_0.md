@@ -1,6 +1,6 @@
 # MOMO Core 0.5.0 release contract
 
-**Status:** implementation review in progress
+**Status:** release-candidate code audit complete
 **Updated:** 2026-08-27
 
 MOMO 0.5 freezes a coherent pre-1.0 architecture. A checklist item is complete
@@ -61,16 +61,19 @@ into Discord, CLI, or a model-provider implementation.
 - [x] Unsupported account sync/account crypto facade and other no-op capability
   claims removed; private MOC encryption remains.
 
-## Remaining release audit
+## Completed release audit
 
-- [ ] Split the oversized server transport/orchestration source into modules
-  without changing the frozen MomoApi contract.
-- [ ] Regenerate and checksum shared 0.5 fixtures after the route/event changes.
-- [ ] Verify both repositories with fmt, clippy `-D warnings`, full tests, and
+- [x] Split Core orchestration, response HTTP/SSE transport, stream encoding,
+  and HTTP errors without changing the frozen MomoApi wire contract.
+- [x] Regenerate and checksum shared 0.5 fixtures after the route/event changes.
+- [x] Verify both repositories with fmt, clippy `-D warnings`, full tests, and
   rustdoc; run the cross-repository contract tests using the Rust test suites.
-- [ ] Produce the final requirement-by-requirement completion report and ensure
-  no stale documentation advertises APNG, MOC migration, ambiguous config, or
-  a native route as an OpenAI-compatible route.
+- [x] Produce the requirement-by-requirement completion report and remove stale
+  APNG, MOC migration, ambiguous config, and native/OpenAI route claims.
+
+The remaining pre-release checks require real provider and Discord credentials;
+they are deployment smoke tests, not missing product implementations. See
+[`review_0_5_0.zh-CN.md`](review_0_5_0.zh-CN.md).
 
 ## 1.0 gate
 

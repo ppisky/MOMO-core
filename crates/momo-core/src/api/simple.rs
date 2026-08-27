@@ -56,7 +56,7 @@ static MEMORY_PATCH_REVIEW_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 const MAX_IMPORTED_FONT_BYTES: usize = 64 * 1024 * 1024;
 
-pub trait ChatEventSink: Send + Sync {
+pub(crate) trait ChatEventSink: Send + Sync {
     fn add(&self, event_json: String) -> Result<(), String>;
 }
 
@@ -77,7 +77,7 @@ pub fn new_request_id() -> String {
     momo_domain::new_id().to_string()
 }
 
-pub fn cancel_chat(request_id: String) -> bool {
+pub(crate) fn cancel_chat(request_id: String) -> bool {
     let cancellations = CANCELLATIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner());

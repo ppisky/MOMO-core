@@ -1,44 +1,31 @@
-use std::{
-    collections::{HashMap, HashSet},
-    convert::Infallible,
-    env,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, AtomicUsize},
-    },
-};
+use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc};
 
 mod http_error;
+mod response_api;
 mod response_stream;
 
 use http_error::ApiError;
 #[cfg(test)]
 use http_error::sanitize_error_message;
-use response_stream::ResponseStream;
+#[cfg(test)]
+use response_api::model_api_error;
+use response_api::{cancel_response, create_response};
 
+#[cfg(test)]
+use axum::http::StatusCode;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
-    http::StatusCode,
-    response::{
-        IntoResponse, Response,
-        sse::{Event, KeepAlive, Sse},
-    },
+    extract::{DefaultBodyLimit, Path, Query, State},
     routing::{get, post, put},
 };
 use momo_core::{
-    MAX_RESPONSE_REQUEST_BYTES, MomoApiError, MomoApiErrorKind, MomoApiService, MomoConfig,
-    MomoResponse, MomoResponseRequest, ResponseOutputItem,
+    MAX_RESPONSE_REQUEST_BYTES, MomoApiService, MomoConfig,
     api::simple,
     momo_domain::{CharacterCard, Conversation, Message},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, Semaphore, mpsc};
-use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
+use tokio::sync::{Mutex, Semaphore};
 use tower_http::trace::TraceLayer;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8765";
@@ -46,24 +33,15 @@ const DEFAULT_DATA_DIR: &str = ".momo-data";
 const DEFAULT_SCOPE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const ALLOW_REMOTE_ENV: &str = "MOMO_SERVER_ALLOW_REMOTE";
 const MAX_PUBLIC_ERROR_BYTES: usize = 2 * 1024;
-const RESPONSE_STREAM_BUFFER: usize = 64;
 
 #[derive(Clone)]
 struct AppState {
     data_dir: String,
     scope_id: String,
-    gateway_origin: String,
-    gateway_api_key: Option<String>,
-    responses: Arc<Mutex<HashMap<String, MomoResponse>>>,
-    response_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     momo_api: Arc<MomoApiService>,
-    maintenance_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    response_cancellations: Arc<Mutex<HashSet<String>>>,
     response_concurrency: Arc<Semaphore>,
     response_timeout: std::time::Duration,
     metrics: Arc<Mutex<HashMap<String, RouteMetrics>>>,
-    memory_distill_every: usize,
-    nsg_govern_every: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -130,18 +108,6 @@ struct ExportExternalCharacterRequest {
 #[serde(deny_unknown_fields)]
 struct ExportPreservedCharacterSourceRequest {
     output_path: String,
-}
-
-#[derive(Deserialize)]
-struct ChatRequest {
-    base_url: String,
-    api_key: Option<String>,
-    model: String,
-    messages: Vec<Value>,
-    #[serde(default)]
-    temperature: Option<f32>,
-    #[serde(default)]
-    request_parameters: Value,
 }
 
 #[derive(Deserialize)]
@@ -366,13 +332,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         data_dir: initialized_dir,
         scope_id,
-        gateway_origin,
-        gateway_api_key,
-        responses: Arc::new(Mutex::new(HashMap::new())),
-        response_locks: Arc::new(Mutex::new(HashMap::new())),
         momo_api,
-        maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
-        response_cancellations: Arc::new(Mutex::new(HashSet::new())),
         response_concurrency: Arc::new(Semaphore::new(env_usize(
             "MOMO_RESPONSE_MAX_CONCURRENCY",
             8,
@@ -386,8 +346,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             3_600,
         )? as u64),
         metrics: Arc::new(Mutex::new(HashMap::new())),
-        memory_distill_every: env_usize("MOMO_MEMORY_DISTILL_EVERY", 12, 1, 200)?,
-        nsg_govern_every: env_usize("MOMO_NSG_GOVERN_EVERY", 12, 1, 200)?,
     };
 
     let app = build_app(state);
@@ -487,9 +445,6 @@ fn api_routes() -> Router<AppState> {
         .route("/momo/responses", post(create_response))
         .route("/momo/responses/:request_id/cancel", post(cancel_response))
         .route("/metrics", get(metrics))
-        .route("/chat/complete", post(chat_complete))
-        .route("/chat/stream", post(chat_stream))
-        .route("/chat/cancel/:request_id", post(cancel_chat))
         .route("/embeddings/generate", post(generate_embeddings))
         .route("/capabilities/resolve", post(resolve_capability))
         .route("/context/prepare", post(prepare_context))
@@ -576,19 +531,6 @@ async fn update_route_metrics(
 ) {
     let mut metrics = state.metrics.lock().await;
     update(metrics.entry(route.to_owned()).or_default());
-}
-
-async fn ensure_response_active(state: &AppState, request_id: &str) -> Result<(), ApiError> {
-    if state
-        .response_cancellations
-        .lock()
-        .await
-        .contains(request_id)
-    {
-        Err(ApiError::cancelled())
-    } else {
-        Ok(())
-    }
 }
 
 async fn list_characters(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -735,568 +677,6 @@ async fn delete_message(Path(id): Path<String>) -> Result<Json<OkResponse>, ApiE
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(OkResponse { ok: true }))
-}
-
-async fn create_response(
-    State(state): State<AppState>,
-    payload: Result<Json<MomoResponseRequest>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let Json(request) = payload.map_err(|rejection| {
-        let status = rejection.status();
-        let code = if status == StatusCode::PAYLOAD_TOO_LARGE {
-            "request_too_large"
-        } else {
-            "invalid_json"
-        };
-        ApiError::new(status, code, rejection.body_text(), false)
-    })?;
-    let input = request
-        .validate()
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let request_id = request
-        .momo
-        .request_id
-        .clone()
-        .unwrap_or_else(simple::new_request_id);
-    let request_fingerprint = response_request_fingerprint(&request)?;
-    if request.stream || request.momo.stream {
-        let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(RESPONSE_STREAM_BUFFER);
-        let stream = ResponseStream {
-            tx,
-            sequence: Arc::new(AtomicU64::new(0)),
-            transmitted_bytes: Arc::new(AtomicUsize::new(0)),
-        };
-        stream
-            .send(json!({
-                "type": "response.created",
-                "request_id": request_id,
-                "response": {"id": format!("resp_{request_id}"), "status": "in_progress"},
-            }))
-            .map_err(ApiError::internal)?;
-        tokio::spawn({
-            let stream = stream.clone();
-            let request_id = request_id.clone();
-            async move {
-                match execute_response_bounded(
-                    state,
-                    request,
-                    request_id.clone(),
-                    request_fingerprint,
-                    input,
-                    Some(stream.clone()),
-                )
-                .await
-                {
-                    Ok(response) => {
-                        let message_id = format!("msg_{request_id}");
-                        let _ = stream.send(json!({
-                            "type": "response.output_text.done",
-                            "request_id": request_id,
-                            "item_id": message_id.as_str(),
-                            "output_index": 0,
-                            "content_index": 0,
-                            "text": response.output_text.as_str(),
-                        }));
-                        let _ = stream.send(json!({
-                            "type": "response.content_part.done",
-                            "request_id": request_id,
-                            "item_id": message_id.as_str(),
-                            "output_index": 0,
-                            "content_index": 0,
-                            "part": {
-                                "type": "output_text",
-                                "text": response.output_text.as_str(),
-                                "annotations": [],
-                            },
-                        }));
-                        if let Some(item) = response.output.first() {
-                            let _ = stream.send(json!({
-                                "type": "response.output_item.done",
-                                "request_id": request_id,
-                                "output_index": 0,
-                                "item": item,
-                            }));
-                        }
-                        for (output_index, item) in response.output.iter().enumerate().skip(1) {
-                            if let ResponseOutputItem::FunctionCall { id, arguments, .. } = item {
-                                let _ = stream.send(json!({
-                                    "type": "response.function_call_arguments.done",
-                                    "request_id": request_id,
-                                    "item_id": id,
-                                    "output_index": output_index,
-                                    "arguments": arguments,
-                                }));
-                            }
-                            let _ = stream.send(json!({
-                                "type": "response.output_item.done",
-                                "request_id": request_id,
-                                "output_index": output_index,
-                                "item": item,
-                            }));
-                        }
-                        let _ = stream.send(json!({
-                            "type": "response.completed",
-                            "request_id": request_id,
-                            "response": response,
-                        }));
-                    }
-                    Err(error) => {
-                        let _ = stream.send(json!({
-                            "type": "response.failed",
-                            "request_id": request_id,
-                            "error": error.error,
-                        }));
-                    }
-                }
-            }
-        });
-        return Ok(Sse::new(ReceiverStream::new(rx))
-            .keep_alive(KeepAlive::default())
-            .into_response());
-    }
-    let response =
-        execute_response_bounded(state, request, request_id, request_fingerprint, input, None)
-            .await?;
-    Ok(Json(response).into_response())
-}
-
-async fn execute_response_bounded(
-    state: AppState,
-    request: MomoResponseRequest,
-    request_id: String,
-    request_fingerprint: String,
-    input: String,
-    stream: Option<ResponseStream>,
-) -> Result<MomoResponse, ApiError> {
-    let started = std::time::Instant::now();
-    let route = request.model.clone();
-    let permit = Arc::clone(&state.response_concurrency)
-        .try_acquire_owned()
-        .map_err(|_| {
-            ApiError::rate_limited("response concurrency limit reached")
-                .with_request_id(&request_id)
-        })?;
-    update_route_metrics(&state, &route, |metrics| {
-        metrics.requests = metrics.requests.saturating_add(1);
-        metrics.inflight = metrics.inflight.saturating_add(1);
-    })
-    .await;
-    let result = match tokio::time::timeout(
-        state.response_timeout,
-        execute_response(
-            state.clone(),
-            request,
-            request_id.clone(),
-            request_fingerprint,
-            input,
-            stream,
-        ),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            let _ = simple::cancel_chat(request_id.clone());
-            Err(ApiError::gateway_timeout(
-                "response orchestration timed out",
-            ))
-        }
-    };
-    drop(permit);
-    state
-        .response_cancellations
-        .lock()
-        .await
-        .remove(&request_id);
-    let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    update_route_metrics(&state, &route, |metrics| {
-        metrics.inflight = metrics.inflight.saturating_sub(1);
-        metrics.latency_ms = metrics.latency_ms.saturating_add(elapsed);
-        match &result {
-            Ok(response) => {
-                metrics.succeeded = metrics.succeeded.saturating_add(1);
-                metrics.input_tokens = metrics
-                    .input_tokens
-                    .saturating_add(response.usage.input_tokens);
-                metrics.output_tokens = metrics
-                    .output_tokens
-                    .saturating_add(response.usage.output_tokens);
-            }
-            Err(error) if error.error.code == "cancelled" => {
-                metrics.cancelled = metrics.cancelled.saturating_add(1);
-            }
-            Err(error) if error.error.code == "timeout" => {
-                metrics.timed_out = metrics.timed_out.saturating_add(1);
-            }
-            Err(_) => metrics.failed = metrics.failed.saturating_add(1),
-        }
-    })
-    .await;
-    result.map_err(|error| error.with_request_id(&request_id))
-}
-
-async fn execute_response(
-    state: AppState,
-    request: MomoResponseRequest,
-    request_id: String,
-    request_fingerprint: String,
-    input: String,
-    stream: Option<ResponseStream>,
-) -> Result<MomoResponse, ApiError> {
-    ensure_response_active(&state, &request_id).await?;
-    let request_lock = {
-        let mut locks = state.response_locks.lock().await;
-        Arc::clone(
-            locks
-                .entry(request_id.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
-    };
-    let _request_guard = request_lock.lock().await;
-    ensure_response_active(&state, &request_id).await?;
-    let persisted = load_response_operation(&request_id).await?;
-    if let Some(operation) = &persisted {
-        if operation["request_fingerprint"].as_str() != Some(request_fingerprint.as_str()) {
-            return Err(ApiError::conflict(
-                "request_id was already used with a different response request",
-            ));
-        }
-        if let Some(response_json) = operation["response_json"].as_str() {
-            let response: MomoResponse = serde_json::from_str(response_json)
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-            return Ok(response);
-        }
-    }
-    let response = if let Some(cached) = state.responses.lock().await.get(&request_id).cloned() {
-        cached
-    } else {
-        let mut response = state
-            .momo_api
-            .respond(
-                &request,
-                &request_id,
-                &request_fingerprint,
-                persisted.as_ref(),
-                &input,
-                stream
-                    .as_ref()
-                    .map(|value| value as &dyn momo_core::MomoResponseEventSink),
-            )
-            .await
-            .map_err(momo_api_error)?;
-        let maintenance_scope = request
-            .momo
-            .scope_id
-            .clone()
-            .unwrap_or_else(|| state.scope_id.clone());
-        let memory_maintenance =
-            !response.output_text.is_empty() && (request.momo.memory || request.momo.mo_state);
-        let nsg_maintenance = !response.output_text.is_empty()
-            && (request.momo.semantic_graph || request.momo.mo_state);
-        let maintenance_registered = if memory_maintenance || nsg_maintenance {
-            match simple::append_maintenance_turn_json(
-                json!({
-                    "request_id": request_id,
-                    "scope_id": maintenance_scope,
-                    "user_content": input,
-                    "assistant_content": response.output_text,
-                })
-                .to_string(),
-                memory_maintenance,
-                nsg_maintenance,
-            )
-            .await
-            {
-                Ok(()) => true,
-                Err(error) => {
-                    response.momo.warnings.push(format!(
-                        "background maintenance was not registered: {error}"
-                    ));
-                    false
-                }
-            }
-        } else {
-            false
-        };
-        simple::complete_response_operation(
-            request_id.clone(),
-            serde_json::to_string(&response)
-                .map_err(|error| ApiError::internal(error.to_string()))?,
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        let mut responses = state.responses.lock().await;
-        if responses.len() >= 1_024 {
-            responses.clear();
-            state.momo_api.clear_attempts().await;
-            state.response_locks.lock().await.clear();
-        }
-        responses.insert(request_id.clone(), response.clone());
-        if maintenance_registered {
-            schedule_background_maintenance(state.clone(), maintenance_scope);
-        }
-        response
-    };
-
-    Ok(response)
-}
-
-fn model_api_error(error: String) -> ApiError {
-    let lowercase = error.to_ascii_lowercase();
-    if lowercase.contains("cancelled") {
-        return ApiError::cancelled();
-    }
-    if lowercase.contains("timed out") || lowercase.contains("timeout") {
-        return ApiError::gateway_timeout("model gateway timed out");
-    }
-    if let Some(status) = parse_upstream_status(&error) {
-        if status == 429 {
-            let mut api_error = ApiError::rate_limited("model gateway rate limit exceeded");
-            api_error.error.upstream_status = Some(status);
-            return api_error;
-        }
-        let mut api_error = ApiError::bad_gateway(format!("model gateway returned HTTP {status}"));
-        api_error.error.upstream_status = Some(status);
-        api_error.error.retryable = status >= 500;
-        return api_error;
-    }
-    ApiError::bad_gateway(error)
-}
-
-fn momo_api_error(error: MomoApiError) -> ApiError {
-    match error.kind {
-        MomoApiErrorKind::BadRequest => ApiError::bad_request(error.message),
-        MomoApiErrorKind::Model => model_api_error(error.message),
-        MomoApiErrorKind::Internal => ApiError::internal(error.message),
-    }
-}
-
-fn parse_upstream_status(message: &str) -> Option<u16> {
-    let marker = "HTTP ";
-    let start = message.find(marker)? + marker.len();
-    message[start..]
-        .split(|character: char| !character.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()
-}
-
-async fn load_response_operation(request_id: &str) -> Result<Option<Value>, ApiError> {
-    simple::response_operation_json(request_id.to_owned())
-        .await
-        .map_err(ApiError::internal)?
-        .map(|value| {
-            serde_json::from_str(&value).map_err(|error| ApiError::internal(error.to_string()))
-        })
-        .transpose()
-}
-
-fn response_request_fingerprint(request: &MomoResponseRequest) -> Result<String, ApiError> {
-    let mut normalized = request.clone();
-    normalized.stream = false;
-    normalized.momo.stream = false;
-    normalized.momo.request_id = None;
-    let encoded = serde_json::to_vec(&normalized)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    Ok(hex::encode(Sha256::digest(encoded)))
-}
-
-fn schedule_background_maintenance(state: AppState, scope_id: String) {
-    for (kind, threshold) in [
-        ("memory", state.memory_distill_every),
-        ("semantic_graph", state.nsg_govern_every),
-    ] {
-        let state = state.clone();
-        let scope_id = scope_id.clone();
-        tokio::spawn(async move {
-            if let Err(error) = run_background_maintenance(state, scope_id, kind, threshold).await {
-                tracing::warn!(kind, %error, "background response maintenance failed; turns remain pending");
-            }
-        });
-    }
-}
-
-async fn run_background_maintenance(
-    state: AppState,
-    scope_id: String,
-    kind: &'static str,
-    threshold: usize,
-) -> Result<(), String> {
-    let lock_key = format!("{scope_id}:{kind}");
-    let task_lock = {
-        let mut locks = state.maintenance_locks.lock().await;
-        Arc::clone(
-            locks
-                .entry(lock_key)
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
-    };
-    let _guard = task_lock.lock().await;
-    let pending =
-        simple::pending_maintenance_turns_json(scope_id.clone(), kind.to_owned(), threshold)
-            .await?;
-    let turns: Vec<Value> = serde_json::from_str(&pending).map_err(|error| error.to_string())?;
-    if turns.len() < threshold {
-        return Ok(());
-    }
-    let transcript = turns
-        .iter()
-        .enumerate()
-        .map(|(index, turn)| {
-            format!(
-                "Turn {}\nUser:\n{}\nAssistant:\n{}",
-                index + 1,
-                turn.get("user_content")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                turn.get("assistant_content")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let (route, system) = match kind {
-        "memory" => (
-            "memory_distillation",
-            concat!(
-                "You are the MOMO DMW memory distiller. Output YAML only with root key patches. ",
-                "Store only explicit durable facts useful in future conversations. Never store guesses, ",
-                "questions, greetings, transient mood, secrets, or a general transcript summary. ",
-                "Supported operations are create, append, replace, and update_frontmatter. ",
-                "Use safe relative .md targets. If nothing qualifies, output exactly: patches: []"
-            ),
-        ),
-        "semantic_graph" => (
-            "semantic_graph_governance",
-            concat!(
-                "You are the MOMO NSG governor. Output YAML only with root key patches. ",
-                "Create only durable narrative rules, lore, causal relations, or constraints. ",
-                "Automatic create_node operations must use mode draft, status active, and zone auto. ",
-                "Never directly modify Canon; use revision_candidate with evidence. ",
-                "If nothing qualifies, output exactly: patches: []"
-            ),
-        ),
-        _ => return Err("unknown maintenance kind".to_owned()),
-    };
-    let completion = simple::chat_complete_json(
-        json!({
-            "base_url": state.gateway_origin,
-            "api_key": state.gateway_api_key,
-            "model": route,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": transcript}
-            ],
-            "request_parameters": {
-                "max_tokens": 2048,
-                "momo_hop": 1
-            }
-        })
-        .to_string(),
-    )
-    .await?;
-    let completion: Value = serde_json::from_str(&completion).map_err(|error| error.to_string())?;
-    let patch = completion
-        .get("content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "maintenance model returned no text".to_owned())?;
-    match kind {
-        "memory" => {
-            simple::apply_memory_patch_json(scope_id.clone(), patch.to_owned()).await?;
-        }
-        "semantic_graph" => {
-            simple::apply_nsg_patch_json(scope_id.clone(), patch.to_owned(), false).await?;
-        }
-        _ => unreachable!(),
-    }
-    let request_ids = turns
-        .iter()
-        .filter_map(|turn| turn.get("request_id").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    simple::mark_maintenance_turns_done(request_ids, kind.to_owned()).await?;
-    Ok(())
-}
-
-async fn chat_complete(Json(request): Json<ChatRequest>) -> Result<Json<Value>, ApiError> {
-    let request_json = json!({
-        "base_url": request.base_url,
-        "api_key": request.api_key,
-        "model": request.model,
-        "messages": request.messages,
-        "temperature": request.temperature,
-        "request_parameters": normalized_request_parameters(&request.request_parameters)?,
-    })
-    .to_string();
-    json_result(simple::chat_complete_json(request_json).await)
-}
-
-async fn chat_stream(
-    Json(request): Json<ChatRequest>,
-) -> Result<Sse<UnboundedReceiverStream<Result<Event, Infallible>>>, ApiError> {
-    let request_id = simple::new_request_id();
-    let request_json = json!({
-        "request_id": request_id,
-        "base_url": request.base_url,
-        "api_key": request.api_key,
-        "model": request.model,
-        "messages": request.messages,
-        "temperature": request.temperature,
-        "request_parameters": normalized_request_parameters(&request.request_parameters)?,
-    })
-    .to_string();
-    let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
-    let sink_tx = tx.clone();
-    let sink = move |event_json: String| {
-        sink_tx
-            .send(Ok(Event::default().data(event_json)))
-            .map_err(|error| error.to_string())
-    };
-
-    tokio::spawn(async move {
-        let start = json!({
-            "type": "start",
-            "request_id": request_id,
-        });
-        let _ = tx.send(Ok(Event::default().data(start.to_string())));
-        if let Err(error) = simple::chat_stream_json(request_json, sink).await {
-            let _ = tx.send(Ok(Event::default().data(
-                json!({
-                    "type": "error",
-                    "error": error,
-                })
-                .to_string(),
-            )));
-        }
-    });
-
-    Ok(Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
-}
-
-async fn cancel_chat(Path(request_id): Path<String>) -> Json<Value> {
-    Json(json!({
-        "cancelled": simple::cancel_chat(request_id),
-    }))
-}
-
-async fn cancel_response(
-    State(state): State<AppState>,
-    Path(request_id): Path<String>,
-) -> Json<Value> {
-    let known = state.response_locks.lock().await.contains_key(&request_id);
-    if known {
-        state
-            .response_cancellations
-            .lock()
-            .await
-            .insert(request_id.clone());
-    }
-    let upstream = simple::cancel_chat(request_id.clone());
-    Json(json!({
-        "request_id": request_id,
-        "cancelled": known || upstream,
-    }))
 }
 
 async fn generate_embeddings(Json(request): Json<Value>) -> Result<Json<Value>, ApiError> {
@@ -1662,16 +1042,6 @@ fn validate_scope_id(scope_id: String) -> Result<String, ApiError> {
     Ok(scope_id)
 }
 
-fn normalized_request_parameters(value: &Value) -> Result<Value, ApiError> {
-    match value {
-        Value::Object(_) => Ok(value.clone()),
-        Value::Null => Ok(json!({})),
-        _ => Err(ApiError::bad_request(
-            "request_parameters must be an object",
-        )),
-    }
-}
-
 const fn default_true() -> bool {
     true
 }
@@ -1780,18 +1150,10 @@ mod tests {
         let app = build_app(AppState {
             data_dir: initialized_dir,
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
-            gateway_origin: "http://127.0.0.1:9/v1".to_owned(),
-            gateway_api_key: None,
-            responses: Arc::new(Mutex::new(HashMap::new())),
-            response_locks: Arc::new(Mutex::new(HashMap::new())),
             momo_api: test_momo_api("http://127.0.0.1:9/v1"),
-            maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
-            memory_distill_every: 12,
-            nsg_govern_every: 12,
         });
         let response = app
             .oneshot(
@@ -1821,18 +1183,10 @@ mod tests {
         let app = build_app(AppState {
             data_dir: initialized_dir,
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
-            gateway_origin: "http://127.0.0.1:9/v1".to_owned(),
-            gateway_api_key: None,
-            responses: Arc::new(Mutex::new(HashMap::new())),
-            response_locks: Arc::new(Mutex::new(HashMap::new())),
             momo_api: test_momo_api("http://127.0.0.1:9/v1"),
-            maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
-            memory_distill_every: 12,
-            nsg_govern_every: 12,
         });
 
         let response = app
@@ -2546,18 +1900,10 @@ mod tests {
         let app = build_app(AppState {
             data_dir: initialized_dir,
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
-            gateway_origin: format!("http://{address}/v1"),
-            gateway_api_key: None,
-            responses: Arc::new(Mutex::new(HashMap::new())),
-            response_locks: Arc::new(Mutex::new(HashMap::new())),
             momo_api: test_momo_api(format!("http://{address}/v1")),
-            maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
-            memory_distill_every: 12,
-            nsg_govern_every: 12,
         });
         let response = app
             .oneshot(
@@ -2752,18 +2098,10 @@ mod tests {
         let app = build_app(AppState {
             data_dir: initialized_dir,
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
-            gateway_origin: format!("http://{address}/v1"),
-            gateway_api_key: None,
-            responses: Arc::new(Mutex::new(HashMap::new())),
-            response_locks: Arc::new(Mutex::new(HashMap::new())),
             momo_api: test_momo_api(format!("http://{address}/v1")),
-            maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
-            memory_distill_every: 12,
-            nsg_govern_every: 12,
         });
         let request_body = include_str!("../../../contracts/0.5/response_request.json");
         let invoke = || {
@@ -2790,18 +2128,10 @@ mod tests {
         let restarted_app = build_app(AppState {
             data_dir: TEST_DATA_DIR.path().to_string_lossy().into_owned(),
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
-            gateway_origin: format!("http://{address}/v1"),
-            gateway_api_key: None,
-            responses: Arc::new(Mutex::new(HashMap::new())),
-            response_locks: Arc::new(Mutex::new(HashMap::new())),
             momo_api: test_momo_api(format!("http://{address}/v1")),
-            maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
-            memory_distill_every: 12,
-            nsg_govern_every: 12,
         });
         let replay = restarted_app
             .clone()
@@ -2894,23 +2224,19 @@ mod tests {
         let state = AppState {
             data_dir: initialized_dir,
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
-            gateway_origin: format!("http://{address}/v1"),
-            gateway_api_key: None,
-            responses: Arc::new(Mutex::new(HashMap::new())),
-            response_locks: Arc::new(Mutex::new(HashMap::new())),
             momo_api: test_momo_api(format!("http://{address}/v1")),
-            maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
-            memory_distill_every: 1,
-            nsg_govern_every: 1,
         };
-        run_background_maintenance(state.clone(), scope_id.clone(), "memory", 1)
+        state
+            .momo_api
+            .maintain(&scope_id, momo_core::MaintenanceKind::Memory, 1)
             .await
             .expect("memory maintenance");
-        run_background_maintenance(state, scope_id.clone(), "semantic_graph", 1)
+        state
+            .momo_api
+            .maintain(&scope_id, momo_core::MaintenanceKind::SemanticGraph, 1)
             .await
             .expect("NSG maintenance");
         for kind in ["memory", "semantic_graph"] {

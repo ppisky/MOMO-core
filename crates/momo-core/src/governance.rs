@@ -59,6 +59,29 @@ pub struct VisionDescriptionConfig {
     pub prompt: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MomoRuntimeConfig {
+    #[serde(default = "default_true")]
+    pub memory_distillation_enabled: bool,
+    #[serde(default = "default_maintenance_turns")]
+    pub memory_distill_every_turns: usize,
+    #[serde(default = "default_true")]
+    pub semantic_graph_enabled: bool,
+    #[serde(default = "default_maintenance_turns")]
+    pub nsg_govern_every_turns: usize,
+}
+
+impl Default for MomoRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            memory_distillation_enabled: true,
+            memory_distill_every_turns: default_maintenance_turns(),
+            semantic_graph_enabled: true,
+            nsg_govern_every_turns: default_maintenance_turns(),
+        }
+    }
+}
+
 impl Default for VisionDescriptionConfig {
     fn default() -> Self {
         Self {
@@ -75,6 +98,8 @@ pub struct MomoConfig {
     #[serde(default)]
     pub request_overrides: RequestOverridePolicy,
     #[serde(default)]
+    pub runtime: MomoRuntimeConfig,
+    #[serde(default)]
     pub vision: VisionDescriptionConfig,
 }
 
@@ -83,6 +108,7 @@ impl Default for MomoConfig {
         Self {
             schema_version: MOMO_CONFIG_SCHEMA_VERSION,
             request_overrides: RequestOverridePolicy::default(),
+            runtime: MomoRuntimeConfig::default(),
             vision: VisionDescriptionConfig::default(),
         }
     }
@@ -113,6 +139,13 @@ impl MomoConfig {
         if self.vision.prompt.trim().is_empty() || self.vision.prompt.len() > 64 * 1024 {
             return Err(GovernanceError::Invalid(
                 "vision.prompt must contain 1 to 65536 bytes".to_owned(),
+            ));
+        }
+        if !(1..=200).contains(&self.runtime.memory_distill_every_turns)
+            || !(1..=200).contains(&self.runtime.nsg_govern_every_turns)
+        {
+            return Err(GovernanceError::Invalid(
+                "runtime maintenance intervals must be between 1 and 200 turns".to_owned(),
             ));
         }
         const RESERVED: [&str; 8] = [
@@ -168,6 +201,14 @@ impl MomoConfig {
         governed.audit["visual_description_prompt_source"] = json!(visual_source);
         Ok(governed)
     }
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_maintenance_turns() -> usize {
+    12
 }
 
 pub fn validate_momo_document(text: &str) -> Result<(), GovernanceError> {
@@ -506,5 +547,34 @@ prompt = "Describe the visible scene."
             validate_momo_document("schema_version = 1\n[[providers]]\nprovider_id = 'unsafe'\n")
                 .expect_err("host field");
         assert!(matches!(error, GovernanceError::HostField(field) if field == "providers"));
+    }
+
+    #[test]
+    fn maintenance_runtime_is_portable_and_bounded() {
+        let config: MomoConfig = toml::from_str(
+            r#"
+schema_version = 1
+
+[runtime]
+memory_distillation_enabled = false
+memory_distill_every_turns = 7
+semantic_graph_enabled = true
+nsg_govern_every_turns = 19
+max_concurrent_chats = 4
+"#,
+        )
+        .expect("portable runtime");
+        config.validate().expect("valid runtime");
+        assert!(!config.runtime.memory_distillation_enabled);
+        assert_eq!(config.runtime.memory_distill_every_turns, 7);
+        assert!(config.runtime.semantic_graph_enabled);
+        assert_eq!(config.runtime.nsg_govern_every_turns, 19);
+
+        let mut invalid = config;
+        invalid.runtime.nsg_govern_every_turns = 0;
+        assert!(matches!(
+            invalid.validate(),
+            Err(GovernanceError::Invalid(_))
+        ));
     }
 }

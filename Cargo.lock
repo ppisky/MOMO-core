@@ -2176,6 +2176,7 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "toml",
+ "tracing",
  "url",
  "uuid",
  "walkdir",
