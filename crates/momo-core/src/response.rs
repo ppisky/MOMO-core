@@ -177,7 +177,7 @@ impl ResponseMessageContent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseContentBlock {
     InputText {
         text: String,
@@ -230,7 +230,7 @@ impl ResponseContentBlock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseInputItem {
     Message {
         role: String,
@@ -300,7 +300,7 @@ impl ResponseInputItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseTool {
     Function {
         name: String,
@@ -313,6 +313,7 @@ pub enum ResponseTool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MomoResponseExtension {
     #[serde(default = "default_schema")]
     pub schema: String,
@@ -354,6 +355,7 @@ impl Default for MomoResponseExtension {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MomoResponseRequest {
     #[serde(default = "default_conversation_model")]
     pub model: String,
@@ -520,26 +522,6 @@ pub struct MomoResponseMetadata {
     pub request_audit: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MomoResponseEvent {
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub request_id: String,
-    pub sequence: u64,
-    #[serde(default)]
-    pub delta: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_index: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub item_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<String>,
-    #[serde(default)]
-    pub response: Option<MomoResponse>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ResponseError>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResponseError {
     #[serde(rename = "type")]
@@ -701,6 +683,24 @@ mod tests {
         assert_eq!(
             image.validate(),
             Err(ResponseContractError::UnsupportedInputModality("image"))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_native_request_fields_at_every_typed_boundary() {
+        assert!(
+            serde_json::from_value::<MomoResponseRequest>(serde_json::json!({
+                "input": "hello",
+                "temperaturee": 0.7
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<MomoResponseRequest>(serde_json::json!({
+                "input": "hello",
+                "momo": {"unknown_policy": true}
+            }))
+            .is_err()
         );
     }
 

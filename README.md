@@ -11,14 +11,15 @@ local HTTP interface in one workspace.
 
 - independent MOMO Character Card v2 (`character.toml` + Markdown)
 - Character Card v1/v2 JSON and PNG import
-- Character Card v3 JSON, PNG/APNG, and full CHARX-container import
+- Character Card v3 JSON, PNG, and full CHARX-container import; APNG is rejected
 - Character Card v2/v3 JSON and CHARX export with source preservation
-- MOC v2 import and export
+- typed MOC v2 snapshot import/export with explicit compatibility profiles
+- typed MOMO LSB carriers for PNG and lossless WebP (no APNG or AVIF)
 - Dual-Mem Wiki (DMW) long-term memory
 - Narrative Semantic Graph (NSG)
 - MO State compilation
 - SQLite application storage and a separate Turso vector store
-- outbound OpenAI-compatible completion, streaming, and embeddings gateways
+- native `MomoApi` orchestration plus outbound model-adapter interfaces
 - capability discovery and context budgeting
 - vector-store contracts and deterministic retrieval
 
@@ -32,7 +33,8 @@ MOMO Character Card v2 is an independent format defined by this repository in
 [`Character_Card_v2.md`](Character_Card_v2.md). Its “v2” does not mean the
 external `chara_card_v2` JSON/PNG format. Core currently imports and exports the
 MOMO format inside MOC v2. It also imports external CCv1/v2 JSON and PNG plus
-CCv3 JSON, PNG/APNG, and CHARX, and exports CCv2/CCv3 JSON and CHARX. CHARX
+CCv3 JSON, PNG, and CHARX, and exports CCv2/CCv3 JSON and CHARX. APNG is
+intentionally unsupported. CHARX
 assets, `x_meta`, `module.risum`, and unknown safe entries are retained with the
 source container and survive MOC round trips.
 
@@ -86,15 +88,14 @@ MOMO orchestration API, not a drop-in OpenAI server. Raw-vector APIs remain a
 low-level compatibility path. See the
 [embedding interface profile](docs/vectorization_model_interface_0_4_2.md).
 
-Version 0.5.0 includes the versioned response wire contract,
+Version 0.5.0 includes the native `POST /v1/momo/responses` wire contract,
 true upstream-to-client SSE deltas, persistent request-ID replay, Core-owned
 embedding profiles and background DMW/NSG maintenance. Function tools have a
 shared cross-protocol golden contract, and the codec-independent
 [MOMO LSB Carrier v1](docs/momo_lsb_carrier_v1.md) includes bounded PNG codec
-integration and lossless rewrap regression coverage. The 0.5.0 release
+integration for PNG and lossless WebP. The 0.5.0 release
 candidate also unifies error envelopes and request/stream bounds, adds
-cancellation, timeout, rate-limit and logical-route metrics, and verifies both
-direct Core and mobot gateway deployments with real-process E2E tests. See the
+cancellation, timeout, rate-limit and logical-route metrics. See the
 [0.5.0 roadmap](docs/roadmap_0_5_0.md) and
 [migration guide](docs/migration_0_4_2_to_0_5_0.md) for compatibility details
 and the 1.0 stability gates.

@@ -1,7 +1,7 @@
 # MOMO Container Implementation Profile 0.2
 
 **状态：** Implementation Baseline  
-**编码：** tar.zstd  
+**编码：** `.moc`（tar 归档经 Zstandard 压缩）
 **格式版本：** 2  
 **更新日期：** 2026-08-25
 
@@ -11,8 +11,7 @@
 ## 已实现
 
 - 导出使用 `format_version = 2`。
-- Manifest 包含包类型、模块定义、依赖、导入顺序、逐文件 SHA-256、可选 sequence
-  范围和删除记录结构。
+- Manifest 包含模块定义、依赖、导入顺序与逐文件 SHA-256。
 - 模块 ID 为 `config`、`characters`、`conversations`、`memory`、
   `semantic_graph`、`tavern_compat`、`encrypted-container`。
 - DMW/NSG 按 `lore/`、`rules/`、`archive/lore/`、`archive/rules/` 前缀分区。
@@ -25,11 +24,11 @@
 - tar 路径、重复条目、条目类型、摘要、数量和总大小限制保持启用。
 - 私有 MOC 使用 `private/payload.enc` 单文件封装和 512 MiB 上限。
 - `export_moc_json` 通过一个结构化请求文档接收输出路径、`scope_id`、
-  模块选择、设置与可选密码，不再暴露九个位置参数。
+  模块选择、兼容 profile、设置与显式 protection 类型。
 
 ## 当前实现范围
 
-- 导出器生成完整快照包。Manifest 数据模型可以表达 incremental/deletion。
+- MOC v2 只生成和接收完整的已选模块快照；不声明 incremental/deletion 能力。
 - 未知模块负载会被验证和报告；当前导入流程不会自动把该负载写入后续新建导出包。
 - 私有容器解密后仍必须是有效的 v2 MOC。密码只在本次导入内存中使用；调用方负责
   确保日志和临时目录不记录密码。

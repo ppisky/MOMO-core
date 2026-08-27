@@ -1,3 +1,6 @@
+> **Historical and unsupported:** this records an abandoned pre-release design.
+> MOMO 0.5 neither reads nor migrates it; use `MOMO_Container_v2.md`.
+
 **Internal Request for Comments: MOMO-RFC-0003**            July 20, 2026
 **Category: Design Direction**
 **Status: Draft**
@@ -32,7 +35,7 @@ MOMO 中用于控制运行行为的配置 MUST 使用 TOML 表达。当前阶段
 
 ## 2. MOC 通用容器原则 (MOC General Container Principle)
 
-`.moc` 文件的物理形式确定为 Zstandard 压缩的 tar 归档，即 tar.zstd。它不是“配置文件”的同义词，而是 MOMO 数据的通用容器。
+`.moc` 文件的物理形式确定为经 Zstandard 压缩的 tar 归档。它的扩展名是 `.moc`；普通 tar 归档采用该算法压缩时的常见复合扩展名是 `.tar.zst`。它不是“配置文件”的同义词，而是 MOMO 数据的通用容器。
 
 根据用户选择与功能权限，一个 `.moc` MAY 包含：
 
@@ -57,7 +60,7 @@ MOMO 中用于控制运行行为的配置 MUST 使用 TOML 表达。当前阶段
 
 本地和云端 MUST 共享同一模块标识、版本概念与数据解释规则。云端 MAY 保存完整 `.moc`，也 MAY 为增量同步存储由相同规则生成的模块级 `.moc`；两种形式恢复后必须得到等价的逻辑数据。
 
-`.moc` 的 tar.zstd 封装只提供归档和压缩，不提供加密。隐私模式下，容器整体或其中的敏感模块 MUST 在上传前应用 `MOMO_v1.md` 定义的客户端加密机制；非隐私模式也必须使用 TLS 传输。
+`.moc` 的 tar + Zstandard 封装只提供归档和压缩，不提供加密。隐私模式下，容器整体或其中的敏感模块 MUST 在上传前应用 `MOMO_v1.md` 定义的客户端加密机制；非隐私模式也必须使用 TLS 传输。
 
 ---
 

@@ -97,10 +97,6 @@ pub async fn run_memory_maintenance_json(scope_id: String) -> Result<String, Str
         .map_err(|error| error.to_string())?
         .run_maintenance()
         .map_err(|error| error.to_string())?;
-    if !report.decayed_ids.is_empty()
-        || !report.archived_ids.is_empty()
-        || !report.forgotten_ids.is_empty()
-    {}
     serde_json::to_string(&report).map_err(|error| error.to_string())
 }
 

@@ -151,7 +151,6 @@ impl MocProtection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportReport {
     pub source_format_version: u32,
-    pub migrated_to_format_version: u32,
     pub characters_imported: usize,
     pub conversations_imported: usize,
     pub messages_imported: usize,
@@ -159,7 +158,7 @@ pub struct ImportReport {
     pub semantic_graph_files_imported: usize,
     pub skipped_conflicts: usize,
     pub unknown_modules_preserved: Vec<String>,
-    pub runtime_config: Option<JsonValue>,
+    pub momo_config: Option<JsonValue>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -185,25 +184,29 @@ struct CharacterAuthor {
 
 type ParsedCharacterMetadata = (CharacterMetadata, String);
 
-pub fn export_runtime_config(
+pub fn export_momo_config(
     core: &MomoCore,
     output: impl AsRef<Path>,
     settings: &JsonValue,
 ) -> Result<(), PortableError> {
-    let document = merged_runtime_config(core, settings)?;
+    let document = merged_momo_config(core, settings)?;
+    crate::validate_momo_document(&document.to_toml_string()?)
+        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
     document.save(output)?;
     // Exporting a subset must not turn that subset into the local import
     // baseline. The baseline changes only after an explicit import.
     Ok(())
 }
 
-pub fn import_runtime_config(
+pub fn import_momo_config(
     core: &MomoCore,
     input: impl AsRef<Path>,
 ) -> Result<JsonValue, PortableError> {
     let document = ConfigDocument::load(input)?;
+    crate::validate_momo_document(&document.to_toml_string()?)
+        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
     reject_credentials(document.values(), "")?;
-    document.save(runtime_config_path(core))?;
+    document.save(momo_config_path(core))?;
     Ok(serde_json::to_value(document.values())?)
 }
 
@@ -218,7 +221,7 @@ pub async fn export_moc(
     let staging = TempDir::new()?;
     let mut modules = Vec::new();
     if selected.contains(&MocModule::MomoConfig) {
-        merged_runtime_config(core, settings)?.save(staging.path().join("config/momo.toml"))?;
+        merged_momo_config(core, settings)?.save(staging.path().join("config/momo.toml"))?;
         modules.push(("config".to_owned(), PathBuf::from("config")));
     }
     if selected.contains(&MocModule::Characters) {
@@ -365,7 +368,6 @@ pub async fn import_moc_with_passphrase(
         .collect();
     let mut report = ImportReport {
         source_format_version: payload_manifest.format_version,
-        migrated_to_format_version: momo_moc::FORMAT_VERSION,
         characters_imported: 0,
         conversations_imported: 0,
         messages_imported: 0,
@@ -373,7 +375,7 @@ pub async fn import_moc_with_passphrase(
         semantic_graph_files_imported: 0,
         skipped_conflicts: 0,
         unknown_modules_preserved,
-        runtime_config: None,
+        momo_config: None,
     };
     if payload_manifest
         .modules
@@ -382,7 +384,7 @@ pub async fn import_moc_with_passphrase(
     {
         let path = extracted.join("config/momo.toml");
         if path.exists() {
-            report.runtime_config = Some(import_runtime_config(core, path)?);
+            report.momo_config = Some(import_momo_config(core, path)?);
         }
     }
     import_characters(core, extracted, scope_id, mode, &mut report).await?;
@@ -393,11 +395,11 @@ pub async fn import_moc_with_passphrase(
     Ok(report)
 }
 
-fn merged_runtime_config(
+fn merged_momo_config(
     core: &MomoCore,
     settings: &JsonValue,
 ) -> Result<ConfigDocument, PortableError> {
-    let baseline = runtime_config_path(core);
+    let baseline = momo_config_path(core);
     let document = if baseline.exists() {
         ConfigDocument::load(&baseline)?
     } else {
@@ -409,28 +411,11 @@ fn merged_runtime_config(
         .ok_or_else(|| PortableError::InvalidData("settings must be an object".to_owned()))?;
     reject_credentials(incoming, "")?;
     let mut values = document.values().clone();
-    // Schema v2 makes model and system configuration independently portable.
-    // Omitted known sections are intentionally excluded, while unrelated
-    // future/extension fields still round-trip from the baseline document.
-    if incoming
-        .get("schema_version")
-        .and_then(TomlValue::as_integer)
-        .is_some_and(|version| version >= 2)
-    {
-        if !incoming.contains_key("server") {
-            values.remove("server");
-        }
-        if !incoming.contains_key("context") {
-            values.remove("context");
-        }
-        if !incoming.contains_key("models") {
-            values.remove("models");
-            values.remove("active_model_profile");
-            values.remove("model");
-        }
-    }
     merge_table(&mut values, incoming);
-    Ok(ConfigDocument::new(values))
+    let document = ConfigDocument::new(values);
+    crate::validate_momo_document(&document.to_toml_string()?)
+        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
+    Ok(document)
 }
 
 fn merge_table(target: &mut Table, incoming: &Table) {
@@ -996,7 +981,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), PortableError> {
     Ok(())
 }
 
-fn runtime_config_path(core: &MomoCore) -> PathBuf {
+fn momo_config_path(core: &MomoCore) -> PathBuf {
     core.data_dir().join("config/momo.toml")
 }
 
@@ -1234,7 +1219,7 @@ mod tests {
         let output = source_directory.path().join("backup.moc");
         let settings = serde_json::json!({
             "schema_version": 1,
-            "model": { "base_url": "https://example.com/v1", "id": "model" },
+            "model_use": { "chat": "primary" },
             "future": { "preserved": true }
         });
         let manifest = export_moc(
@@ -1279,7 +1264,7 @@ mod tests {
         assert_eq!(report.messages_imported, 1);
         assert!(report.memory_files_imported >= 3);
         assert_eq!(
-            report.runtime_config.expect("config")["future"]["preserved"],
+            report.momo_config.expect("config")["future"]["preserved"],
             true
         );
         let imported_cards = destination.store().list_characters().await.expect("cards");
@@ -1367,7 +1352,7 @@ mod tests {
         )
         .await
         .expect("private import");
-        assert!(private_report.runtime_config.is_some());
+        assert!(private_report.momo_config.is_some());
         assert_eq!(
             destination
                 .store()
@@ -1510,10 +1495,10 @@ name = "Creator"
     }
 
     #[tokio::test]
-    async fn refuses_credentials_in_runtime_config() {
+    async fn refuses_credentials_in_momo_config() {
         let directory = tempfile::tempdir().expect("directory");
         let core = MomoCore::initialize(directory.path()).await.expect("core");
-        let error = export_runtime_config(
+        let error = export_momo_config(
             &core,
             directory.path().join("unsafe.toml"),
             &serde_json::json!({ "model": { "api_key": "secret" } }),
@@ -1521,7 +1506,7 @@ name = "Creator"
         .expect_err("credential must be rejected");
         assert!(matches!(error, PortableError::CredentialInConfig(_)));
 
-        let array_error = export_runtime_config(
+        let array_error = export_momo_config(
             &core,
             directory.path().join("unsafe-models.toml"),
             &serde_json::json!({
@@ -1533,55 +1518,40 @@ name = "Creator"
     }
 
     #[tokio::test]
-    async fn schema_v2_exports_model_and_system_sections_independently() {
+    async fn momo_config_preserves_product_extensions_and_rejects_host_wiring() {
         let directory = tempfile::tempdir().expect("directory");
         let core = MomoCore::initialize(directory.path()).await.expect("core");
-        export_runtime_config(
+        let output = directory.path().join("portable.toml");
+        export_momo_config(
             &core,
-            directory.path().join("full.toml"),
+            &output,
             &serde_json::json!({
-                "schema_version": 2,
-                "server": { "base_url": "http://localhost:8080" },
-                "context": { "window": 8192 },
-                "active_model_profile": "00000000-0000-7000-8000-000000000002",
-                "models": [{
-                    "profile_id": "00000000-0000-7000-8000-000000000002",
-                    "name": "Default",
-                    "base_url": "https://example.com/v1",
-                    "id": "model"
-                }],
+                "schema_version": 1,
+                "model_use": { "chat": "primary" },
+                "runtime": { "memory_enabled": true },
                 "extension": { "preserved": true }
             }),
         )
-        .expect("full export");
-        import_runtime_config(&core, directory.path().join("full.toml"))
-            .expect("establish imported baseline");
+        .expect("portable export");
+        let document = ConfigDocument::load(output).expect("portable document");
+        assert!(document.values().contains_key("model_use"));
+        assert!(document.values().contains_key("runtime"));
+        assert!(document.values().contains_key("extension"));
 
-        let model_only = directory.path().join("model-only.toml");
-        export_runtime_config(
+        let error = export_momo_config(
             &core,
-            &model_only,
+            directory.path().join("host-wiring.toml"),
             &serde_json::json!({
-                "schema_version": 2,
-                "active_model_profile": "00000000-0000-7000-8000-000000000002",
-                "models": [{
-                    "profile_id": "00000000-0000-7000-8000-000000000002",
-                    "name": "Default",
-                    "base_url": "https://example.com/v1",
-                    "id": "model"
-                }]
+                "schema_version": 1,
+                "providers": [{ "provider_id": "not-portable" }]
             }),
         )
-        .expect("model-only export");
-        let document = ConfigDocument::load(model_only).expect("model-only document");
-        assert!(document.values().contains_key("models"));
-        assert!(!document.values().contains_key("server"));
-        assert!(!document.values().contains_key("context"));
-        assert!(document.values().contains_key("extension"));
+        .expect_err("host wiring must be rejected");
+        assert!(error.to_string().contains("config.toml"));
     }
 
     #[tokio::test]
-    async fn character_shortcut_exports_only_the_selected_card() {
+    async fn selected_character_export_and_generated_compatibility_are_explicit() {
         let directory = tempfile::tempdir().expect("directory");
         let core = MomoCore::initialize(directory.path()).await.expect("core");
         let scope_id = new_id();
@@ -1634,6 +1604,49 @@ name = "Creator"
                 .join(selected_id.to_string())
                 .exists()
         );
+
+        let compatible_output = directory.path().join("selected-compatible.moc");
+        export_moc(
+            &core,
+            &compatible_output,
+            scope_id,
+            &serde_json::json!({}),
+            &MocExportPlan {
+                modules: vec![MocModule::Characters],
+                character_id: Some(selected_id),
+                compatibility: MocCompatibility::GeneratedCcv2Json,
+            },
+        )
+        .await
+        .expect("generated compatibility export");
+        let compatible = tempfile::tempdir().expect("compatible extract directory");
+        momo_moc::extract(
+            &compatible_output,
+            compatible.path(),
+            ExtractionLimits::default(),
+        )
+        .expect("extract compatible MOC");
+        assert!(
+            compatible
+                .path()
+                .join("tavern_compat")
+                .join(selected_id.to_string())
+                .join("generated.ccv2.json")
+                .is_file()
+        );
+        let destination_dir = tempfile::tempdir().expect("destination");
+        let destination = MomoCore::initialize(destination_dir.path())
+            .await
+            .expect("destination core");
+        let report = import_moc(
+            &destination,
+            &compatible_output,
+            new_id(),
+            ConflictMode::Replace,
+        )
+        .await
+        .expect("generated compatibility does not become provenance");
+        assert_eq!(report.characters_imported, 1);
     }
 
     fn valid_character_metadata() -> CharacterMetadata {

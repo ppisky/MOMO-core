@@ -6,9 +6,17 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize},
     },
 };
+
+mod http_error;
+mod response_stream;
+
+use http_error::ApiError;
+#[cfg(test)]
+use http_error::sanitize_error_message;
+use response_stream::ResponseStream;
 
 use axum::{
     Json, Router,
@@ -21,10 +29,8 @@ use axum::{
     routing::{get, post, put},
 };
 use momo_core::{
-    EmbeddingNormalization, EmbeddingProfile, MAX_RESPONSE_REQUEST_BYTES,
-    MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES, MomoConfig, MomoResponse,
-    MomoResponseMetadata, MomoResponseRequest, RequestedOverrides, ResponseError,
-    ResponseOutputContent, ResponseOutputItem, ResponseUsage,
+    MAX_RESPONSE_REQUEST_BYTES, MomoApiError, MomoApiErrorKind, MomoApiService, MomoConfig,
+    MomoResponse, MomoResponseRequest, ResponseOutputItem,
     api::simple,
     momo_domain::{CharacterCard, Conversation, Message},
 };
@@ -48,10 +54,9 @@ struct AppState {
     scope_id: String,
     gateway_origin: String,
     gateway_api_key: Option<String>,
-    gateway_client: reqwest::Client,
     responses: Arc<Mutex<HashMap<String, MomoResponse>>>,
     response_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    response_attempts: Arc<Mutex<HashMap<String, String>>>,
+    momo_api: Arc<MomoApiService>,
     maintenance_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     response_cancellations: Arc<Mutex<HashSet<String>>>,
     response_concurrency: Arc<Semaphore>,
@@ -59,39 +64,6 @@ struct AppState {
     metrics: Arc<Mutex<HashMap<String, RouteMetrics>>>,
     memory_distill_every: usize,
     nsg_govern_every: usize,
-    momo_config: Arc<MomoConfig>,
-}
-
-#[derive(Clone)]
-struct ResponseStream {
-    tx: mpsc::Sender<Result<Event, Infallible>>,
-    sequence: Arc<AtomicU64>,
-    transmitted_bytes: Arc<AtomicUsize>,
-}
-
-impl ResponseStream {
-    fn send(&self, mut event: Value) -> Result<(), String> {
-        let sequence = self.sequence.fetch_add(1, Ordering::AcqRel);
-        let object = event
-            .as_object_mut()
-            .ok_or_else(|| "response stream event must be an object".to_owned())?;
-        object.insert("sequence".to_owned(), json!(sequence));
-        let encoded = serde_json::to_string(&event).map_err(|error| error.to_string())?;
-        if encoded.len() > MAX_RESPONSE_SSE_EVENT_BYTES {
-            return Err("response SSE event exceeded its byte limit".to_owned());
-        }
-        let previous = self
-            .transmitted_bytes
-            .fetch_add(encoded.len(), Ordering::AcqRel);
-        if previous.saturating_add(encoded.len()) > MAX_RESPONSE_STREAM_BYTES {
-            self.transmitted_bytes
-                .fetch_sub(encoded.len(), Ordering::AcqRel);
-            return Err("response stream exceeded its cumulative byte limit".to_owned());
-        }
-        self.tx
-            .try_send(Ok(Event::default().data(encoded)))
-            .map_err(|error| error.to_string())
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -151,7 +123,7 @@ struct ImportExternalCharacterRequest {
 #[serde(deny_unknown_fields)]
 struct ExportExternalCharacterRequest {
     output_path: String,
-    format: String,
+    format: momo_core::ExternalCharacterExportFormat,
 }
 
 #[derive(Deserialize)]
@@ -170,21 +142,6 @@ struct ChatRequest {
     temperature: Option<f32>,
     #[serde(default)]
     request_parameters: Value,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GatewayEmbeddingProfile {
-    dimension: usize,
-    normalization: EmbeddingNormalization,
-    #[serde(default)]
-    send_dimensions: bool,
-    #[serde(default)]
-    model_revision: Option<String>,
-    #[serde(default)]
-    query_prefix: String,
-    #[serde(default)]
-    document_prefix: String,
 }
 
 #[derive(Deserialize)]
@@ -314,18 +271,21 @@ struct NsgVectorStatusQuery {
 }
 
 #[derive(Deserialize)]
-struct RuntimeConfigExportRequest {
+#[serde(deny_unknown_fields)]
+struct MomoConfigExportRequest {
     output_path: String,
     #[serde(default)]
     settings: Value,
 }
 
 #[derive(Deserialize)]
-struct RuntimeConfigImportRequest {
+#[serde(deny_unknown_fields)]
+struct MomoConfigImportRequest {
     input_path: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MocExportRequest {
     output_path: String,
     #[serde(default)]
@@ -334,12 +294,13 @@ struct MocExportRequest {
     #[serde(default)]
     compatibility: momo_core::MocCompatibility,
     #[serde(default)]
-    character_id: Option<String>,
+    character_id: Option<uuid::Uuid>,
     #[serde(default)]
     protection: momo_core::MocProtection,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MocImportRequest {
     input_path: String,
     #[serde(default = "default_conflict_mode")]
@@ -356,87 +317,6 @@ struct MocEncryptedQuery {
 #[derive(Serialize)]
 struct OkResponse {
     ok: bool,
-}
-
-struct ApiError {
-    status: StatusCode,
-    error: ResponseError,
-}
-
-impl ApiError {
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, "invalid_request", message, false)
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "orchestration_error",
-            message,
-            false,
-        )
-    }
-
-    fn bad_gateway(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_GATEWAY, "upstream_error", message, true)
-    }
-
-    fn conflict(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::CONFLICT, "idempotency_conflict", message, false)
-    }
-
-    fn gateway_timeout(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::GATEWAY_TIMEOUT, "timeout", message, true)
-    }
-
-    fn rate_limited(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limit", message, true)
-    }
-
-    fn cancelled() -> Self {
-        Self::new(
-            StatusCode::from_u16(499).expect("valid non-standard client closed status"),
-            "cancelled",
-            "response request was cancelled",
-            false,
-        )
-    }
-
-    fn new(
-        status: StatusCode,
-        code: &'static str,
-        message: impl Into<String>,
-        retryable: bool,
-    ) -> Self {
-        Self {
-            status,
-            error: ResponseError {
-                error_type: code.to_owned(),
-                code: code.to_owned(),
-                message: sanitize_error_message(&message.into()),
-                retryable,
-                upstream_status: None,
-                request_id: None,
-            },
-        }
-    }
-
-    fn with_request_id(mut self, request_id: &str) -> Self {
-        self.error.request_id = Some(request_id.to_owned());
-        self
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(json!({
-                "error": self.error,
-            })),
-        )
-            .into_response()
-    }
 }
 
 #[tokio::main]
@@ -463,20 +343,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         MomoConfig::load_or_default(&momo_config_path)
             .map_err(|error| to_io_error(error.to_string()))?,
     );
+    if momo_config_path.exists() {
+        simple::import_momo_config_json(momo_config_path.to_string_lossy().into_owned())
+            .await
+            .map_err(to_io_error)?;
+    }
+    let gateway_origin = env::var("MOMO_MODEL_GATEWAY_ORIGIN")
+        .unwrap_or_else(|_| "http://127.0.0.1:8788/v1".to_owned());
+    let gateway_api_key = env::var("MOMO_MODEL_GATEWAY_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let gateway_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let momo_api = Arc::new(MomoApiService::new(
+        scope_id.clone(),
+        gateway_origin.clone(),
+        gateway_api_key.clone(),
+        gateway_client.clone(),
+        Arc::clone(&momo_config),
+    ));
     let state = AppState {
         data_dir: initialized_dir,
         scope_id,
-        gateway_origin: env::var("MOMO_MODEL_GATEWAY_ORIGIN")
-            .unwrap_or_else(|_| "http://127.0.0.1:8788/v1".to_owned()),
-        gateway_api_key: env::var("MOMO_MODEL_GATEWAY_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty()),
-        gateway_client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?,
+        gateway_origin,
+        gateway_api_key,
         responses: Arc::new(Mutex::new(HashMap::new())),
         response_locks: Arc::new(Mutex::new(HashMap::new())),
-        response_attempts: Arc::new(Mutex::new(HashMap::new())),
+        momo_api,
         maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
         response_cancellations: Arc::new(Mutex::new(HashSet::new())),
         response_concurrency: Arc::new(Semaphore::new(env_usize(
@@ -494,7 +388,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics: Arc::new(Mutex::new(HashMap::new())),
         memory_distill_every: env_usize("MOMO_MEMORY_DISTILL_EVERY", 12, 1, 200)?,
         nsg_govern_every: env_usize("MOMO_NSG_GOVERN_EVERY", 12, 1, 200)?,
-        momo_config,
     };
 
     let app = build_app(state);
@@ -558,38 +451,6 @@ fn ensure_bind_allowed(addr: SocketAddr, allow_remote: bool) -> std::io::Result<
             "refusing non-loopback bind {addr}; set {ALLOW_REMOTE_ENV}=1 only behind a trusted authenticated proxy"
         ),
     ))
-}
-
-fn sanitize_error_message(message: &str) -> String {
-    let mut output = message
-        .chars()
-        .take(MAX_PUBLIC_ERROR_BYTES)
-        .collect::<String>();
-    for marker in ["Bearer ", "api_key=", "api-key=", "x-api-key="] {
-        if let Some(start) = output
-            .to_ascii_lowercase()
-            .find(&marker.to_ascii_lowercase())
-        {
-            let value_start = start + marker.len();
-            let value_end = output[value_start..]
-                .find(|character: char| {
-                    character.is_whitespace() || matches!(character, ',' | '"' | '}')
-                })
-                .map_or(output.len(), |offset| value_start + offset);
-            output.replace_range(value_start..value_end, "[REDACTED]");
-        }
-    }
-    output
-        .split_whitespace()
-        .map(|token| {
-            if token.starts_with("sk-") && token.len() > 8 {
-                "[REDACTED]"
-            } else {
-                token
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn api_routes() -> Router<AppState> {
@@ -682,8 +543,8 @@ fn api_routes() -> Router<AppState> {
             "/semantic-graph/vectors/rebuild",
             post(rebuild_nsg_vector_index),
         )
-        .route("/momo-config/export", post(export_runtime_config))
-        .route("/momo-config/import", post(import_runtime_config))
+        .route("/momo-config/export", post(export_momo_config))
+        .route("/momo-config/import", post(import_momo_config))
         .route("/moc/export", post(export_moc))
         .route("/moc/import", post(import_moc))
         .route("/moc/encrypted", get(moc_is_encrypted))
@@ -1109,16 +970,20 @@ async fn execute_response(
     let response = if let Some(cached) = state.responses.lock().await.get(&request_id).cloned() {
         cached
     } else {
-        let mut response = orchestrate_response(
-            &state,
-            &request,
-            &request_id,
-            &request_fingerprint,
-            persisted.as_ref(),
-            &input,
-            stream.as_ref(),
-        )
-        .await?;
+        let mut response = state
+            .momo_api
+            .respond(
+                &request,
+                &request_id,
+                &request_fingerprint,
+                persisted.as_ref(),
+                &input,
+                stream
+                    .as_ref()
+                    .map(|value| value as &dyn momo_core::MomoResponseEventSink),
+            )
+            .await
+            .map_err(momo_api_error)?;
         let maintenance_scope = request
             .momo
             .scope_id
@@ -1163,7 +1028,7 @@ async fn execute_response(
         let mut responses = state.responses.lock().await;
         if responses.len() >= 1_024 {
             responses.clear();
-            state.response_attempts.lock().await.clear();
+            state.momo_api.clear_attempts().await;
             state.response_locks.lock().await.clear();
         }
         responses.insert(request_id.clone(), response.clone());
@@ -1174,493 +1039,6 @@ async fn execute_response(
     };
 
     Ok(response)
-}
-
-async fn orchestrate_response(
-    state: &AppState,
-    request: &MomoResponseRequest,
-    request_id: &str,
-    request_fingerprint: &str,
-    persisted: Option<&Value>,
-    input: &str,
-    stream: Option<&ResponseStream>,
-) -> Result<MomoResponse, ApiError> {
-    ensure_response_active(state, request_id).await?;
-    let scope_id = request
-        .momo
-        .scope_id
-        .clone()
-        .unwrap_or_else(|| state.scope_id.clone());
-    let characters = parse_json_value(simple::local_characters_json(scope_id.clone()).await)?;
-    let characters = characters
-        .as_array()
-        .ok_or_else(|| ApiError::internal("character store returned a non-array"))?;
-    let character = request
-        .momo
-        .character_id
-        .as_deref()
-        .map_or_else(
-            || characters.first(),
-            |id| {
-                characters
-                    .iter()
-                    .find(|character| character.get("id").and_then(Value::as_str) == Some(id))
-            },
-        )
-        .ok_or_else(|| ApiError::bad_request("no matching character is available"))?;
-    let character_id = required_value_str(character, "id")?;
-    let attempted_conversation = persisted
-        .and_then(|operation| operation["conversation_id"].as_str())
-        .map(str::to_owned)
-        .or(state
-            .response_attempts
-            .lock()
-            .await
-            .get(request_id)
-            .cloned());
-    let conversation_id = if let Some(id) = request
-        .momo
-        .conversation_id
-        .as_deref()
-        .map(str::to_owned)
-        .or(attempted_conversation)
-    {
-        id
-    } else {
-        let created = parse_json_value(
-            simple::stage_conversation_json(
-                None,
-                scope_id.clone(),
-                request
-                    .momo
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "MOMO response".to_owned()),
-                Some(character_id.to_owned()),
-            )
-            .await,
-        )?;
-        let id = required_value_str(&created, "id")?.to_owned();
-        state
-            .response_attempts
-            .lock()
-            .await
-            .insert(request_id.to_owned(), id.clone());
-        id
-    };
-    state
-        .response_attempts
-        .lock()
-        .await
-        .entry(request_id.to_owned())
-        .or_insert_with(|| conversation_id.clone());
-    simple::begin_response_operation(
-        request_id.to_owned(),
-        request_fingerprint.to_owned(),
-        conversation_id.clone(),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-
-    let user_already_written = persisted
-        .and_then(|operation| operation["user_written"].as_bool())
-        .unwrap_or(false);
-    if !user_already_written {
-        simple::append_response_user_message_json(
-            request_id.to_owned(),
-            conversation_id.clone(),
-            input.to_owned(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-    }
-
-    let mut warnings = Vec::new();
-    ensure_response_active(state, request_id).await?;
-    let (capability_context_window, route_output_tokens) =
-        match gateway_response_budget(state).await {
-            Ok(value) => value,
-            Err(error) => {
-                warnings.push(format!("capability discovery degraded: {error}"));
-                (8_192, 1_024)
-            }
-        };
-    let governed = state
-        .momo_config
-        .govern(
-            capability_context_window,
-            route_output_tokens,
-            RequestedOverrides {
-                context_window: request.context_window,
-                max_output_tokens: request.max_output_tokens,
-                temperature: request.temperature,
-                instructions: request.instructions.as_deref(),
-                visual_description_prompt: request.visual_description_prompt.as_deref(),
-                parameters: &request.parameters,
-                tool_configuration_requested: !request.tools.is_empty()
-                    || request.tool_choice.is_some(),
-            },
-        )
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let context_window = governed.context_window;
-    let reserve_output_tokens = governed.max_output_tokens;
-    let query_embedding = if request.momo.semantic_graph || request.momo.mo_state {
-        ensure_response_active(state, request_id).await?;
-        match generate_query_embedding(state, input).await {
-            Ok(value) => Some(value),
-            Err(error) => {
-                warnings.push(format!("embedding degraded: {error}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let retrieval_enabled =
-        request.momo.memory || request.momo.semantic_graph || request.momo.mo_state;
-    let retrieved = if retrieval_enabled {
-        ensure_response_active(state, request_id).await?;
-        let payload = json!({
-            "scopes": [{"scope_id": scope_id, "label": "personal", "weight": 100}],
-            "query": input,
-            "max_tokens": context_window
-                .saturating_sub(reserve_output_tokens)
-                .saturating_div(8)
-                .clamp(128, 2_048),
-            "include_memory": request.momo.memory || request.momo.mo_state,
-            "include_semantic_graph": request.momo.semantic_graph || request.momo.mo_state,
-            "vector_space_id": query_embedding.as_ref().map(|value| &value.0),
-            "query_vector": query_embedding.as_ref().map(|value| &value.1),
-        });
-        match simple::retrieve_scoped_memory_json(payload.to_string()).await {
-            Ok(value) => serde_json::from_str::<Value>(&value)
-                .map_err(|error| ApiError::internal(error.to_string()))?,
-            Err(error) => {
-                warnings.push(format!("retrieval degraded: {error}"));
-                json!([])
-            }
-        }
-    } else {
-        json!([])
-    };
-    let items = retrieved.as_array().cloned().unwrap_or_default();
-    let (nsg, memory): (Vec<_>, Vec<_>) = items
-        .into_iter()
-        .partition(|item| item.get("graph_id").is_some());
-    let state_result = if request.momo.mo_state {
-        ensure_response_active(state, request_id).await?;
-        match simple::compile_mo_state_json(
-            scope_id.clone(),
-            serde_json::to_string(&memory)
-                .map_err(|error| ApiError::internal(error.to_string()))?,
-            serde_json::to_string(&nsg).map_err(|error| ApiError::internal(error.to_string()))?,
-            context_window,
-        )
-        .await
-        {
-            Ok(value) => serde_json::from_str::<Value>(&value)
-                .map_err(|error| ApiError::internal(error.to_string()))?,
-            Err(error) => {
-                warnings.push(format!("MO State degraded: {error}"));
-                json!({"context": "", "audit": {}})
-            }
-        }
-    } else {
-        json!({"context": "", "audit": {}})
-    };
-
-    let history = parse_json_value(simple::local_messages_json(conversation_id.clone()).await)?;
-    let mut messages = history
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|message| {
-            Some(json!({
-                "role": message.get("role")?.as_str()?,
-                "content": message.get("content")?.as_str()?,
-            }))
-        })
-        .collect::<Vec<_>>();
-    if request.input.is_structured()
-        && messages.last().is_some_and(|message| {
-            message.get("role").and_then(Value::as_str) == Some("user")
-                && message.get("content").and_then(Value::as_str) == Some(input)
-        })
-    {
-        messages.pop();
-    }
-    if let Some(instructions) = governed
-        .instructions
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        messages.insert(0, json!({"role": "system", "content": instructions}));
-    }
-    let prepared = parse_json_value(simple::prepare_context_json(
-        json!({
-            "character_markdown": character.get("character_markdown").and_then(Value::as_str).unwrap_or_default(),
-            "user_markdown": character.get("user_markdown").and_then(Value::as_str).unwrap_or_default(),
-            "memory_markdown": if request.momo.memory { joined_bodies(&memory) } else { String::new() },
-            "state_context": state_result.get("context").and_then(Value::as_str).unwrap_or_default(),
-            "nsg_markdown": if request.momo.semantic_graph { joined_bodies(&nsg) } else { String::new() },
-            "messages": messages,
-            "context_window": context_window,
-            "reserve_output_tokens": reserve_output_tokens,
-        })
-        .to_string(),
-    ))?;
-    let mut gateway_messages = prepared
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if request.input.is_structured() {
-        gateway_messages.extend(
-            request
-                .input
-                .gateway_messages()
-                .map_err(|error| ApiError::bad_request(error.to_string()))?
-                .into_iter()
-                .map(|message| serde_json::to_value(message).expect("gateway message serializes")),
-        );
-    }
-    let mut request_parameters = json!({
-        "max_tokens": reserve_output_tokens,
-        "momo_hop": 1,
-        "momo_request_id": request_id,
-    });
-    let parameter_object = request_parameters
-        .as_object_mut()
-        .expect("request parameters are an object");
-    parameter_object.extend(governed.parameters.clone());
-    if governed.allow_tools && !request.tools.is_empty() {
-        parameter_object.insert("tools".to_owned(), response_tools_to_chat(&request.tools)?);
-    }
-    if governed.allow_tools
-        && let Some(choice) = &request.tool_choice
-    {
-        parameter_object.insert(
-            "tool_choice".to_owned(),
-            response_tool_choice_to_chat(choice)?,
-        );
-    }
-    let gateway_request = json!({
-        "base_url": state.gateway_origin,
-        "api_key": state.gateway_api_key,
-        "model": request.model,
-        "messages": gateway_messages,
-        "temperature": governed.temperature,
-        "request_parameters": request_parameters,
-    });
-    let completion = if let Some(stream) = stream {
-        ensure_response_active(state, request_id).await?;
-        let stream = stream.clone();
-        let stream_request_id = request_id.to_owned();
-        let message_item_id = format!("msg_{request_id}");
-        stream
-            .send(json!({
-                "type": "response.output_item.added",
-                "request_id": request_id,
-                "output_index": 0,
-                "item": {
-                    "id": message_item_id.as_str(),
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": [],
-                },
-            }))
-            .map_err(ApiError::internal)?;
-        stream
-            .send(json!({
-                "type": "response.content_part.added",
-                "request_id": request_id,
-                "item_id": message_item_id.as_str(),
-                "output_index": 0,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": "", "annotations": []},
-            }))
-            .map_err(ApiError::internal)?;
-        let streamed_tools = Arc::new(std::sync::Mutex::new(HashMap::<
-            usize,
-            (String, String, bool),
-        >::new()));
-        let sink = move |event_json: String| {
-            let event: Value =
-                serde_json::from_str(&event_json).map_err(|error| error.to_string())?;
-            if event.get("type").and_then(Value::as_str) != Some("delta") {
-                return Ok(());
-            }
-            let delta = event
-                .get("delta")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if !delta.is_empty() {
-                stream.send(json!({
-                    "type": "response.output_text.delta",
-                    "request_id": stream_request_id,
-                    "item_id": message_item_id.as_str(),
-                    "output_index": 0,
-                    "content_index": 0,
-                    "delta": delta,
-                }))?;
-            }
-            let mut streamed_tools = streamed_tools.lock().map_err(|error| error.to_string())?;
-            for call in event
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                let tool = streamed_tools
-                    .entry(index)
-                    .or_insert_with(|| (String::new(), String::new(), false));
-                if let Some(id) = call.get("id").and_then(Value::as_str) {
-                    tool.0 = id.to_owned();
-                }
-                if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
-                    tool.1 = name.to_owned();
-                }
-                if !tool.2 && !tool.0.is_empty() && !tool.1.is_empty() {
-                    stream.send(json!({
-                        "type": "response.output_item.added",
-                        "request_id": stream_request_id,
-                        "output_index": index + 1,
-                        "item": {
-                            "id": tool.0.as_str(),
-                            "call_id": tool.0.as_str(),
-                            "type": "function_call",
-                            "name": tool.1.as_str(),
-                            "arguments": "",
-                            "status": "in_progress",
-                        },
-                    }))?;
-                    tool.2 = true;
-                }
-                if let Some(arguments) = call
-                    .pointer("/function/arguments")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                {
-                    stream.send(json!({
-                        "type": "response.function_call_arguments.delta",
-                        "request_id": stream_request_id,
-                        "item_id": tool.0.as_str(),
-                        "output_index": index + 1,
-                        "delta": arguments,
-                    }))?;
-                }
-            }
-            Ok(())
-        };
-        let completion = simple::chat_stream_json(
-            json!({
-                "request_id": request_id,
-                "base_url": gateway_request["base_url"],
-                "api_key": gateway_request["api_key"],
-                "model": gateway_request["model"],
-                "messages": gateway_request["messages"],
-                "request_parameters": gateway_request["request_parameters"],
-            })
-            .to_string(),
-            sink,
-        )
-        .await
-        .map_err(model_api_error)?;
-        serde_json::from_str(&completion).map_err(|error| {
-            ApiError::bad_gateway(format!("model returned invalid JSON: {error}"))
-        })?
-    } else {
-        ensure_response_active(state, request_id).await?;
-        let completion = simple::chat_complete_json(gateway_request.to_string())
-            .await
-            .map_err(model_api_error)?;
-        serde_json::from_str(&completion).map_err(|error| {
-            ApiError::bad_gateway(format!("model returned invalid JSON: {error}"))
-        })?
-    };
-    ensure_response_active(state, request_id).await?;
-    let content = required_value_str(&completion, "content")?
-        .trim()
-        .to_owned();
-    let tool_calls = completion
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if content.is_empty() && tool_calls.is_empty() {
-        return Err(ApiError::bad_gateway(
-            "model gateway returned neither text nor tool calls",
-        ));
-    }
-    if !content.is_empty() {
-        simple::stage_message_json(
-            conversation_id.clone(),
-            "assistant".to_owned(),
-            content.clone(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-    }
-
-    let output_id = format!("msg_{request_id}");
-    let mut output = vec![ResponseOutputItem::Message {
-        id: output_id,
-        role: "assistant".to_owned(),
-        status: "completed".to_owned(),
-        content: vec![ResponseOutputContent::OutputText {
-            text: content.clone(),
-            annotations: Vec::new(),
-        }],
-    }];
-    for call in tool_calls {
-        let id = required_value_str(&call, "id")?.to_owned();
-        let function = call
-            .get("function")
-            .ok_or_else(|| ApiError::bad_gateway("tool call is missing function"))?;
-        output.push(ResponseOutputItem::FunctionCall {
-            id: id.clone(),
-            call_id: id,
-            name: required_value_str(function, "name")?.to_owned(),
-            arguments: required_value_str(function, "arguments")?.to_owned(),
-            status: "completed".to_owned(),
-        });
-    }
-    Ok(MomoResponse {
-        id: format!("resp_{request_id}"),
-        object: "response".to_owned(),
-        status: "completed".to_owned(),
-        model: request.model.clone(),
-        output,
-        output_text: content,
-        usage: response_usage(&completion),
-        finish_reason: completion
-            .get("finish_reason")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        momo: MomoResponseMetadata {
-            schema: momo_core::MOMO_RESPONSE_SCHEMA.to_owned(),
-            request_id: request_id.to_owned(),
-            conversation_id,
-            route: request.model.clone(),
-            upstream_request_id: completion
-                .get("upstream_request_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            warnings,
-            state_audit: state_result
-                .get("audit")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-            request_audit: governed.audit,
-        },
-    })
-}
-
-fn parse_json_value(result: Result<String, String>) -> Result<Value, ApiError> {
-    let value = result.map_err(ApiError::internal)?;
-    serde_json::from_str(&value).map_err(|error| ApiError::internal(error.to_string()))
 }
 
 fn model_api_error(error: String) -> ApiError {
@@ -1683,6 +1061,14 @@ fn model_api_error(error: String) -> ApiError {
         return api_error;
     }
     ApiError::bad_gateway(error)
+}
+
+fn momo_api_error(error: MomoApiError) -> ApiError {
+    match error.kind {
+        MomoApiErrorKind::BadRequest => ApiError::bad_request(error.message),
+        MomoApiErrorKind::Model => model_api_error(error.message),
+        MomoApiErrorKind::Internal => ApiError::internal(error.message),
+    }
 }
 
 fn parse_upstream_status(message: &str) -> Option<u16> {
@@ -1713,72 +1099,6 @@ fn response_request_fingerprint(request: &MomoResponseRequest) -> Result<String,
     let encoded = serde_json::to_vec(&normalized)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     Ok(hex::encode(Sha256::digest(encoded)))
-}
-
-fn required_value_str<'a>(value: &'a Value, field: &str) -> Result<&'a str, ApiError> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::internal(format!("response is missing string field {field}")))
-}
-
-fn joined_bodies(values: &[Value]) -> String {
-    values
-        .iter()
-        .filter_map(|value| value.get("body").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn response_tools_to_chat(tools: &[momo_core::ResponseTool]) -> Result<Value, ApiError> {
-    let tools =
-        serde_json::to_value(tools).map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let tools = tools
-        .as_array()
-        .ok_or_else(|| ApiError::bad_request("tools must be an array"))?;
-    tools
-        .iter()
-        .map(|tool| {
-            let mut function = tool
-                .as_object()
-                .cloned()
-                .ok_or_else(|| ApiError::bad_request("tool must be an object"))?;
-            function.remove("type");
-            Ok(json!({"type": "function", "function": function}))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Value::Array)
-}
-
-fn response_tool_choice_to_chat(choice: &Value) -> Result<Value, ApiError> {
-    if choice.is_string() {
-        return Ok(choice.clone());
-    }
-    let name = choice
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::bad_request("function tool_choice requires name"))?;
-    Ok(json!({"type": "function", "function": {"name": name}}))
-}
-
-fn response_usage(completion: &Value) -> ResponseUsage {
-    let input_tokens = completion
-        .pointer("/usage/input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let output_tokens = completion
-        .pointer("/usage/output_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let total_tokens = completion
-        .pointer("/usage/total_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
-    ResponseUsage {
-        input_tokens,
-        output_tokens,
-        total_tokens,
-    }
 }
 
 fn schedule_background_maintenance(state: AppState, scope_id: String) {
@@ -1897,109 +1217,6 @@ async fn run_background_maintenance(
         .collect::<Vec<_>>();
     simple::mark_maintenance_turns_done(request_ids, kind.to_owned()).await?;
     Ok(())
-}
-
-async fn generate_query_embedding(
-    state: &AppState,
-    input: &str,
-) -> Result<(String, Vec<f64>), String> {
-    let discovery = gateway_model_detail(state, "embedding").await?;
-    let metadata: GatewayEmbeddingProfile = serde_json::from_value(
-        discovery
-            .pointer("/momo/embedding_profile")
-            .cloned()
-            .ok_or_else(|| "gateway embedding route has no embedding_profile".to_owned())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let profile = EmbeddingProfile {
-        provider_id: "mobot-gateway".to_owned(),
-        endpoint_id: state.gateway_origin.clone(),
-        model: "embedding".to_owned(),
-        dimension: metadata.dimension,
-        model_revision: metadata.model_revision,
-        normalization: metadata.normalization,
-        send_dimensions: metadata.send_dimensions,
-        query_prefix: metadata.query_prefix,
-        document_prefix: metadata.document_prefix,
-    };
-    let result = simple::generate_embeddings_json(
-        json!({
-            "embedding": {
-                "endpoint": {
-                    "base_url": state.gateway_origin,
-                    "api_key": state.gateway_api_key,
-                },
-                "profile": profile,
-                "timeout_seconds": 120,
-            },
-            "inputs": [{
-                "id": "query",
-                "text": input,
-                "purpose": "query",
-            }],
-        })
-        .to_string(),
-    )
-    .await?;
-    let batch: Value = serde_json::from_str(&result).map_err(|error| error.to_string())?;
-    let vector_space_id = batch
-        .get("vector_space_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "embedding response lacks vector_space_id".to_owned())?
-        .to_owned();
-    let vector = batch
-        .pointer("/vectors/0/vector")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "embedding response lacks vectors[0].vector".to_owned())?
-        .iter()
-        .map(|value| {
-            value
-                .as_f64()
-                .ok_or_else(|| "embedding vector contains a non-number".to_owned())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((vector_space_id, vector))
-}
-
-async fn gateway_response_budget(state: &AppState) -> Result<(usize, usize), String> {
-    let discovery = gateway_model_detail(state, "conversation").await?;
-    let context_window = discovery
-        .pointer("/momo/context_window")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(8_192);
-    let max_output_tokens = discovery
-        .pointer("/momo/max_output_tokens")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(1_024);
-    if context_window < 1_024 || max_output_tokens == 0 || max_output_tokens >= context_window {
-        return Err("gateway returned an invalid conversation token budget".to_owned());
-    }
-    Ok((context_window, max_output_tokens))
-}
-
-async fn gateway_model_detail(state: &AppState, alias: &str) -> Result<Value, String> {
-    let url = format!(
-        "{}/models/{alias}",
-        state.gateway_origin.trim_end_matches('/')
-    );
-    let mut request = state
-        .gateway_client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/json");
-    if let Some(api_key) = state.gateway_api_key.as_deref() {
-        request = request.bearer_auth(api_key);
-    }
-    let response = request.send().await.map_err(|error| error.to_string())?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!(
-            "gateway model discovery returned HTTP {}",
-            status.as_u16()
-        ));
-    }
-    response.json().await.map_err(|error| error.to_string())
 }
 
 async fn chat_complete(Json(request): Json<ChatRequest>) -> Result<Json<Value>, ApiError> {
@@ -2320,19 +1537,19 @@ async fn rebuild_nsg_vector_index(
     )
 }
 
-async fn export_runtime_config(
-    Json(request): Json<RuntimeConfigExportRequest>,
+async fn export_momo_config(
+    Json(request): Json<MomoConfigExportRequest>,
 ) -> Result<Json<OkResponse>, ApiError> {
-    simple::export_runtime_config_json(request.output_path, to_json_string(&request.settings)?)
+    simple::export_momo_config_json(request.output_path, to_json_string(&request.settings)?)
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
-async fn import_runtime_config(
-    Json(request): Json<RuntimeConfigImportRequest>,
+async fn import_momo_config(
+    Json(request): Json<MomoConfigImportRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::import_runtime_config_json(request.input_path).await)
+    json_result(simple::import_momo_config_json(request.input_path).await)
 }
 
 async fn export_moc(
@@ -2505,6 +1722,16 @@ mod tests {
             .expect("initialize core")
     }
 
+    fn test_momo_api(origin: impl Into<String>) -> Arc<MomoApiService> {
+        Arc::new(MomoApiService::new(
+            DEFAULT_SCOPE_ID,
+            origin,
+            None,
+            reqwest::Client::new(),
+            Arc::new(MomoConfig::default()),
+        ))
+    }
+
     #[test]
     fn remote_bind_requires_explicit_opt_in() {
         let loopback = "127.0.0.1:8765".parse().expect("loopback address");
@@ -2555,10 +1782,9 @@ mod tests {
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
             gateway_origin: "http://127.0.0.1:9/v1".to_owned(),
             gateway_api_key: None,
-            gateway_client: reqwest::Client::new(),
             responses: Arc::new(Mutex::new(HashMap::new())),
             response_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_attempts: Arc::new(Mutex::new(HashMap::new())),
+            momo_api: test_momo_api("http://127.0.0.1:9/v1"),
             maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
             response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
@@ -2566,7 +1792,6 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
-            momo_config: Arc::new(MomoConfig::default()),
         });
         let response = app
             .oneshot(
@@ -2598,10 +1823,9 @@ mod tests {
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
             gateway_origin: "http://127.0.0.1:9/v1".to_owned(),
             gateway_api_key: None,
-            gateway_client: reqwest::Client::new(),
             responses: Arc::new(Mutex::new(HashMap::new())),
             response_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_attempts: Arc::new(Mutex::new(HashMap::new())),
+            momo_api: test_momo_api("http://127.0.0.1:9/v1"),
             maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
             response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
@@ -2609,7 +1833,6 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
-            momo_config: Arc::new(MomoConfig::default()),
         });
 
         let response = app
@@ -3325,10 +2548,9 @@ mod tests {
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
             gateway_origin: format!("http://{address}/v1"),
             gateway_api_key: None,
-            gateway_client: reqwest::Client::new(),
             responses: Arc::new(Mutex::new(HashMap::new())),
             response_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_attempts: Arc::new(Mutex::new(HashMap::new())),
+            momo_api: test_momo_api(format!("http://{address}/v1")),
             maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
             response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
@@ -3336,7 +2558,6 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
-            momo_config: Arc::new(MomoConfig::default()),
         });
         let response = app
             .oneshot(
@@ -3533,10 +2754,9 @@ mod tests {
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
             gateway_origin: format!("http://{address}/v1"),
             gateway_api_key: None,
-            gateway_client: reqwest::Client::new(),
             responses: Arc::new(Mutex::new(HashMap::new())),
             response_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_attempts: Arc::new(Mutex::new(HashMap::new())),
+            momo_api: test_momo_api(format!("http://{address}/v1")),
             maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
             response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
@@ -3544,7 +2764,6 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
-            momo_config: Arc::new(MomoConfig::default()),
         });
         let request_body = include_str!("../../../contracts/0.5/response_request.json");
         let invoke = || {
@@ -3573,10 +2792,9 @@ mod tests {
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
             gateway_origin: format!("http://{address}/v1"),
             gateway_api_key: None,
-            gateway_client: reqwest::Client::new(),
             responses: Arc::new(Mutex::new(HashMap::new())),
             response_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_attempts: Arc::new(Mutex::new(HashMap::new())),
+            momo_api: test_momo_api(format!("http://{address}/v1")),
             maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
             response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
@@ -3584,7 +2802,6 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 12,
             nsg_govern_every: 12,
-            momo_config: Arc::new(MomoConfig::default()),
         });
         let replay = restarted_app
             .clone()
@@ -3679,10 +2896,9 @@ mod tests {
             scope_id: DEFAULT_SCOPE_ID.to_owned(),
             gateway_origin: format!("http://{address}/v1"),
             gateway_api_key: None,
-            gateway_client: reqwest::Client::new(),
             responses: Arc::new(Mutex::new(HashMap::new())),
             response_locks: Arc::new(Mutex::new(HashMap::new())),
-            response_attempts: Arc::new(Mutex::new(HashMap::new())),
+            momo_api: test_momo_api(format!("http://{address}/v1")),
             maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
             response_cancellations: Arc::new(Mutex::new(HashSet::new())),
             response_concurrency: Arc::new(Semaphore::new(8)),
@@ -3690,7 +2906,6 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
             memory_distill_every: 1,
             nsg_govern_every: 1,
-            momo_config: Arc::new(MomoConfig::default()),
         };
         run_background_maintenance(state.clone(), scope_id.clone(), "memory", 1)
             .await

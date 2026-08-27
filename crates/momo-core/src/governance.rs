@@ -90,7 +90,9 @@ impl Default for MomoConfig {
 
 impl MomoConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, GovernanceError> {
-        let config: Self = toml::from_str(&fs::read_to_string(path)?)?;
+        let text = fs::read_to_string(path)?;
+        validate_document_ownership(&text)?;
+        let config: Self = toml::from_str(&text)?;
         config.validate()?;
         Ok(config)
     }
@@ -166,6 +168,32 @@ impl MomoConfig {
         governed.audit["visual_description_prompt_source"] = json!(visual_source);
         Ok(governed)
     }
+}
+
+pub fn validate_momo_document(text: &str) -> Result<(), GovernanceError> {
+    validate_document_ownership(text)?;
+    let config: MomoConfig = toml::from_str(text)?;
+    config.validate()
+}
+
+fn validate_document_ownership(text: &str) -> Result<(), GovernanceError> {
+    let table: toml::Table = toml::from_str(text)?;
+    const HOST_ONLY: [&str; 10] = [
+        "providers",
+        "models",
+        "model",
+        "active_model_profile",
+        "modules",
+        "core",
+        "server",
+        "gateway",
+        "discord",
+        "auth",
+    ];
+    if let Some(field) = HOST_ONLY.iter().find(|field| table.contains_key(**field)) {
+        return Err(GovernanceError::HostField((*field).to_owned()));
+    }
+    Ok(())
 }
 
 pub struct RequestedOverrides<'a> {
@@ -377,6 +405,8 @@ pub enum GovernanceError {
     Toml(#[from] toml::de::Error),
     #[error("unsupported momo.toml schema_version {0}")]
     UnsupportedSchema(u32),
+    #[error("host-local field {0:?} belongs in config.toml, not momo.toml")]
+    HostField(String),
     #[error("request override {0} is rejected by policy")]
     Rejected(&'static str),
     #[error("request parameter {0:?} is not allowed by policy")]
@@ -468,5 +498,13 @@ prompt = "Describe the visible scene."
             Some("Describe the visible scene.")
         );
         assert_eq!(effective.audit["visual_description_prompt_source"], "momo");
+    }
+
+    #[test]
+    fn rejects_host_adapter_wiring_in_portable_document() {
+        let error =
+            validate_momo_document("schema_version = 1\n[[providers]]\nprovider_id = 'unsafe'\n")
+                .expect_err("host field");
+        assert!(matches!(error, GovernanceError::HostField(field) if field == "providers"));
     }
 }

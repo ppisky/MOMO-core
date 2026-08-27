@@ -359,7 +359,7 @@ MOMO-STD-0001 (Character Card Specification v2.0.0) 确立了一个简单、可�
 固定来源快照与字段边界见
 [`docs/character_card_compatibility.md`](docs/character_card_compatibility.md)。本附录描述的是
 转换器应遵循的设计规则。当前 `momo-core` 已实现 CCv1/v2 JSON、PNG 与 CCv3
-JSON、PNG/APNG、CHARX 导入，以及 CCv2/CCv3 JSON 导出。PNG/APNG 与 CHARX 中的
+JSON、PNG、CHARX 导入，以及 CCv2/CCv3 JSON/CHARX 导出。APNG 明确拒绝；PNG 与 CHARX 中的
 多媒体资产不会进入 MOMO 核心角色卡；字段与警告作为来源元数据保存并随 MOC 往返。
 
 ### A.1 格式识别
@@ -369,12 +369,13 @@ JSON、PNG/APNG、CHARX 导入，以及 CCv2/CCv3 JSON 导出。PNG/APNG 与 CHA
 | 顶层包含 `name`、`description` 等字段，无 `spec` 字段                   | Tavern V1（Legacy）        | 按 V1 字段映射，缺失字段按空字符串处理 |
 | 顶层包含 `spec: "chara_card_v2"`，核心字段位于 `data` 内                | Tavern V2                | 按 V2 `data` 字段映射 |
 | 顶层包含 `spec: "chara_card_v3"`，核心字段位于 `data` 内                | Character Card V3 / CCv3 | 按 V3 的 V2 超集字段映射，V3 新字段进入扩展资产 |
-| PNG/APNG 内存在 `ccv3` tEXt chunk                               | CCv3 embedded image      | 优先读取 `ccv3` |
-| PNG/APNG 内仅存在 `chara` / `Chara` 元数据                         | V1/V2 embedded image     | 读取并按 V1/V2 判断 |
+| 静态 PNG 内存在 `ccv3` tEXt chunk                               | CCv3 embedded image      | 优先读取 `ccv3` |
+| 静态 PNG 内仅存在 `chara` / `Chara` 元数据                         | V1/V2 embedded image     | 读取并按 V1/V2 判断 |
+| PNG 内存在 `acTL` chunk                                         | APNG                     | 拒绝；不猜测应读取哪一帧 |
 | `.charx` ZIP 根目录存在 `card.json`                                | CCv3 CHARX               | 读取 `card.json`，资产按扩展资产保留 |
 | 包含未知字段、未来 `spec_version`、非空 `extensions` 或应用私有 JSON / 资产文件 | 扩展 / 未来版本                | 核心字段照常导入，未知内容原样保留至 `.moc` 扩展模块 |
 
-MOMO 转换器 MUST 把输入文件视为不可信数据：PNG/APNG/CHARX/JSON 解包前必须限制文件数量、单文件大小、总大小、路径穿越、符号链接、压缩炸弹与编码错误。若同一输入同时存在 V2 `chara` 与 V3 `ccv3`，SHOULD 优先使用 V3 `ccv3`，并将被忽略的旧块作为原始快照保留。
+MOMO 转换器 MUST 把输入文件视为不可信数据：PNG/CHARX/JSON 解包前必须限制文件数量、单文件大小、总大小、路径穿越、符号链接、压缩炸弹与编码错误。APNG MUST 在解析角色元数据前拒绝。若同一静态 PNG 同时存在 V2 `chara` 与 V3 `ccv3`，SHOULD 优先使用 V3 `ccv3`，并将被忽略的旧块作为原始快照保留。
 
 ### A.2 字段映射表
 
@@ -414,7 +415,7 @@ MOMO 转换器 MUST 把输入文件视为不可信数据：PNG/APNG/CHARX/JSON �
 - `tags` MUST NOT 被写入 `character.toml` 或任何角色卡文件。
 - `system_prompt` 与 `post_history_instructions` MUST NOT 被写入角色卡文件。
 - 若酒馆卡缺少 `user.md` 对应的用户信息，转换工具 MAY 省略 `user.md`；若为了兼容旧运行环境而生成最小中性描述（如"用户是与 {name} 进行对话的人"），MUST NOT 编造用户姓名、性别、年龄或身份。
-- 转换工具 SHOULD 保留酒馆原始 JSON、PNG/APNG 元数据块、CHARX `card.json`、CHARX 资产清单与未消费资产于 `.moc` 扩展模块中，以支持逆向导出。
+- 转换工具 SHOULD 保留酒馆原始 JSON、静态 PNG 元数据块、CHARX `card.json`、CHARX 资产清单与未消费资产于 `.moc` 显式兼容模块中，以支持逆向导出。
 
 ### A.4 模型辅助转换提示词
 
@@ -494,4 +495,3 @@ extensions/tavern/
 - 导出工具 SHOULD 在导出结果中标记有损字段。
 
 ---
-

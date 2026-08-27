@@ -116,8 +116,8 @@ embedded.
 ## 5. Media and container formats
 
 - A MOC file uses the `.moc` extension. Its bytes are a tar archive compressed
-  with the Zstandard algorithm. The conventional compound extension for such
-  an archive is `.tar.zst`; `.tar.zstd` is not a MOMO format or extension.
+  with the Zstandard algorithm. The conventional compound extension for an
+  ordinary archive is `.tar.zst`; MOMO uses only `.moc`.
 - MOMO 0.5 reads and writes MOC format version 2 only. There is intentionally no
   MOC v1 migration path because no supported installed base requires one.
 - LSB image carriers support PNG and lossless WebP. They do not support APNG,

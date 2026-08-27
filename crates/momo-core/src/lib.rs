@@ -8,6 +8,7 @@ mod embedding;
 mod gateway;
 mod governance;
 mod lsb;
+mod orchestration;
 mod portable;
 mod response;
 
@@ -43,7 +44,7 @@ pub use gateway::{
 };
 pub use governance::{
     GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION, MomoConfig, OverrideMode,
-    RequestOverridePolicy, RequestedOverrides, VisionDescriptionConfig,
+    RequestOverridePolicy, RequestedOverrides, VisionDescriptionConfig, validate_momo_document,
 };
 pub use lsb::{
     LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,
@@ -59,20 +60,21 @@ pub use momo_memory::{MoStateAudit, MoStateContext};
 pub use momo_moc;
 pub use momo_storage;
 pub use momo_storage::{DEFAULT_NSG_VECTOR_TOP_K, MAX_NSG_VECTOR_TOP_K, NsgVectorStatus};
+pub use orchestration::{MomoApiError, MomoApiErrorKind, MomoApiService, MomoResponseEventSink};
 pub use portable::{
     ConflictMode, ImportReport, MocCompatibility, MocExportPlan, MocModule, MocProtection,
-    PortableError, export_moc, export_private_moc, import_moc, import_moc_with_passphrase,
-    moc_is_encrypted,
+    PortableError, export_moc, export_momo_config, export_private_moc, import_moc,
+    import_moc_with_passphrase, import_momo_config, moc_is_encrypted,
 };
 pub use response::{
     MAX_GATEWAY_HOPS, MAX_RESPONSE_ID_BYTES, MAX_RESPONSE_IMAGE_REFERENCE_BYTES,
     MAX_RESPONSE_INPUT_BYTES, MAX_RESPONSE_INSTRUCTIONS_BYTES, MAX_RESPONSE_REQUEST_BYTES,
     MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES, MAX_RESPONSE_TOOL_ARGUMENT_BYTES,
     MAX_RESPONSE_TOOL_OUTPUT_BYTES, MAX_RESPONSE_TOOL_SCHEMA_BYTES, MAX_RESPONSE_TOOLS,
-    MOMO_RESPONSE_SCHEMA, MomoResponse, MomoResponseEvent, MomoResponseExtension,
-    MomoResponseMetadata, MomoResponseRequest, ResponseContentBlock, ResponseContractError,
-    ResponseError, ResponseInput, ResponseInputItem, ResponseMessageContent, ResponseOutputContent,
-    ResponseOutputItem, ResponseTool, ResponseUsage,
+    MOMO_RESPONSE_SCHEMA, MomoResponse, MomoResponseExtension, MomoResponseMetadata,
+    MomoResponseRequest, ResponseContentBlock, ResponseContractError, ResponseError, ResponseInput,
+    ResponseInputItem, ResponseMessageContent, ResponseOutputContent, ResponseOutputItem,
+    ResponseTool, ResponseUsage,
 };
 
 #[derive(Debug, Error)]

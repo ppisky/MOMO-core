@@ -1,18 +1,18 @@
-//! Runtime configuration and portable MOC import/export.
+//! Portable `momo.toml` configuration and MOC import/export.
 
 use super::*;
 
-pub async fn export_runtime_config_json(
+pub async fn export_momo_config_json(
     output_path: String,
     settings_json: String,
 ) -> Result<(), String> {
     let settings = serde_json::from_str(&settings_json).map_err(|error| error.to_string())?;
-    crate::portable::export_runtime_config(core()?, output_path, &settings)
+    crate::portable::export_momo_config(core()?, output_path, &settings)
         .map_err(|error| error.to_string())
 }
 
-pub async fn import_runtime_config_json(input_path: String) -> Result<String, String> {
-    let settings = crate::portable::import_runtime_config(core()?, input_path)
+pub async fn import_momo_config_json(input_path: String) -> Result<String, String> {
+    let settings = crate::portable::import_momo_config(core()?, input_path)
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&settings).map_err(|error| error.to_string())
 }
@@ -49,7 +49,7 @@ pub async fn export_moc_json(request_json: String) -> Result<String, String> {
             scope_id,
             &request.settings,
             &plan,
-            &passphrase,
+            passphrase,
         )
         .await
     } else {
@@ -79,7 +79,7 @@ pub async fn import_moc_json(
             input_path,
             scope_id,
             conflict_mode,
-            Some(&passphrase),
+            Some(passphrase),
         )
         .await
     } else {

@@ -10,14 +10,15 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 
 - MOMO 独立 Character Card v2（`character.toml` + Markdown）
 - Character Card v1/v2 JSON 与 PNG 导入
-- Character Card v3 JSON、PNG/APNG 与完整 CHARX 容器导入
+- Character Card v3 JSON、PNG 与完整 CHARX 容器导入；明确拒绝 APNG
 - 保留来源字段的 Character Card v2/v3 JSON 与 CHARX 导出
-- MOC v2 导入与导出
+- 严格类型化的 MOC v2 快照导入导出与显式兼容 profile
+- PNG/无损 WebP 的 MOMO LSB 载体；不支持 APNG 或 AVIF
 - Dual-Mem Wiki（DMW）长期记忆
 - Narrative Semantic Graph（NSG）
 - MO State 编译
 - SQLite 业务存储与独立 Turso 向量存储
-- 面向上游的 OpenAI-compatible completion、流式输出与 embeddings 网关
+- 原生 `MomoApi` 编排与面向模型服务的适配器接口
 - capability discovery 与上下文预算
 - 向量存储契约与确定性检索
 
@@ -29,8 +30,8 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 MOMO Character Card v2 是由本仓库定义的独立角色卡格式，规范见
 [`Character_Card_v2.md`](Character_Card_v2.md)。其中的“v2”不表示外部生态的
 `chara_card_v2` JSON/PNG 格式。当前 Core 实现的是 MOMO 格式随 MOC v2 的导入导出；
-同时支持外部 CCv1/v2 JSON、PNG，以及 CCv3 JSON、PNG/APNG、CHARX 的导入，并支持
-CCv2/CCv3 JSON 与 CHARX 导出。CHARX 的资产、`x_meta`、`module.risum` 和未知安全条目
+同时支持外部 CCv1/v2 JSON、PNG，以及 CCv3 JSON、PNG、CHARX 的导入，并支持
+CCv2/CCv3 JSON 与 CHARX 导出；APNG 明确不支持。CHARX 的资产、`x_meta`、`module.risum` 和未知安全条目
 作为原始容器来源保存，也会随 MOC 往返。
 
 外部格式兼容设计的规范来源固定为
@@ -72,13 +73,12 @@ usage，并让本地生成接口正确返回 400/502/504。该本地接口仍是
 OpenAI SDK 直接替换 base URL 的服务端接口。原始向量接口继续作为低级能力保留。详见
 [向量化模型接口规范](docs/vectorization_model_interface_0_4_2.md)。
 
-0.5.0 已加入版本化响应契约与 `POST /v1/responses`：一次请求完成消息持久化、
+0.5.0 已加入原生 MomoApi 响应契约与 `POST /v1/momo/responses`：一次请求完成消息持久化、
 DMW/NSG 检索、MO State、上下文预算、逻辑路由和助手持久化，并支持真正的上游增量 SSE、
 跨进程 request ID 幂等、Core 所有的 embedding profile，以及可重试的后台 DMW/NSG 维护。
 三协议工具调用已有共享 golden contract 和异协议增量转换；
-[MOMO LSB Carrier v1](docs/momo_lsb_carrier_v1.md) 已接入有界 PNG codec，并覆盖尾部剥离与
-无损重封装。0.5.0 发布候选还统一了错误 envelope、请求与流上限、取消/超时/限流、
-逻辑路由指标，以及 Core 直连和经 mobot 的真实进程 E2E。兼容变化和 1.0 门槛见
+[MOMO LSB Carrier v1](docs/momo_lsb_carrier_v1.md) 已接入有界 PNG/无损 WebP codec。
+0.5.0 发布候选还统一了错误 envelope、请求与流上限、取消/超时/限流和逻辑路由指标。兼容变化和 1.0 门槛见
 [迁移说明](docs/migration_0_4_2_to_0_5_0.md)与[0.5.0 路线图](docs/roadmap_0_5_0.md)。
 
 ## Scope 标识

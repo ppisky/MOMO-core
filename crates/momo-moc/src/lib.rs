@@ -33,6 +33,7 @@ pub struct Manifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ModuleDefinition {
     pub id: String,
     pub path: String,
@@ -42,6 +43,7 @@ pub struct ModuleDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct EncryptionMetadata {
     pub profile: String,
     pub payload_path: String,
@@ -49,6 +51,7 @@ pub struct EncryptionMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ModuleEntry {
     pub module: String,
     pub path: String,
@@ -703,6 +706,15 @@ mod tests {
             Err(MocError::InvalidManifest(message))
                 if message.contains("legacy module id character")
         ));
+    }
+
+    #[test]
+    fn removed_incremental_manifest_fields_are_not_silently_accepted() {
+        let text = format!(
+            "format = \"{FORMAT_NAME}\"\nformat_version = {FORMAT_VERSION}\ncreated_at = \"{}\"\npackage_type = \"incremental\"\nmodules = []\n",
+            Utc::now().to_rfc3339()
+        );
+        assert!(toml::from_str::<Manifest>(&text).is_err());
     }
 
     #[test]

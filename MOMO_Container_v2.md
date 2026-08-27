@@ -18,7 +18,6 @@ Every v2 container MUST contain `manifest.toml` and MUST declare:
 format = "momo-container"
 format_version = 2
 created_at = 2026-08-05T00:00:00Z
-package_type = "snapshot"
 ```
 
 An importer MUST reject an unknown `format`, version greater than 2, unsafe or
@@ -108,49 +107,19 @@ character directory. Absolute paths, `..`, links, non-Markdown files, and
 frontmatter are rejected.
 
 External CCv1/v2/v3 source fields are not part of the MOMO character payload.
-When present, they use the separate `tavern_compat` module at
-`tavern_compat/<UUID>/source.json` so the core character definition remains
-independent while compatible exports can preserve upstream-only fields. A
-preserved CHARX container is stored beside it as
-`tavern_compat/<UUID>/source.charx`. `source.json` MUST declare the CHARX hash
-and container summary; import MUST reject a missing, unexpected, unsafe, or
-mismatched `source.charx`. The CHARX remains external compatibility data, not a
-MOMO Character Card v2 payload.
+When explicitly requested, compatibility data uses the separate
+`tavern_compat` module. `preserved_source` stores `metadata.json` and the exact
+original `source.json`, `source.png`, or `source.charx` bytes. A generated
+profile instead stores one named generated artifact and is never imported as
+source provenance. Compatibility remains external data, not a MOMO Character
+Card v2 payload.
 
-## 5. Package types and deletion records
+## 5. Snapshot-only package model
 
-### 5.1 Snapshot
-
-`package_type = "snapshot"` is a full selected-module snapshot. It has no
-sequence bounds and no deletion records. The local portable exporter currently
-emits this type.
-
-### 5.2 Incremental
-
-`package_type = "incremental"` carries changed payload files, deletion records,
-or both. It MUST set non-negative `base_sequence` and a greater
-`through_sequence`. An empty incremental package is invalid.
-
-### 5.3 Deletion
-
-`package_type = "deletion"` contains no payload files and one or more
-`[[deletions]]` entries. It uses the same increasing sequence bounds:
-
-```toml
-base_sequence = 40
-through_sequence = 44
-
-[[deletions]]
-module = "conversations"
-object_id = "019f0000-0000-7000-8000-000000000001"
-revision = 3
-change_sequence = 44
-deleted_at = 2026-08-05T00:00:00Z
-```
-
-The importer applies modules in `import_order`, then deletion records in
-`change_sequence` order. Object revisions and local tombstones still govern
-conflict handling; a package does not silently override pending local work.
+MOC v2 contains one complete snapshot of the explicitly selected modules.
+There are no incremental, deletion-only, sequence-range, or migration package
+variants in the 0.5 contract. Unsupported manifest fields are rejected rather
+than accepted as an unimplemented promise.
 
 ## 6. Extensibility
 
@@ -176,15 +145,15 @@ conflict handling; a package does not silently override pending local work.
 - API keys, login/refresh tokens, passwords, recovery keys, and external-service
   credentials MUST NOT be exported. Encryption is not an exception.
 
-Private containers keep the tar.zstd outer layer. The outer v2 package contains
+Private containers keep the same `.moc` outer container. The outer v2 package contains
 only its manifest and `private/payload.enc`; the plaintext is a complete normal
 MOC. The encryption envelope and its 512 MiB limit are defined by the encryption
 profile.
 
 ## 8. Import reporting
 
-An import report exposes the source and target format versions plus independent
-counts for characters, conversations, messages, DMW files, NSG files, applied
-deletions, skipped conflicts, and preserved unknown modules. A skipped or
+An import report exposes the source format version plus independent counts for
+characters, conversations, messages, DMW files, NSG files, skipped conflicts,
+and preserved unknown modules. A skipped or
 unimplemented action MUST be reported as such; it must not be presented as a
 successful import.

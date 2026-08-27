@@ -78,11 +78,11 @@ TOML + Markdown 结构不是同一种线格式。
 | MOMO Character Card v2 → MOC v2 | 已实现 |
 | MOC v2 → MOMO Character Card v2 | 已实现 |
 | 外部 CCv1/v2 JSON/PNG → MOMO | 已实现 |
-| 外部 CCv3 JSON/PNG/APNG/CHARX → MOMO | 已实现；CHARX 原始容器及安全条目独立保存 |
+| 外部 CCv3 JSON/PNG/CHARX → MOMO | 已实现；CHARX 原始容器及安全条目独立保存 |
 | MOMO → 外部 CCv2/CCv3 JSON | 已实现；无来源快照时为有损转换 |
 | MOMO → 外部 CHARX | 已实现；无来源资产时输出仅含 `card.json` 的标准 ZIP |
 | 导入 CHARX → MOC → CHARX | 已实现；资产、`x_meta`、`module.risum` 与未知安全条目往返 |
-| MOMO → 外部 PNG/APNG | 未实现；需要调用方提供媒体载体 |
+| MOMO → 外部 PNG/APNG | 不支持；LSB 载体是独立且显式的 PNG/无损 WebP 导出类型 |
 | 外部未知字段与运行时字段保留 | 已实现；作为来源元数据保存并随 MOC 往返 |
 
 HTTP 接口使用 `POST /v1/characters/import-external` 导入本地文件，使用
@@ -114,7 +114,9 @@ external specification documents are linked at pinned revisions rather than
 redistributed. This is not represented as a clean-room
 implementation; the provenance disclosure is factual and does not make a legal
 conclusion about derivative-work status.
-Core imports CCv1/v2 JSON and PNG plus CCv3 JSON, PNG/APNG, and CHARX. It
+Core imports CCv1/v2 JSON and PNG plus CCv3 JSON, PNG, and CHARX. APNG is
+rejected because selecting a frame would be ambiguous. It
 exports CCv2/CCv3 JSON and CHARX. Imported CHARX assets, Risu extension files,
-and unknown safe entries survive MOC round trips. PNG/APNG export remains
-outside the current profile.
+and unknown safe entries survive MOC round trips. Character Card PNG/APNG
+export is not part of this profile; MOMO LSB PNG/lossless-WebP export is a
+separate typed carrier operation.
