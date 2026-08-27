@@ -94,7 +94,7 @@ embedding profiles and background DMW/NSG maintenance. Function tools have a
 shared cross-protocol golden contract, and the codec-independent
 [MOMO LSB Carrier v1](docs/momo_lsb_carrier_v1.md) includes bounded PNG codec
 integration for PNG and lossless WebP. The 0.5.0 release
-candidate also unifies error envelopes and request/stream bounds, adds
+release also unifies error envelopes and request/stream bounds, adds
 cancellation, timeout, rate-limit and logical-route metrics. See the
 [0.5.0 roadmap](docs/roadmap_0_5_0.md) and
 [migration guide](docs/migration_0_4_2_to_0_5_0.md) for compatibility details

@@ -1,6 +1,6 @@
 # MOMO Core 0.5.0 release contract
 
-**Status:** release-candidate code audit complete
+**Status:** released
 **Updated:** 2026-08-27
 
 MOMO 0.5 freezes a coherent pre-1.0 architecture. A checklist item is complete
