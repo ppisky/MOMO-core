@@ -123,8 +123,19 @@ than accepted as an unimplemented promise.
 
 ## 6. Extensibility
 
-- Unknown module IDs with safe paths are extracted and reported but are not
-  written into known business data.
+- Unknown module IDs with safe paths are validated and reported but are not
+  written into known business data or executed by Core.
+- A host MAY explicitly claim validated unknown modules into a host-selected
+  directory after extraction and decryption succeeds. The claim report MUST
+  include the module ID, declared root, dependencies, import order, and claimed
+  path. Without an explicit claim directory, temporary payloads are discarded.
+- A host MAY explicitly provide an extension-module directory during export.
+  The container builder validates the module ID, dependencies, declared order,
+  regular-file boundary, path safety, size, and digest, but does not interpret
+  the payload.
+- Claim and export are host hand-off mechanisms, not a plugin execution model.
+  WASM, gRPC, or another host runtime remains responsible for recognizing and
+  executing the module contract.
 - Unknown fields in known Character Card metadata are preserved where safe.
 - Private or format-round-trip payloads, such as original Tavern JSON,
   unrecognized Tavern `extensions`, extra catalog metadata, and future
@@ -154,6 +165,6 @@ profile.
 
 An import report exposes the source format version plus independent counts for
 characters, conversations, messages, DMW files, NSG files, skipped conflicts,
-and preserved unknown modules. A skipped or
+and unknown modules, including their claim status and claimed paths. A skipped or
 unimplemented action MUST be reported as such; it must not be presented as a
 successful import.

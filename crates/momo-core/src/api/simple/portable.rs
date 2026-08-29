@@ -31,6 +31,8 @@ struct ExportMocJsonRequest {
     character_id: Option<uuid::Uuid>,
     #[serde(default)]
     protection: crate::MocProtection,
+    #[serde(default)]
+    host_modules: Vec<crate::HostMocModule>,
 }
 
 pub async fn export_moc_json(request_json: String) -> Result<String, String> {
@@ -43,22 +45,24 @@ pub async fn export_moc_json(request_json: String) -> Result<String, String> {
         compatibility: request.compatibility,
     };
     let manifest = if let Some(passphrase) = request.protection.passphrase() {
-        crate::portable::export_private_moc(
+        crate::portable::export_private_moc_with_host_modules(
             core()?,
             request.output_path,
             scope_id,
             &request.settings,
             &plan,
+            &request.host_modules,
             passphrase,
         )
         .await
     } else {
-        crate::portable::export_moc(
+        crate::portable::export_moc_with_host_modules(
             core()?,
             request.output_path,
             scope_id,
             &request.settings,
             &plan,
+            &request.host_modules,
         )
         .await
     }
@@ -71,15 +75,26 @@ pub async fn import_moc_json(
     scope_id: String,
     conflict_mode: crate::ConflictMode,
     protection: crate::MocProtection,
+    claim_unknown_to: Option<String>,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let report = if let Some(passphrase) = protection.passphrase() {
-        crate::portable::import_moc_with_passphrase(
+        crate::portable::import_moc_with_passphrase_and_claims(
             core()?,
             input_path,
             scope_id,
             conflict_mode,
             Some(passphrase),
+            claim_unknown_to.as_deref().map(std::path::Path::new),
+        )
+        .await
+    } else if let Some(claim_directory) = claim_unknown_to {
+        crate::portable::import_moc_claiming_unknown_modules(
+            core()?,
+            input_path,
+            scope_id,
+            conflict_mode,
+            claim_directory,
         )
         .await
     } else {

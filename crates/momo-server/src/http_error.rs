@@ -27,6 +27,10 @@ impl ApiError {
         )
     }
 
+    pub(super) fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "not_found", message, false)
+    }
+
     pub(super) fn bad_gateway(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_GATEWAY, "upstream_error", message, true)
     }

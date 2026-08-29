@@ -5,16 +5,17 @@ use std::{
     sync::{Arc, Mutex as SyncMutex, Weak},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::{
-    EmbeddingNormalization, EmbeddingProfile, MomoConfig, MomoResponse, MomoResponseMetadata,
+    ChatUsage, DEFAULT_VISION_ROUTE, EmbeddingNormalization, EmbeddingProfile,
+    GatewayVisionAdapter, GovernedOverrides, MomoConfig, MomoResponse, MomoResponseMetadata,
     MomoResponseRequest, RequestedOverrides, ResponseOutputContent, ResponseOutputItem,
-    ResponseUsage, api::simple,
+    ResponseUsage, VisionDescriptionAdapter, VisionDescriptionRequest, api::simple,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,11 +92,11 @@ impl MaintenanceKind {
 
 #[derive(Debug, Clone)]
 pub struct MomoApiService {
-    default_scope_id: String,
     gateway_origin: String,
     gateway_api_key: Option<String>,
     gateway_client: reqwest::Client,
     config: Arc<MomoConfig>,
+    vision_adapter: Arc<dyn VisionDescriptionAdapter>,
     response_attempts: Arc<Mutex<HashMap<String, String>>>,
     operation_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     operation_states: Arc<SyncMutex<HashMap<String, OperationState>>>,
@@ -106,6 +107,46 @@ pub struct MomoApiService {
 struct OperationState {
     active: usize,
     cancelled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ResolvedResponseInput {
+    text: String,
+    #[serde(default)]
+    image_handling: ImageInputHandling,
+    #[serde(default)]
+    visual_input_count: usize,
+    #[serde(default)]
+    vision_usage: ChatUsage,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    vision_upstream_request_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ImageInputHandling {
+    #[default]
+    None,
+    DirectMultimodal,
+    DescriptionFallback,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GatewayGenerationCapability {
+    context_window: usize,
+    max_output_tokens: usize,
+    supports_images: bool,
+}
+
+struct GovernedResponseAttempt<'a> {
+    request_id: &'a str,
+    operation_key: &'a str,
+    request_fingerprint: &'a str,
+    persisted: Option<&'a Value>,
+    resolved_input: &'a ResolvedResponseInput,
+    governed: GovernedOverrides,
+    warnings: Vec<String>,
+    stream: Option<&'a dyn MomoResponseEventSink>,
 }
 
 struct OperationGuard {
@@ -132,23 +173,35 @@ impl Drop for OperationGuard {
 impl MomoApiService {
     #[must_use]
     pub fn new(
-        default_scope_id: impl Into<String>,
         gateway_origin: impl Into<String>,
         gateway_api_key: Option<String>,
         gateway_client: reqwest::Client,
         config: Arc<MomoConfig>,
     ) -> Self {
+        let gateway_origin = gateway_origin.into();
+        let vision_adapter = Arc::new(GatewayVisionAdapter::new(
+            gateway_client.clone(),
+            gateway_origin.clone(),
+            gateway_api_key.clone(),
+            DEFAULT_VISION_ROUTE,
+        ));
         Self {
-            default_scope_id: default_scope_id.into(),
-            gateway_origin: gateway_origin.into(),
+            gateway_origin,
             gateway_api_key,
             gateway_client,
             config,
+            vision_adapter,
             response_attempts: Arc::new(Mutex::new(HashMap::new())),
             operation_locks: Arc::new(Mutex::new(HashMap::new())),
             operation_states: Arc::new(SyncMutex::new(HashMap::new())),
             maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    #[must_use]
+    pub fn with_vision_adapter(mut self, adapter: Arc<dyn VisionDescriptionAdapter>) -> Self {
+        self.vision_adapter = adapter;
+        self
     }
 
     /// Executes one idempotent native response operation.
@@ -159,27 +212,36 @@ impl MomoApiService {
         &self,
         request: &MomoResponseRequest,
         request_id: &str,
-        input: &str,
         stream: Option<&dyn MomoResponseEventSink>,
     ) -> Result<MomoResponse, MomoApiError> {
-        let _operation = self.enter_operation(request_id);
-        self.execute_active(request, request_id, input, stream)
+        request
+            .validate()
+            .map_err(|error| MomoApiError::bad_request(error.to_string()))?;
+        let scope_id = request
+            .momo
+            .scope_id
+            .as_deref()
+            .ok_or_else(|| MomoApiError::bad_request("scope_id is required"))?;
+        let operation_key = scoped_operation_key(scope_id, request_id);
+        let _operation = self.enter_operation(&operation_key);
+        self.execute_active(request, request_id, &operation_key, stream)
             .await
     }
 
     /// Cancels a currently active response and its upstream model request.
-    pub fn cancel(&self, request_id: &str) -> bool {
+    pub fn cancel(&self, scope_id: &str, request_id: &str) -> bool {
+        let operation_key = scoped_operation_key(scope_id, request_id);
         let known = {
             let mut states = self
                 .operation_states
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            states.get_mut(request_id).is_some_and(|state| {
+            states.get_mut(&operation_key).is_some_and(|state| {
                 state.cancelled = true;
                 state.active > 0
             })
         };
-        let upstream = simple::cancel_chat(request_id.to_owned());
+        let upstream = simple::cancel_chat(operation_key);
         known || upstream
     }
 
@@ -187,27 +249,27 @@ impl MomoApiService {
         &self,
         request: &MomoResponseRequest,
         request_id: &str,
-        input: &str,
+        operation_key: &str,
         stream: Option<&dyn MomoResponseEventSink>,
     ) -> Result<MomoResponse, MomoApiError> {
-        self.ensure_active(request_id)?;
+        self.ensure_active(operation_key)?;
         let request_lock = {
             let mut locks = self.operation_locks.lock().await;
             if locks.len() >= 1_024 {
                 locks.retain(|_, lock| lock.strong_count() > 0);
             }
-            if let Some(lock) = locks.get(request_id).and_then(Weak::upgrade) {
+            if let Some(lock) = locks.get(operation_key).and_then(Weak::upgrade) {
                 lock
             } else {
                 let lock = Arc::new(Mutex::new(()));
-                locks.insert(request_id.to_owned(), Arc::downgrade(&lock));
+                locks.insert(operation_key.to_owned(), Arc::downgrade(&lock));
                 lock
             }
         };
         let _request_guard = request_lock.lock().await;
-        self.ensure_active(request_id)?;
+        self.ensure_active(operation_key)?;
         let fingerprint = response_request_fingerprint(request)?;
-        let persisted = load_response_operation(request_id).await?;
+        let persisted = load_response_operation(operation_key).await?;
         if let Some(operation) = &persisted {
             if operation["request_fingerprint"].as_str() != Some(fingerprint.as_str()) {
                 return Err(MomoApiError::conflict(
@@ -219,23 +281,105 @@ impl MomoApiService {
                     .map_err(|error| MomoApiError::internal(error.to_string()));
             }
         }
+        if request.input.has_images() && !self.config.vision.enabled {
+            return Err(MomoApiError::bad_request(
+                "image input requires vision.enabled = true in the portable MOMO configuration",
+            ));
+        }
+
+        let mut warnings = Vec::new();
+        let capability = match self.gateway_response_budget().await {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(format!("capability discovery degraded: {error}"));
+                GatewayGenerationCapability {
+                    context_window: 8_192,
+                    max_output_tokens: 1_024,
+                    supports_images: false,
+                }
+            }
+        };
+        let direct_multimodal = request.input.has_images() && capability.supports_images;
+        let mut governed = self
+            .config
+            .govern(
+                capability.context_window,
+                capability.max_output_tokens,
+                RequestedOverrides {
+                    context_window: request.context_window,
+                    max_output_tokens: request.max_output_tokens,
+                    temperature: request.temperature,
+                    instructions: request.instructions.as_deref(),
+                    visual_description_prompt: if direct_multimodal {
+                        None
+                    } else {
+                        request.visual_description_prompt.as_deref()
+                    },
+                    parameters: &request.parameters,
+                    tool_configuration_requested: !request.tools.is_empty()
+                        || request.tool_choice.is_some(),
+                },
+            )
+            .map_err(|error| MomoApiError::bad_request(error.to_string()))?;
+        let resolved_input = self
+            .resolve_response_input(
+                request,
+                operation_key,
+                persisted.as_ref(),
+                &governed,
+                capability.supports_images,
+            )
+            .await?;
+        if resolved_input.image_handling == ImageInputHandling::DirectMultimodal {
+            governed.visual_description_prompt = None;
+            governed.audit["visual_description_prompt_source"] =
+                json!("not_used_direct_multimodal");
+        }
+        self.ensure_active(operation_key)?;
 
         let mut response = self
             .respond(
                 request,
-                request_id,
-                &fingerprint,
-                persisted.as_ref(),
-                input,
-                stream,
+                GovernedResponseAttempt {
+                    request_id,
+                    operation_key,
+                    request_fingerprint: &fingerprint,
+                    persisted: persisted.as_ref(),
+                    resolved_input: &resolved_input,
+                    governed,
+                    warnings,
+                    stream,
+                },
             )
             .await?;
-        self.ensure_active(request_id)?;
-        let scope_id = request
-            .momo
-            .scope_id
-            .clone()
-            .unwrap_or_else(|| self.default_scope_id.clone());
+        response.usage.input_tokens = response
+            .usage
+            .input_tokens
+            .saturating_add(resolved_input.vision_usage.input_tokens);
+        response.usage.output_tokens = response
+            .usage
+            .output_tokens
+            .saturating_add(resolved_input.vision_usage.output_tokens);
+        response.usage.total_tokens = response
+            .usage
+            .total_tokens
+            .saturating_add(resolved_input.vision_usage.total_tokens);
+        let description_fallback =
+            resolved_input.image_handling == ImageInputHandling::DescriptionFallback;
+        response.momo.request_audit["vision"] = json!({
+            "applied": description_fallback,
+            "mode": resolved_input.image_handling,
+            "input_count": resolved_input.visual_input_count,
+            "route": match resolved_input.image_handling {
+                ImageInputHandling::DirectMultimodal => Some(request.model.as_str()),
+                ImageInputHandling::DescriptionFallback => Some(DEFAULT_VISION_ROUTE),
+                ImageInputHandling::None => None,
+            },
+            "usage": &resolved_input.vision_usage,
+            "upstream_request_ids": &resolved_input.vision_upstream_request_ids,
+        });
+        self.ensure_active(operation_key)?;
+        let scope_id = request.momo.scope_id.clone().expect("validated scope_id");
         let memory =
             !response.output_text.is_empty() && (request.momo.memory || request.momo.mo_state);
         let semantic_graph = !response.output_text.is_empty()
@@ -243,9 +387,9 @@ impl MomoApiService {
         let maintenance_registered = if memory || semantic_graph {
             match simple::append_maintenance_turn_json(
                 json!({
-                    "request_id": request_id,
+                    "request_id": operation_key,
                     "scope_id": scope_id,
-                    "user_content": input,
+                    "user_content": &resolved_input.text,
                     "assistant_content": response.output_text,
                 })
                 .to_string(),
@@ -266,7 +410,7 @@ impl MomoApiService {
             false
         };
         simple::complete_response_operation(
-            request_id.to_owned(),
+            operation_key.to_owned(),
             serde_json::to_string(&response)
                 .map_err(|error| MomoApiError::internal(error.to_string()))?,
         )
@@ -276,6 +420,80 @@ impl MomoApiService {
             self.schedule_maintenance(scope_id);
         }
         Ok(response)
+    }
+
+    async fn resolve_response_input(
+        &self,
+        request: &MomoResponseRequest,
+        request_id: &str,
+        persisted: Option<&Value>,
+        governed: &GovernedOverrides,
+        chat_supports_images: bool,
+    ) -> Result<ResolvedResponseInput, MomoApiError> {
+        if let Some(resolved) =
+            persisted.and_then(|operation| operation["resolved_input_json"].as_str())
+        {
+            return serde_json::from_str(resolved)
+                .map_err(|error| MomoApiError::internal(error.to_string()));
+        }
+        let images = request.input.image_inputs();
+        if images.is_empty() {
+            return Ok(ResolvedResponseInput {
+                text: request
+                    .input
+                    .text()
+                    .map_err(|error| MomoApiError::bad_request(error.to_string()))?,
+                image_handling: ImageInputHandling::None,
+                visual_input_count: 0,
+                vision_usage: ChatUsage::default(),
+                vision_upstream_request_ids: Vec::new(),
+            });
+        }
+        if chat_supports_images {
+            let text = request
+                .input
+                .text()
+                .map_err(|error| MomoApiError::bad_request(error.to_string()))?;
+            let image_count = images.len();
+            let text = if text.is_empty() {
+                format!("[Image input: {image_count}]")
+            } else {
+                format!("{text}\n[Image input: {image_count}]")
+            };
+            return Ok(ResolvedResponseInput {
+                text,
+                image_handling: ImageInputHandling::DirectMultimodal,
+                visual_input_count: image_count,
+                vision_usage: ChatUsage::default(),
+                vision_upstream_request_ids: Vec::new(),
+            });
+        }
+        let prompt = governed.visual_description_prompt.clone().ok_or_else(|| {
+            MomoApiError::bad_request(
+                "image input requires vision.enabled = true in the portable MOMO configuration",
+            )
+        })?;
+        let batch = self
+            .vision_adapter
+            .describe(VisionDescriptionRequest {
+                images,
+                prompt,
+                request_id: request_id.to_owned(),
+            })
+            .await
+            .map_err(|error| MomoApiError::model(error.to_string()))?;
+        self.ensure_active(request_id)?;
+        let text = request
+            .input
+            .text_with_image_descriptions(&batch.descriptions)
+            .map_err(|error| MomoApiError::model(error.to_string()))?;
+        Ok(ResolvedResponseInput {
+            text,
+            image_handling: ImageInputHandling::DescriptionFallback,
+            visual_input_count: batch.descriptions.len(),
+            vision_usage: batch.usage,
+            vision_upstream_request_ids: batch.upstream_request_ids,
+        })
     }
 
     fn enter_operation(&self, request_id: &str) -> OperationGuard {
@@ -390,23 +608,11 @@ impl MomoApiService {
         let (route, system) = match kind {
             MaintenanceKind::Memory => (
                 "memory_distillation",
-                concat!(
-                    "You are the MOMO DMW memory distiller. Output YAML only with root key patches. ",
-                    "Store only explicit durable facts useful in future conversations. Never store guesses, ",
-                    "questions, greetings, transient mood, secrets, or a general transcript summary. ",
-                    "Supported operations are create, append, replace, and update_frontmatter. ",
-                    "Use safe relative .md targets. If nothing qualifies, output exactly: patches: []"
-                ),
+                self.config.prompts.memory_distillation.as_str(),
             ),
             MaintenanceKind::SemanticGraph => (
                 "semantic_graph_governance",
-                concat!(
-                    "You are the MOMO NSG governor. Output YAML only with root key patches. ",
-                    "Create only durable narrative rules, lore, causal relations, or constraints. ",
-                    "Automatic create_node operations must use mode draft, status active, and zone auto. ",
-                    "Never directly modify Canon; use revision_candidate with evidence. ",
-                    "If nothing qualifies, output exactly: patches: []"
-                ),
+                self.config.prompts.semantic_graph_governance.as_str(),
             ),
         };
         let completion = simple::chat_complete_json(
@@ -453,39 +659,62 @@ impl MomoApiService {
     async fn respond(
         &self,
         request: &MomoResponseRequest,
-        request_id: &str,
-        request_fingerprint: &str,
-        persisted: Option<&Value>,
-        input: &str,
-        stream: Option<&dyn MomoResponseEventSink>,
+        attempt: GovernedResponseAttempt<'_>,
     ) -> Result<MomoResponse, MomoApiError> {
+        let GovernedResponseAttempt {
+            request_id,
+            operation_key,
+            request_fingerprint,
+            persisted,
+            resolved_input,
+            governed,
+            mut warnings,
+            stream,
+        } = attempt;
+        let input = resolved_input.text.as_str();
+        let direct_multimodal =
+            resolved_input.image_handling == ImageInputHandling::DirectMultimodal;
         let scope_id = request
             .momo
             .scope_id
             .clone()
-            .unwrap_or_else(|| self.default_scope_id.clone());
-        let characters = parse_json(simple::local_characters_json(scope_id.clone()).await)?;
+            .expect("validated personal scope");
+        let conversation_scope_id = request
+            .momo
+            .conversation_scope_id
+            .clone()
+            .expect("validated conversation scope");
+        let character_scope_id = request
+            .momo
+            .character_scope_id
+            .clone()
+            .expect("validated character scope");
+        let characters =
+            parse_json(simple::local_characters_json(character_scope_id.clone()).await)?;
         let characters = characters
             .as_array()
             .ok_or_else(|| MomoApiError::internal("character store returned a non-array"))?;
-        let character = request
+        let requested_character_id = request
             .momo
             .character_id
             .as_deref()
-            .map_or_else(
-                || characters.first(),
-                |id| {
-                    characters
-                        .iter()
-                        .find(|character| character.get("id").and_then(Value::as_str) == Some(id))
-                },
-            )
+            .expect("validated character ID");
+        let character = characters
+            .iter()
+            .find(|character| {
+                character.get("id").and_then(Value::as_str) == Some(requested_character_id)
+            })
             .ok_or_else(|| MomoApiError::bad_request("no matching character is available"))?;
         let character_id = required_str(character, "id")?;
         let attempted_conversation = persisted
             .and_then(|operation| operation["conversation_id"].as_str())
             .map(str::to_owned)
-            .or(self.response_attempts.lock().await.get(request_id).cloned());
+            .or(self
+                .response_attempts
+                .lock()
+                .await
+                .get(operation_key)
+                .cloned());
         let conversation_id = if let Some(id) = request
             .momo
             .conversation_id
@@ -498,13 +727,14 @@ impl MomoApiService {
             let created = parse_json(
                 simple::stage_conversation_json(
                     None,
-                    scope_id.clone(),
+                    conversation_scope_id.clone(),
+                    character_scope_id,
                     request
                         .momo
                         .title
                         .clone()
                         .unwrap_or_else(|| "MOMO response".to_owned()),
-                    Some(character_id.to_owned()),
+                    character_id.to_owned(),
                 )
                 .await,
             )?;
@@ -512,29 +742,44 @@ impl MomoApiService {
             self.response_attempts
                 .lock()
                 .await
-                .insert(request_id.to_owned(), id.clone());
+                .insert(operation_key.to_owned(), id.clone());
             id
         };
+        let conversations =
+            parse_json(simple::local_conversations_json(conversation_scope_id.clone()).await)?;
+        let conversation_owned = conversations.as_array().is_some_and(|items| {
+            items.iter().any(|conversation| {
+                conversation.get("id").and_then(Value::as_str) == Some(conversation_id.as_str())
+            })
+        });
+        if !conversation_owned {
+            return Err(MomoApiError::bad_request(
+                "conversation_id does not belong to conversation_scope_id",
+            ));
+        }
         self.response_attempts
             .lock()
             .await
-            .entry(request_id.to_owned())
+            .entry(operation_key.to_owned())
             .or_insert_with(|| conversation_id.clone());
         simple::begin_response_operation(
-            request_id.to_owned(),
+            operation_key.to_owned(),
             request_fingerprint.to_owned(),
             conversation_id.clone(),
+            serde_json::to_string(resolved_input)
+                .map_err(|error| MomoApiError::internal(error.to_string()))?,
         )
         .await
         .map_err(MomoApiError::internal)?;
-        self.response_attempts.lock().await.remove(request_id);
+        self.response_attempts.lock().await.remove(operation_key);
 
         let user_already_written = persisted
             .and_then(|operation| operation["user_written"].as_bool())
             .unwrap_or(false);
         if !user_already_written {
             simple::append_response_user_message_json(
-                request_id.to_owned(),
+                operation_key.to_owned(),
+                conversation_scope_id.clone(),
                 conversation_id.clone(),
                 input.to_owned(),
             )
@@ -542,32 +787,6 @@ impl MomoApiService {
             .map_err(MomoApiError::internal)?;
         }
 
-        let mut warnings = Vec::new();
-        let (capability_context_window, route_output_tokens) =
-            match self.gateway_response_budget().await {
-                Ok(value) => value,
-                Err(error) => {
-                    warnings.push(format!("capability discovery degraded: {error}"));
-                    (8_192, 1_024)
-                }
-            };
-        let governed = self
-            .config
-            .govern(
-                capability_context_window,
-                route_output_tokens,
-                RequestedOverrides {
-                    context_window: request.context_window,
-                    max_output_tokens: request.max_output_tokens,
-                    temperature: request.temperature,
-                    instructions: request.instructions.as_deref(),
-                    visual_description_prompt: request.visual_description_prompt.as_deref(),
-                    parameters: &request.parameters,
-                    tool_configuration_requested: !request.tools.is_empty()
-                        || request.tool_choice.is_some(),
-                },
-            )
-            .map_err(|error| MomoApiError::bad_request(error.to_string()))?;
         let context_window = governed.context_window;
         let reserve_output_tokens = governed.max_output_tokens;
         let query_embedding = if request.momo.semantic_graph || request.momo.mo_state {
@@ -633,7 +852,10 @@ impl MomoApiService {
             json!({"context": "", "audit": {}})
         };
 
-        let history = parse_json(simple::local_messages_json(conversation_id.clone()).await)?;
+        let history = parse_json(
+            simple::local_messages_json(conversation_scope_id.clone(), conversation_id.clone())
+                .await,
+        )?;
         let mut messages = history
             .as_array()
             .into_iter()
@@ -646,6 +868,7 @@ impl MomoApiService {
             })
             .collect::<Vec<_>>();
         if request.input.is_structured()
+            && (direct_multimodal || !request.input.has_images())
             && messages.last().is_some_and(|message| {
                 message.get("role").and_then(Value::as_str) == Some("user")
                     && message.get("content").and_then(Value::as_str) == Some(input)
@@ -678,7 +901,7 @@ impl MomoApiService {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if request.input.is_structured() {
+        if request.input.is_structured() && (direct_multimodal || !request.input.has_images()) {
             gateway_messages.extend(
                 request
                     .input
@@ -691,7 +914,7 @@ impl MomoApiService {
         let mut request_parameters = json!({
             "max_tokens": reserve_output_tokens,
             "momo_hop": 1,
-            "momo_request_id": request_id,
+            "momo_request_id": operation_key,
         });
         let parameter_object = request_parameters
             .as_object_mut()
@@ -791,7 +1014,7 @@ impl MomoApiService {
             };
             let completion = simple::chat_stream_json(
                 json!({
-                    "request_id": request_id,
+                    "request_id": operation_key,
                     "base_url": gateway_request["base_url"],
                     "api_key": gateway_request["api_key"],
                     "model": gateway_request["model"],
@@ -827,6 +1050,7 @@ impl MomoApiService {
         }
         if !content.is_empty() {
             simple::stage_message_json(
+                conversation_scope_id,
                 conversation_id.clone(),
                 "assistant".to_owned(),
                 content.clone(),
@@ -887,7 +1111,7 @@ impl MomoApiService {
         })
     }
 
-    async fn gateway_response_budget(&self) -> Result<(usize, usize), String> {
+    async fn gateway_response_budget(&self) -> Result<GatewayGenerationCapability, String> {
         let discovery = self.gateway_model_detail("conversation").await?;
         let context_window = discovery
             .pointer("/momo/context_window")
@@ -902,7 +1126,19 @@ impl MomoApiService {
         if context_window < 1_024 || max_output_tokens == 0 || max_output_tokens >= context_window {
             return Err("gateway returned an invalid conversation token budget".to_owned());
         }
-        Ok((context_window, max_output_tokens))
+        let supports_images = discovery
+            .pointer("/momo/modalities")
+            .and_then(Value::as_array)
+            .is_some_and(|modalities| {
+                modalities
+                    .iter()
+                    .any(|modality| modality.as_str() == Some("image"))
+            });
+        Ok(GatewayGenerationCapability {
+            context_window,
+            max_output_tokens,
+            supports_images,
+        })
     }
 
     async fn gateway_model_detail(&self, alias: &str) -> Result<Value, String> {
@@ -981,6 +1217,14 @@ async fn load_response_operation(request_id: &str) -> Result<Option<Value>, Momo
             serde_json::from_str(&value).map_err(|error| MomoApiError::internal(error.to_string()))
         })
         .transpose()
+}
+
+fn scoped_operation_key(scope_id: &str, request_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(scope_id.as_bytes());
+    digest.update([0]);
+    digest.update(request_id.as_bytes());
+    format!("op_{}", hex::encode(digest.finalize()))
 }
 
 fn response_request_fingerprint(request: &MomoResponseRequest) -> Result<String, MomoApiError> {
@@ -1081,30 +1325,203 @@ fn response_usage(completion: &Value) -> ResponseUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{FutureExt, future::BoxFuture};
+
+    #[derive(Debug)]
+    struct FixedVisionAdapter;
+
+    impl VisionDescriptionAdapter for FixedVisionAdapter {
+        fn describe(
+            &self,
+            request: VisionDescriptionRequest,
+        ) -> BoxFuture<'static, Result<crate::VisionDescriptionBatch, crate::VisionError>> {
+            async move {
+                assert_eq!(request.prompt, "Describe visible facts.");
+                assert_eq!(request.images.len(), 1);
+                Ok(crate::VisionDescriptionBatch {
+                    descriptions: vec!["A red umbrella on a wet street.".to_owned()],
+                    usage: ChatUsage {
+                        input_tokens: 12,
+                        output_tokens: 8,
+                        total_tokens: 20,
+                    },
+                    upstream_request_ids: vec!["vision-upstream-1".to_owned()],
+                })
+            }
+            .boxed()
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnexpectedVisionAdapter;
+
+    impl VisionDescriptionAdapter for UnexpectedVisionAdapter {
+        fn describe(
+            &self,
+            _request: VisionDescriptionRequest,
+        ) -> BoxFuture<'static, Result<crate::VisionDescriptionBatch, crate::VisionError>> {
+            async move { panic!("direct multimodal input must not call the vision adapter") }
+                .boxed()
+        }
+    }
 
     #[test]
     fn cancellation_state_is_active_only_and_drop_safe() {
         let service = MomoApiService::new(
-            "00000000-0000-4000-8000-000000000001",
             "http://127.0.0.1:9/v1",
             None,
             reqwest::Client::new(),
             Arc::new(MomoConfig::default()),
         );
-        assert!(!service.cancel("request-1"));
-        let operation = service.enter_operation("request-1");
-        assert!(service.cancel("request-1"));
+        let scope_id = "01900000-0000-7000-8000-000000000101";
+        let operation_key = scoped_operation_key(scope_id, "request-1");
+        assert!(!service.cancel(scope_id, "request-1"));
+        let operation = service.enter_operation(&operation_key);
+        assert!(!service.cancel("01900000-0000-7000-8000-000000000102", "request-1"));
+        service
+            .ensure_active(&operation_key)
+            .expect("another scope cannot cancel this operation");
+        assert!(service.cancel(scope_id, "request-1"));
         assert!(matches!(
-            service.ensure_active("request-1"),
+            service.ensure_active(&operation_key),
             Err(MomoApiError {
                 kind: MomoApiErrorKind::Cancelled,
                 ..
             })
         ));
         drop(operation);
-        assert!(!service.cancel("request-1"));
+        assert!(!service.cancel(scope_id, "request-1"));
         service
-            .ensure_active("request-1")
+            .ensure_active(&operation_key)
             .expect("dropped operations leave no stale cancellation marker");
+    }
+
+    #[tokio::test]
+    async fn governed_vision_adapter_resolves_images_to_retryable_text() {
+        let mut config = MomoConfig::default();
+        config.vision.enabled = true;
+        config.vision.prompt = "Describe visible facts.".to_owned();
+        let service = MomoApiService::new(
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+            Arc::new(config),
+        )
+        .with_vision_adapter(Arc::new(FixedVisionAdapter));
+        let request: MomoResponseRequest = serde_json::from_value(json!({
+            "input": [
+                {"type": "input_text", "text": "What do you see?"},
+                {"type": "input_image", "image_url": "https://example.test/image.png", "detail": "high"}
+            ]
+        }))
+        .expect("request");
+        let governed = service
+            .config
+            .govern(
+                8_192,
+                1_024,
+                RequestedOverrides {
+                    context_window: None,
+                    max_output_tokens: None,
+                    temperature: None,
+                    instructions: None,
+                    visual_description_prompt: None,
+                    parameters: &serde_json::Map::new(),
+                    tool_configuration_requested: false,
+                },
+            )
+            .expect("governance");
+        let operation = service.enter_operation("request-vision-1");
+        let resolved = service
+            .resolve_response_input(&request, "request-vision-1", None, &governed, false)
+            .await
+            .expect("resolved input");
+        drop(operation);
+        assert_eq!(
+            resolved.image_handling,
+            ImageInputHandling::DescriptionFallback
+        );
+        assert_eq!(resolved.visual_input_count, 1);
+        assert_eq!(resolved.vision_usage.total_tokens, 20);
+        assert_eq!(
+            resolved.text,
+            "What do you see?\n[Visual description for image 1]\nA red umbrella on a wet street."
+        );
+
+        let persisted = json!({
+            "resolved_input_json": serde_json::to_string(&resolved).expect("stored resolution")
+        });
+        let operation = service.enter_operation("request-vision-1");
+        let replayed = service
+            .resolve_response_input(
+                &request,
+                "request-vision-1",
+                Some(&persisted),
+                &governed,
+                false,
+            )
+            .await
+            .expect("replayed resolution");
+        drop(operation);
+        assert_eq!(replayed, resolved);
+    }
+
+    #[tokio::test]
+    async fn multimodal_chat_uses_original_images_without_vision_prompt() {
+        let mut config = MomoConfig::default();
+        config.vision.enabled = true;
+        config.vision.prompt = "This fallback prompt must not be used.".to_owned();
+        let service = MomoApiService::new(
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+            Arc::new(config),
+        )
+        .with_vision_adapter(Arc::new(UnexpectedVisionAdapter));
+        let request: MomoResponseRequest = serde_json::from_value(json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What do you think?"},
+                    {"type": "input_image", "image_url": "https://example.test/image.png", "detail": "high"}
+                ]
+            }]
+        }))
+        .expect("request");
+        let governed = service
+            .config
+            .govern(
+                8_192,
+                1_024,
+                RequestedOverrides {
+                    context_window: None,
+                    max_output_tokens: None,
+                    temperature: None,
+                    instructions: None,
+                    visual_description_prompt: Some("Also unused."),
+                    parameters: &serde_json::Map::new(),
+                    tool_configuration_requested: false,
+                },
+            )
+            .expect("governance");
+        let operation = service.enter_operation("request-direct-vision-1");
+        let resolved = service
+            .resolve_response_input(&request, "request-direct-vision-1", None, &governed, true)
+            .await
+            .expect("direct multimodal input");
+        drop(operation);
+        assert_eq!(
+            resolved.image_handling,
+            ImageInputHandling::DirectMultimodal
+        );
+        assert_eq!(resolved.text, "What do you think?\n[Image input: 1]");
+        assert_eq!(resolved.vision_usage, ChatUsage::default());
+        let messages = request.input.gateway_messages().expect("gateway messages");
+        assert!(matches!(
+            messages[0].content,
+            Some(crate::GatewayMessageContent::Parts(ref parts))
+                if parts.iter().any(|part| matches!(part, crate::GatewayContentPart::ImageUrl { .. }))
+        ));
     }
 }

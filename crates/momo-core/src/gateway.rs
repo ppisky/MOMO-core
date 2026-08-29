@@ -55,11 +55,58 @@ pub enum GatewayMessageRole {
 pub struct GatewayMessage {
     pub role: GatewayMessageRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<GatewayMessageContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ChatToolCall>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum GatewayMessageContent {
+    Text(String),
+    Parts(Vec<GatewayContentPart>),
+}
+
+impl GatewayMessageContent {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Text(text) => text.is_empty(),
+            Self::Parts(parts) => parts.is_empty(),
+        }
+    }
+
+    const fn is_text(&self) -> bool {
+        matches!(self, Self::Text(_))
+    }
+}
+
+impl From<String> for GatewayMessageContent {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for GatewayMessageContent {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_owned())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GatewayContentPart {
+    Text { text: String },
+    ImageUrl { image_url: GatewayImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayImageUrl {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl From<&ChatInput> for GatewayMessage {
@@ -71,7 +118,7 @@ impl From<&ChatInput> for GatewayMessage {
         };
         Self {
             role,
-            content: Some(message.content.clone()),
+            content: Some(message.content.clone().into()),
             tool_call_id: None,
             tool_calls: Vec::new(),
         }
@@ -216,6 +263,11 @@ impl OpenAiGateway {
         Ok(Self {
             client: Client::builder().timeout(timeout).build()?,
         })
+    }
+
+    #[must_use]
+    pub const fn from_client(client: Client) -> Self {
+        Self { client }
     }
 
     pub async fn complete(
@@ -436,20 +488,49 @@ fn validate_gateway_messages(messages: &[GatewayMessage]) -> Result<(), GatewayE
     for message in messages {
         let has_content = message
             .content
-            .as_deref()
+            .as_ref()
             .is_some_and(|value| !value.is_empty());
         match message.role {
-            GatewayMessageRole::System | GatewayMessageRole::User => {
-                if !has_content || message.tool_call_id.is_some() || !message.tool_calls.is_empty()
+            GatewayMessageRole::System => {
+                if !has_content
+                    || message
+                        .content
+                        .as_ref()
+                        .is_some_and(|content| !content.is_text())
+                    || message.tool_call_id.is_some()
+                    || !message.tool_calls.is_empty()
                 {
                     return Err(GatewayError::InvalidMessage(
-                        "system and user messages require content and cannot carry tool fields"
+                        "system messages require text content and cannot carry tool fields"
                             .to_owned(),
                     ));
                 }
             }
+            GatewayMessageRole::User => {
+                if !has_content || message.tool_call_id.is_some() || !message.tool_calls.is_empty()
+                {
+                    return Err(GatewayError::InvalidMessage(
+                        "user messages require content and cannot carry tool fields".to_owned(),
+                    ));
+                }
+                if let Some(GatewayMessageContent::Parts(parts)) = &message.content
+                    && parts.iter().any(|part| match part {
+                        GatewayContentPart::Text { text } => text.is_empty(),
+                        GatewayContentPart::ImageUrl { image_url } => image_url.url.is_empty(),
+                    })
+                {
+                    return Err(GatewayError::InvalidMessage(
+                        "user content parts must not be empty".to_owned(),
+                    ));
+                }
+            }
             GatewayMessageRole::Assistant => {
-                if (!has_content && message.tool_calls.is_empty()) || message.tool_call_id.is_some()
+                if (!has_content && message.tool_calls.is_empty())
+                    || message
+                        .content
+                        .as_ref()
+                        .is_some_and(|content| !content.is_text())
+                    || message.tool_call_id.is_some()
                 {
                     return Err(GatewayError::InvalidMessage(
                         "assistant messages require content or tool_calls".to_owned(),
@@ -470,6 +551,10 @@ fn validate_gateway_messages(messages: &[GatewayMessage]) -> Result<(), GatewayE
             }
             GatewayMessageRole::Tool => {
                 if !has_content
+                    || message
+                        .content
+                        .as_ref()
+                        .is_some_and(|content| !content.is_text())
                     || message
                         .tool_call_id
                         .as_deref()
@@ -724,7 +809,7 @@ mod tests {
             },
             &[GatewayMessage {
                 role: GatewayMessageRole::User,
-                content: Some("hello".to_owned()),
+                content: Some("hello".into()),
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
@@ -751,6 +836,52 @@ mod tests {
         assert_eq!(request["stop"], serde_json::json!(["END"]));
         assert_eq!(request["messages"][0]["content"], "hello");
         assert_eq!(request["stream"], false);
+    }
+
+    #[test]
+    fn serializes_openai_multimodal_user_content_without_changing_text_messages() {
+        let request = completion_request(
+            &ProviderEndpoint {
+                base_url: "https://example.com/v1".to_owned(),
+                api_key: None,
+                model: "vision".to_owned(),
+            },
+            &[
+                GatewayMessage {
+                    role: GatewayMessageRole::System,
+                    content: Some("Describe visible facts.".into()),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                },
+                GatewayMessage {
+                    role: GatewayMessageRole::User,
+                    content: Some(GatewayMessageContent::Parts(vec![
+                        GatewayContentPart::Text {
+                            text: "Describe this image.".to_owned(),
+                        },
+                        GatewayContentPart::ImageUrl {
+                            image_url: GatewayImageUrl {
+                                url: "https://example.test/image.png".to_owned(),
+                                detail: Some("high".to_owned()),
+                            },
+                        },
+                    ])),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                },
+            ],
+            &ChatParameters::default(),
+            false,
+        );
+        assert_eq!(request["messages"][0]["content"], "Describe visible facts.");
+        assert_eq!(request["messages"][1]["content"][0]["type"], "text");
+        assert_eq!(
+            request["messages"][1]["content"][1]["image_url"]["url"],
+            "https://example.test/image.png"
+        );
+        let messages: Vec<GatewayMessage> =
+            serde_json::from_value(request["messages"].clone()).expect("messages");
+        validate_gateway_messages(&messages).expect("multimodal user message");
     }
 
     #[test]
@@ -838,7 +969,7 @@ mod tests {
 
     #[test]
     fn parses_cross_repository_chat_stream_fixture() {
-        let fixture = include_str!("../../../contracts/0.5/chat_stream.sse");
+        let fixture = include_str!("../../../contracts/1.0/chat_stream.sse");
         let mut decoder = SseDecoder::new();
         let mut events = Vec::new();
         for byte in fixture.as_bytes() {

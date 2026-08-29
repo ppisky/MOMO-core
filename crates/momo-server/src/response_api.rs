@@ -21,6 +21,7 @@ use momo_core::{
     MomoApiError, MomoApiErrorKind, MomoResponse, MomoResponseRequest, ResponseOutputItem,
     api::simple,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -30,6 +31,12 @@ use super::{
 };
 
 const RESPONSE_STREAM_BUFFER: usize = 64;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CancelResponseRequest {
+    scope_id: String,
+}
 
 pub(super) async fn create_response(
     State(state): State<AppState>,
@@ -44,7 +51,7 @@ pub(super) async fn create_response(
         };
         ApiError::new(status, code, rejection.body_text(), false)
     })?;
-    let input = request
+    request
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let request_id = request
@@ -74,7 +81,6 @@ pub(super) async fn create_response(
                     state,
                     request,
                     request_id.clone(),
-                    input,
                     Some(stream.clone()),
                 )
                 .await
@@ -94,7 +100,7 @@ pub(super) async fn create_response(
             .keep_alive(KeepAlive::default())
             .into_response());
     }
-    let response = execute_response_bounded(state, request, request_id, input, None).await?;
+    let response = execute_response_bounded(state, request, request_id, None).await?;
     Ok(Json(response).into_response())
 }
 
@@ -156,11 +162,15 @@ async fn execute_response_bounded(
     state: AppState,
     request: MomoResponseRequest,
     request_id: String,
-    input: String,
     stream: Option<ResponseStream>,
 ) -> Result<MomoResponse, ApiError> {
     let started = std::time::Instant::now();
     let route = request.model.clone();
+    let scope_id = request
+        .momo
+        .scope_id
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("scope_id is required"))?;
     let permit = Arc::clone(&state.response_concurrency)
         .try_acquire_owned()
         .map_err(|_| {
@@ -174,13 +184,13 @@ async fn execute_response_bounded(
     .await;
     let result = match tokio::time::timeout(
         state.response_timeout,
-        execute_response(state.clone(), request, request_id.clone(), input, stream),
+        execute_response(state.clone(), request, request_id.clone(), stream),
     )
     .await
     {
         Ok(result) => result,
         Err(_) => {
-            let _ = state.momo_api.cancel(&request_id);
+            let _ = state.momo_api.cancel(&scope_id, &request_id);
             Err(ApiError::gateway_timeout(
                 "response orchestration timed out",
             ))
@@ -218,7 +228,6 @@ async fn execute_response(
     state: AppState,
     request: MomoResponseRequest,
     request_id: String,
-    input: String,
     stream: Option<ResponseStream>,
 ) -> Result<MomoResponse, ApiError> {
     state
@@ -226,7 +235,6 @@ async fn execute_response(
         .execute(
             &request,
             &request_id,
-            &input,
             stream
                 .as_ref()
                 .map(|value| value as &dyn momo_core::MomoResponseEventSink),
@@ -280,10 +288,14 @@ fn parse_upstream_status(message: &str) -> Option<u16> {
 pub(super) async fn cancel_response(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
-) -> Json<Value> {
-    let cancelled = state.momo_api.cancel(&request_id);
-    Json(json!({
+    Json(request): Json<CancelResponseRequest>,
+) -> Result<Json<Value>, ApiError> {
+    uuid::Uuid::parse_str(&request.scope_id)
+        .map_err(|_| ApiError::bad_request("scope_id must be a UUID"))?;
+    let cancelled = state.momo_api.cancel(&request.scope_id, &request_id);
+    Ok(Json(json!({
         "request_id": request_id,
+        "scope_id": request.scope_id,
         "cancelled": cancelled,
-    }))
+    })))
 }

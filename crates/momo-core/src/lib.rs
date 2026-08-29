@@ -11,6 +11,7 @@ mod lsb;
 mod orchestration;
 mod portable;
 mod response;
+mod vision;
 
 use std::path::{Path, PathBuf};
 
@@ -39,13 +40,14 @@ pub use embedding::{
 };
 pub use gateway::{
     ChatCompletion, ChatFunctionCall, ChatInput, ChatParameters, ChatStreamDelta,
-    ChatStreamFunctionCallDelta, ChatStreamToolCallDelta, ChatToolCall, ChatUsage, GatewayError,
-    GatewayMessage, GatewayMessageRole, OpenAiGateway, ProviderEndpoint, SseDecoder,
+    ChatStreamFunctionCallDelta, ChatStreamToolCallDelta, ChatToolCall, ChatUsage,
+    GatewayContentPart, GatewayError, GatewayImageUrl, GatewayMessage, GatewayMessageContent,
+    GatewayMessageRole, OpenAiGateway, ProviderEndpoint, SseDecoder,
 };
 pub use governance::{
-    GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION, MomoConfig, MomoRuntimeConfig,
-    OverrideMode, RequestOverridePolicy, RequestedOverrides, VisionDescriptionConfig,
-    validate_momo_document,
+    GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION, MaintenancePromptConfig,
+    MomoConfig, MomoRuntimeConfig, OverrideMode, RequestOverridePolicy, RequestedOverrides,
+    VisionDescriptionConfig, validate_momo_document,
 };
 pub use lsb::{
     LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,
@@ -65,19 +67,25 @@ pub use orchestration::{
     MaintenanceKind, MomoApiError, MomoApiErrorKind, MomoApiService, MomoResponseEventSink,
 };
 pub use portable::{
-    ConflictMode, ImportReport, MocCompatibility, MocExportPlan, MocModule, MocProtection,
-    PortableError, export_moc, export_momo_config, export_private_moc, import_moc,
-    import_moc_with_passphrase, import_momo_config, moc_is_encrypted,
+    ConflictMode, HostMocModule, ImportReport, MocCompatibility, MocExportPlan, MocModule,
+    MocProtection, PortableError, UnknownMocModule, export_moc, export_moc_with_host_modules,
+    export_momo_config, export_private_moc, export_private_moc_with_host_modules, import_moc,
+    import_moc_claiming_unknown_modules, import_moc_with_passphrase,
+    import_moc_with_passphrase_and_claims, import_momo_config, moc_is_encrypted,
 };
 pub use response::{
     MAX_GATEWAY_HOPS, MAX_RESPONSE_ID_BYTES, MAX_RESPONSE_IMAGE_REFERENCE_BYTES,
-    MAX_RESPONSE_INPUT_BYTES, MAX_RESPONSE_INSTRUCTIONS_BYTES, MAX_RESPONSE_REQUEST_BYTES,
-    MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES, MAX_RESPONSE_TOOL_ARGUMENT_BYTES,
-    MAX_RESPONSE_TOOL_OUTPUT_BYTES, MAX_RESPONSE_TOOL_SCHEMA_BYTES, MAX_RESPONSE_TOOLS,
-    MOMO_RESPONSE_SCHEMA, MomoResponse, MomoResponseExtension, MomoResponseMetadata,
-    MomoResponseRequest, ResponseContentBlock, ResponseContractError, ResponseError, ResponseInput,
-    ResponseInputItem, ResponseMessageContent, ResponseOutputContent, ResponseOutputItem,
-    ResponseTool, ResponseUsage,
+    MAX_RESPONSE_IMAGES, MAX_RESPONSE_INPUT_BYTES, MAX_RESPONSE_INSTRUCTIONS_BYTES,
+    MAX_RESPONSE_REQUEST_BYTES, MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES,
+    MAX_RESPONSE_TOOL_ARGUMENT_BYTES, MAX_RESPONSE_TOOL_OUTPUT_BYTES,
+    MAX_RESPONSE_TOOL_SCHEMA_BYTES, MAX_RESPONSE_TOOLS, MOMO_RESPONSE_SCHEMA, MomoResponse,
+    MomoResponseExtension, MomoResponseMetadata, MomoResponseRequest, ResponseContentBlock,
+    ResponseContractError, ResponseError, ResponseImageInput, ResponseInput, ResponseInputItem,
+    ResponseMessageContent, ResponseOutputContent, ResponseOutputItem, ResponseTool, ResponseUsage,
+};
+pub use vision::{
+    DEFAULT_VISION_ROUTE, GatewayVisionAdapter, MAX_VISUAL_DESCRIPTION_BYTES,
+    VisionDescriptionAdapter, VisionDescriptionBatch, VisionDescriptionRequest, VisionError,
 };
 
 #[derive(Debug, Error)]

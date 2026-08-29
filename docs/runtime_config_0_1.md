@@ -1,47 +1,93 @@
-# MOMO Runtime Configuration 0.2
+# MOMO portable runtime configuration v1
 
-**状态：** Experimental Implementation Profile  
-**更新日期：** 2026-08-10
+**Status:** implemented portable contract
+**Updated:** 2026-08-29
 
-本文记录当前 Rust Core 能够导入、导出并实际应用的 TOML 字段。它不是稳定的 v1 配置标准；未知字段会被保留，以便后续演进。
-
-## 配置边界
-
-运行配置分为两个可独立选择的逻辑模块：
-
-- 模型配置：`active_model_profile` 与 `[[models]]`，支持多个模型配置；
-- 系统配置：当前为 `[context]`。服务连接属于运行环境内部信息，不进入可移植配置。
-
-用户可以只导出模型配置、只导出系统配置，或将两者合并到同一个 TOML/MOC 中。只选择一个模块时，另一个已知模块不会被基线配置重新带入；未知扩展字段仍尽可能往返保留。
+This document describes the fields that MOMO Core currently reads from and
+writes to `momo.toml`. Host-local provider wiring belongs in the adapter host's
+`config.toml`; API keys, provider URLs, listener addresses, executable paths,
+and account identifiers must never enter this portable document.
 
 ```toml
-schema_version = 2
-active_model_profile = "019c0000-0000-7000-8000-000000000001"
+schema_version = 1
 
-[[models]]
-profile_id = "019c0000-0000-7000-8000-000000000001"
-name = "日常对话"
-base_url = "https://provider.example/v1"
-id = "model-id"
-temperature = 0.7
-top_p = 0.9
-max_tokens = 1024
-context_window = 8192
-stream = true
+[runtime]
+memory_distillation_enabled = true
+memory_distill_every_turns = 12
+semantic_graph_enabled = true
+nsg_govern_every_turns = 12
 
-[context]
-window = 8192
+[request_overrides]
+context_window = "ignore"
+max_output_tokens = "allow"
+sampling = "ignore"
+instructions = "allow"
+visual_description_prompt = "ignore"
+tools = "allow"
+allowed_parameters = []
+
+[vision]
+enabled = false
+prompt = "Describe only visible facts that are relevant to the conversation. Do not infer identity, intent, private attributes, or text that is not legible."
+
+[prompts]
+memory_distillation = "You are the MOMO DMW memory distiller. Output YAML only with root key patches. Store only explicit durable facts useful in future conversations. Never store guesses, questions, greetings, transient mood, secrets, or a general transcript summary. Supported operations are create, append, replace, and update_frontmatter. Use safe relative .md targets. If nothing qualifies, output exactly: patches: []"
+semantic_graph_governance = "You are the MOMO NSG governor. Output YAML only with root key patches. Create only durable narrative rules, lore, causal relations, or constraints. Automatic create_node operations must use mode draft, status active, and zone auto. Never directly modify Canon; use revision_candidate with evidence. If nothing qualifies, output exactly: patches: []"
 ```
 
-`profile_id` 是客户端生成的 UUIDv7。内置配置固定显示为“Grok 4.5”，实际请求模型 ID 固定为 `grok-4.5`。界面只向用户说明“当前使用 Grok 4.5 模型”，不展示上游服务商或部署地址；`active_model_profile` 指向当前用于新一轮模型调用的配置。第三方 API Key 可以随自定义模型保存，但只进入本机操作系统安全凭据库，不会进入可移植 TOML 或 MOC；导入同一 `profile_id` 时，本机已有 API Key 会保留。
+## Request governance
 
-## 兼容与行为
+Each override uses one explicit mode:
 
-- 导入要求扩展名为 `.toml`、UTF-8 文本且语法有效；
-- 本 Profile 只定义 schema v2；旧 schema 的转换属于外部工具，不属于 Rust Core 主线；
-- 缺少某个逻辑模块表示“不修改该模块”，而不是重置；
-- 已知字段导入后立即应用；未知字段保存在本地基线文档，后续导出时继续保留；
-- 任意层级出现 `api_key`、`*_api_key`、`password`、`secret`、`access_token` 或 `refresh_token` 时拒绝导入或导出；
-- 导入模型配置不会清除或替换当前已安全保存的 API Key。
+- `allow`: apply the request value after type, range, and capability checks;
+- `ignore`: retain the configured or discovered value and record the ignored
+  field in `momo.request_audit`;
+- `reject`: reject the whole request when that field is supplied.
 
-记忆提示词、记忆提炼模型、能力配置和上下文压缩尚未在当前 Rust Core 中形成稳定可移植配置契约。当前 Profile 已允许在 `[memory_system]` 中保存非凭据的 `distill_model_profile_id` 与 `distill_prompt`，但客户端不得把该扩展描述为完整配置标准。
+Provider parameters are rejected unless their names occur in
+`allowed_parameters`. Protocol-owned fields such as `model`, `messages`,
+`stream`, `max_tokens`, and `temperature` cannot be placed in that allow-list.
+
+## Vision
+
+`vision.enabled = true` permits image-bearing native response requests. Core
+first checks the `conversation` route's discovered modalities. If that route
+advertises `image`, Core preserves the original image content blocks in the
+final roleplay request; it does not call the visual-description adapter or use
+the vision prompt. If the conversation route is text-only, Core uses the
+governed prompt with the host-local logical route `vision` and converts each
+image to bounded text before retrieval and context assembly. Resolved handling
+mode, fallback usage, and upstream request IDs are stored with the response
+operation so an idempotent retry does not describe the same image again.
+
+An enabled portable switch does not configure a provider or credential. The
+adapter host must separately wire the `vision` route. A missing route or a route
+that advertises only text is an explicit model-adapter error only when the
+conversation route itself is text-only. The prompt is fallback policy, not an
+extra instruction for a multimodal conversation model.
+
+## Maintenance prompts
+
+`prompts.memory_distillation` and `prompts.semantic_graph_governance` are the
+system instructions for Core-owned background maintenance. They used to be
+embedded literals. In 1.0 both fields are mandatory in every `momo.toml`, so the
+portable configuration records the exact policy that produces DMW patches and
+NSG draft/revision candidates. Core does not silently inject these fields while
+parsing an older document. An embedding host may still deliberately construct
+`MomoConfig::default()` through the Rust API. Each prompt must contain 1 to
+65,536 bytes.
+
+## Compatibility
+
+- Core accepts schema version 1 only.
+- Unknown product sections are preserved by portable import/export, but Core
+  does not claim to execute fields it does not own.
+- Runtime maintenance intervals must be between 1 and 200 turns.
+- The vision prompt must contain 1 to 65,536 bytes.
+- The `[prompts]` section and both maintenance prompts are required.
+- Each maintenance prompt must contain 1 to 65,536 bytes.
+- Secret-shaped fields and host-only top-level sections are rejected.
+
+The former schema-v2 document that described `active_model_profile`, embedded
+provider URLs, and `[[models]]` was an obsolete pre-0.5 design and is not a
+supported migration source.

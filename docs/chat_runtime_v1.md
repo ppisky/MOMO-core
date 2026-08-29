@@ -1,90 +1,65 @@
-# MOMO Chat Runtime v1
+# MOMO native response runtime
 
-**状态：** Implementation Baseline  
-**更新日期：** 2026-08-10
+**Status:** 1.0 local release candidate; not published
+**Updated:** 2026-08-29
 
-本文记录当前聊天运行时的确定性行为，避免客户端与 Rust Core 分别猜测上下文、
-取消和本地持久化语义。
+The production conversation entry point is the native `MomoApi` operation,
+exposed by `momo-server` as `POST /v1/momo/responses`. The older low-level
+`chat_complete_json` event protocol is an internal outbound adapter boundary,
+not the client-facing runtime contract.
 
-## 1. 请求路径
-
-```text
-用户输入
-  → Rust Core 生成消息 UUIDv7
-  → SQLite message 本地写入
-  → Rust Core 编排角色与历史上下文
-  → OpenAI 兼容模型端点
-  → 客户端桥接流事件
-  → 客户端增量渲染
-```
-
-消息数据只以本地 SQLite 和 `.moc` 导入导出为主线。模型端点不可用时，
-本地历史不会丢失；不存在后台 outbox、账号同步或服务端重试队列。
-
-0.3.1 的 JSON facade 使用结构化请求对象，不再把 endpoint、messages、预算等拆成
-大量位置参数。`chat_complete_json` 接收一个 JSON 文档；流式请求在相同结构上增加
-`request_id`。上下文准备同样通过一个对象传递 sections、messages 和预算：
-
-```json
-{
-  "character_markdown": "...",
-  "user_markdown": "...",
-  "memory_markdown": "...",
-  "state_context": "...",
-  "nsg_markdown": "...",
-  "messages": [],
-  "context_window": 8192,
-  "reserve_output_tokens": 1024
-}
-```
-
-## 2. 上下文顺序与预算
-
-请求消息顺序固定为：
-
-1. 已归一化的 MOMO 独立角色卡字段 `character_markdown` 与 `user_markdown`；外部
-   CCv2/CCv3 转换不属于聊天运行时；
-2. 以最新用户消息检索到的 DMW 记忆和一跳关联；
-3. 在预算内保留的最近历史消息。
-
-记忆检索拥有独立上限，当前为上下文窗口的八分之一，并限制在 256–2048 Token。没有命中或记忆文件暂时不可读时，聊天继续执行，不允许让补充记忆成为模型请求的单点故障。
-
-输入预算为：
+## Operation sequence
 
 ```text
-context_window - reserve_output_tokens - 128 safety margin
+validate request and request ID
+  -> validate personal, conversation, and character-catalogue scopes
+  -> replay a completed operation or lock a new attempt within the personal scope
+  -> govern request overrides
+  -> pass original images to a multimodal conversation route, or optionally
+     describe them through logical route `vision` for a text-only model
+  -> atomically persist the resolved user input
+  -> retrieve DMW/NSG and compile MO State
+  -> assemble a bounded context
+  -> call the logical conversation route
+  -> persist the assistant result and maintenance turn
+  -> store the completed response for idempotent replay
 ```
 
-已知模型可以通过 capability profile 选择精确 tokenizer；未知模型使用供应商无关的保守估算：ASCII 约四字符一个 Token，非 ASCII 字符按一个 Token 计，并为每条消息增加固定结构开销。保守估算只用于避免明显溢出，不代表供应商计费 Token。超出预算时从最早消息开始省略，客户端必须显示省略数量。
+Image references are never silently dropped. When image input is present,
+`vision.enabled` must be true. If the conversation route advertises `image`,
+Core sends the original image blocks directly and does not use the fallback
+prompt. Otherwise, the gateway's optional `vision` route must advertise the
+`image` modality and Core persists bounded visual descriptions rather than raw
+image bytes. A pending operation stores its resolved input and vision usage, so
+a crash/retry does not repeat visual inference.
 
-## 3. 流事件
+## Context and budget
 
-Rust Core 的普通 Rust 适配 API 向调用方输出 UTF-8 JSON 字符串。GUI、CLI、TUI、
-本地应用、服务端接口或自动化脚本都可以通过自己的适配层消费这些事件：
+Core keeps character instructions, user context, DMW memory, MO State, NSG,
+and conversation messages as separate sections until final assembly. The
+effective context window and output reserve come from capability discovery and
+portable request governance. If optional embedding, retrieval, or MO State
+work fails, the response continues with a warning; failure of the selected
+conversation or vision model route fails the operation.
 
-```json
-{
-  "type": "delta",
-  "request_id": "UUIDv7",
-  "sequence": 1,
-  "delta": "增量文本",
-  "finish_reason": null
-}
-```
+## Streaming
 
-终止事件为 `done` 或 `cancelled`。同一请求的 `sequence` 单调递增。SSE 解码不得假设 TCP 分块与 UTF-8 字符或 SSE 事件边界一致。
+The HTTP transport uses bounded SSE with `response.*` lifecycle events,
+including `response.created`, output-item/content deltas, terminal
+`response.completed`, and `response.failed`. The server-side channel is bounded
+to 64 events, individual events and the total stream have explicit byte limits,
+and UTF-8/SSE decoding does not assume network chunk boundaries.
 
-用户停止生成时，客户端以 `request_id` 调用取消接口。Rust Core 停止继续消费并发送 `cancelled`；不完整助手文本只用于临时显示，不写入正式消息表。
+Cancellation is addressed by request ID. Completed responses replay from local
+storage; both operations are namespaced by the request's personal `scope_id`.
+Reusing a request ID with a different normalized request inside that scope
+returns a conflict. A conversation ID is accepted only when it belongs to the
+explicit `conversation_scope_id`, and its messages are read through the same
+scoped lookup. Partial assistant text is not committed as a completed assistant
+message. See [`identity_scope_1_0.md`](identity_scope_1_0.md) for the complete
+identity boundary.
 
-## 4. 消息幂等性
-
-客户端为消息生成 UUIDv7。同一 ID 重复写入时，只有会话、角色、创建时间等
-不可变字段完全一致才视为幂等；不可变字段不同必须返回本地冲突错误，避免一条
-消息被静默改写成另一条消息。允许编辑的部分是消息正文。
-
-删除是本地最近删除语义：角色、会话、消息删除后写入本地 tombstone 和恢复快照；
-恢复只恢复本地对象，不产生任何远端删除记录。
-
-当前流式代码在客户端取消、Rust 取消标记或客户端流接收失败时停止读取上游，
-但尚无长响应/慢消费者压力测试，不能证明桥接队列始终有界。应用重启后继续
-同一次生成可以作为增强项，但不属于当前 Rust Core 主线。
+The exact historical fixtures remain under `contracts/0.5`. The frozen 1.0
+fixtures, including multimodal input, live under `contracts/1.0`; publishing
+still waits for the credentialed provider smoke test. See
+[`roadmap_1_0_0.md`](roadmap_1_0_0.md).

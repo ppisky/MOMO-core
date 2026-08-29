@@ -49,6 +49,7 @@ pub struct ResponseOperation {
     pub request_fingerprint: String,
     pub conversation_id: String,
     pub user_written: bool,
+    pub resolved_input_json: Option<String>,
     pub response_json: Option<String>,
 }
 

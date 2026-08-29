@@ -21,6 +21,9 @@ jobs:
       - name: Verify 0.5 contract fixtures
         working-directory: contracts/0.5
         run: sha256sum --check SHA256SUMS
+      - name: Verify 1.0 contract fixtures
+        working-directory: contracts/1.0
+        run: sha256sum --check SHA256SUMS
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace

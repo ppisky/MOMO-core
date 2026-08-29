@@ -29,7 +29,12 @@ async fn migrated_schema_uses_scope_id_exclusively() {
 async fn response_operations_survive_reopen_semantics() {
     let store = LocalStore::in_memory().await.expect("store");
     store
-        .begin_response_operation("request-1", "fingerprint-1", "conversation-1")
+        .begin_response_operation(
+            "request-1",
+            "fingerprint-1",
+            "conversation-1",
+            r#"{"text":"hello"}"#,
+        )
         .await
         .expect("begin response");
     let pending = store
@@ -38,6 +43,10 @@ async fn response_operations_survive_reopen_semantics() {
         .expect("read pending")
         .expect("pending operation");
     assert!(!pending.user_written);
+    assert_eq!(
+        pending.resolved_input_json.as_deref(),
+        Some(r#"{"text":"hello"}"#)
+    );
     assert!(pending.response_json.is_none());
 
     store
@@ -60,7 +69,12 @@ async fn response_operations_survive_reopen_semantics() {
     );
 
     store
-        .begin_response_operation("request-1", "different", "different")
+        .begin_response_operation(
+            "request-1",
+            "different",
+            "different",
+            r#"{"text":"different"}"#,
+        )
         .await
         .expect("duplicate begin is idempotent");
     let unchanged = store
@@ -94,6 +108,7 @@ async fn response_user_message_and_phase_marker_commit_atomically() {
             "request-atomic",
             "fingerprint-atomic",
             &conversation_id.to_string(),
+            r#"{"text":"only once"}"#,
         )
         .await
         .expect("operation");
@@ -106,7 +121,7 @@ async fn response_user_message_and_phase_marker_commit_atomically() {
     };
     assert!(
         store
-            .append_response_user_message("request-atomic", &first)
+            .append_response_user_message("request-atomic", scope_id, &first)
             .await
             .expect("first append")
     );
@@ -116,7 +131,7 @@ async fn response_user_message_and_phase_marker_commit_atomically() {
     };
     assert!(
         !store
-            .append_response_user_message("request-atomic", &retry)
+            .append_response_user_message("request-atomic", scope_id, &retry)
             .await
             .expect("idempotent retry")
     );

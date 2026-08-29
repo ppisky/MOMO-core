@@ -30,14 +30,14 @@ use tower_http::trace::TraceLayer;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8765";
 const DEFAULT_DATA_DIR: &str = ".momo-data";
-const DEFAULT_SCOPE_ID: &str = "00000000-0000-4000-8000-000000000001";
+#[cfg(test)]
+const TEST_SCOPE_ID: &str = "01900000-0000-7000-8000-000000000101";
 const ALLOW_REMOTE_ENV: &str = "MOMO_SERVER_ALLOW_REMOTE";
 const MAX_PUBLIC_ERROR_BYTES: usize = 2 * 1024;
 
 #[derive(Clone)]
 struct AppState {
     data_dir: String,
-    scope_id: String,
     momo_api: Arc<MomoApiService>,
     response_concurrency: Arc<Semaphore>,
     response_timeout: std::time::Duration,
@@ -67,12 +67,15 @@ struct HealthResponse {
 
 #[derive(Deserialize)]
 struct CreateConversationRequest {
+    scope_id: String,
+    character_scope_id: String,
     title: String,
-    character_id: Option<String>,
+    character_id: String,
 }
 
 #[derive(Deserialize)]
 struct CreateMessageRequest {
+    scope_id: String,
     conversation_id: String,
     role: String,
     content: String,
@@ -80,6 +83,7 @@ struct CreateMessageRequest {
 
 #[derive(Deserialize)]
 struct CreateCharacterRequest {
+    scope_id: String,
     name: String,
     #[serde(default)]
     author_name: String,
@@ -93,6 +97,7 @@ struct CreateCharacterRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportExternalCharacterRequest {
+    scope_id: String,
     input_path: String,
     format: momo_core::ExternalCharacterImportFormat,
 }
@@ -100,6 +105,7 @@ struct ImportExternalCharacterRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExportExternalCharacterRequest {
+    scope_id: String,
     output_path: String,
     format: momo_core::ExternalCharacterExportFormat,
 }
@@ -107,6 +113,7 @@ struct ExportExternalCharacterRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExportPreservedCharacterSourceRequest {
+    scope_id: String,
     output_path: String,
 }
 
@@ -176,6 +183,7 @@ struct PrepareContextRequest {
 
 #[derive(Deserialize)]
 struct UpdateMemoryDocumentRequest {
+    scope_id: String,
     markdown: String,
 }
 
@@ -188,6 +196,7 @@ struct ApplyMemoryPatchRequest {
 
 #[derive(Deserialize)]
 struct SubmitMemoryPatchReviewRequest {
+    scope_id: String,
     conversation_id: String,
     patch_yaml: String,
     review_mode: String,
@@ -195,11 +204,13 @@ struct SubmitMemoryPatchReviewRequest {
 
 #[derive(Deserialize)]
 struct IncludeResolvedQuery {
+    scope_id: String,
     include_resolved: Option<bool>,
 }
 
 #[derive(Deserialize)]
 struct WriteNsgNodeRequest {
+    scope_id: String,
     target_file: String,
     node: Value,
 }
@@ -221,6 +232,7 @@ struct ScopeRequest {
 
 #[derive(Deserialize)]
 struct NsgTargetRequest {
+    scope_id: String,
     target_file: String,
 }
 
@@ -233,6 +245,7 @@ struct ScopedNsgTargetRequest {
 
 #[derive(Deserialize)]
 struct NsgVectorStatusQuery {
+    scope_id: String,
     vector_space_id: Option<String>,
 }
 
@@ -253,6 +266,7 @@ struct MomoConfigImportRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MocExportRequest {
+    scope_id: String,
     output_path: String,
     #[serde(default)]
     settings: Value,
@@ -263,16 +277,20 @@ struct MocExportRequest {
     character_id: Option<uuid::Uuid>,
     #[serde(default)]
     protection: momo_core::MocProtection,
+    #[serde(default)]
+    host_modules: Vec<momo_core::HostMocModule>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MocImportRequest {
+    scope_id: String,
     input_path: String,
     #[serde(default = "default_conflict_mode")]
     conflict_mode: momo_core::ConflictMode,
     #[serde(default)]
     protection: momo_core::MocProtection,
+    claim_unknown_to: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -298,7 +316,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = bind.parse()?;
     ensure_bind_allowed(addr, env_flag(ALLOW_REMOTE_ENV))?;
     let data_dir = env::var("MOMO_DATA_DIR").unwrap_or_else(|_| DEFAULT_DATA_DIR.to_owned());
-    let scope_id = env::var("MOMO_SCOPE_ID").unwrap_or_else(|_| DEFAULT_SCOPE_ID.to_owned());
     let initialized_dir = simple::initialize_core(data_dir)
         .await
         .map_err(to_io_error)?;
@@ -323,7 +340,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
     let momo_api = Arc::new(MomoApiService::new(
-        scope_id.clone(),
         gateway_origin.clone(),
         gateway_api_key.clone(),
         gateway_client.clone(),
@@ -331,7 +347,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let state = AppState {
         data_dir: initialized_dir,
-        scope_id,
         momo_api,
         response_concurrency: Arc::new(Semaphore::new(env_usize(
             "MOMO_RESPONSE_MAX_CONCURRENCY",
@@ -519,7 +534,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 async fn metrics(State(state): State<AppState>) -> Json<Value> {
     let routes = state.metrics.lock().await.clone();
     Json(json!({
-        "schema": "momo.metrics/0.5",
+        "schema": "momo.metrics/1.0",
         "routes": routes,
     }))
 }
@@ -533,17 +548,17 @@ async fn update_route_metrics(
     update(metrics.entry(route.to_owned()).or_default());
 }
 
-async fn list_characters(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::local_characters_json(state.scope_id).await)
+async fn list_characters(Query(query): Query<ScopeRequest>) -> Result<Json<Value>, ApiError> {
+    json_result(simple::local_characters_json(validate_scope_id(query.scope_id)?).await)
 }
 
 async fn create_character(
-    State(state): State<AppState>,
     Json(request): Json<CreateCharacterRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let scope_id = validate_scope_id(request.scope_id)?;
     json_result(
         simple::stage_character_json(
-            state.scope_id,
+            scope_id,
             request.author_name,
             request.name,
             request.description,
@@ -555,13 +570,13 @@ async fn create_character(
 }
 
 async fn import_external_character(
-    State(state): State<AppState>,
     Json(request): Json<ImportExternalCharacterRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let scope_id = validate_scope_id(request.scope_id)?;
     json_result(
         simple::import_external_character_json(
             json!({
-                "scope_id": state.scope_id,
+                "scope_id": scope_id,
                 "input_path": request.input_path,
                 "format": request.format,
             })
@@ -572,14 +587,14 @@ async fn import_external_character(
 }
 
 async fn export_external_character(
-    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<ExportExternalCharacterRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(
+    let scope_id = validate_scope_id(request.scope_id)?;
+    scoped_json_result(
         simple::export_external_character_json(
             json!({
-                "scope_id": state.scope_id,
+                "scope_id": scope_id,
                 "character_id": id,
                 "output_path": request.output_path,
                 "format": request.format,
@@ -591,14 +606,14 @@ async fn export_external_character(
 }
 
 async fn export_preserved_character_source(
-    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<ExportPreservedCharacterSourceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(
+    let scope_id = validate_scope_id(request.scope_id)?;
+    scoped_json_result(
         simple::export_preserved_character_source_json(
             json!({
-                "scope_id": state.scope_id,
+                "scope_id": scope_id,
                 "character_id": id,
                 "output_path": request.output_path,
             })
@@ -613,27 +628,43 @@ async fn update_character(
     Json(character): Json<CharacterCard>,
 ) -> Result<Json<Value>, ApiError> {
     ensure_resource_id(&id, character.id)?;
-    json_result(simple::stage_character_update_json(to_json_string(&character)?).await)
+    scoped_json_result(
+        simple::stage_character_update_json(
+            character.scope_id.to_string(),
+            to_json_string(&character)?,
+        )
+        .await,
+    )
 }
 
-async fn delete_character(Path(id): Path<String>) -> Result<Json<OkResponse>, ApiError> {
-    simple::stage_character_delete(id)
+async fn delete_character(
+    Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
+) -> Result<Json<OkResponse>, ApiError> {
+    simple::stage_character_delete(validate_scope_id(query.scope_id)?, id)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(scoped_api_error)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
-async fn list_conversations(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::local_conversations_json(state.scope_id).await)
+async fn list_conversations(Query(query): Query<ScopeRequest>) -> Result<Json<Value>, ApiError> {
+    json_result(simple::local_conversations_json(validate_scope_id(query.scope_id)?).await)
 }
 
 async fn create_conversation(
-    State(state): State<AppState>,
     Json(request): Json<CreateConversationRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(
-        simple::stage_conversation_json(None, state.scope_id, request.title, request.character_id)
-            .await,
+    let scope_id = validate_scope_id(request.scope_id)?;
+    let character_scope_id = validate_scope_id(request.character_scope_id)?;
+    scoped_json_result(
+        simple::stage_conversation_json(
+            None,
+            scope_id,
+            character_scope_id,
+            request.title,
+            request.character_id,
+        )
+        .await,
     )
 }
 
@@ -642,40 +673,68 @@ async fn update_conversation(
     Json(conversation): Json<Conversation>,
 ) -> Result<Json<Value>, ApiError> {
     ensure_resource_id(&id, conversation.id)?;
-    json_result(simple::stage_conversation_update_json(to_json_string(&conversation)?).await)
+    scoped_json_result(
+        simple::stage_conversation_update_json(
+            conversation.scope_id.to_string(),
+            to_json_string(&conversation)?,
+        )
+        .await,
+    )
 }
 
-async fn delete_conversation(Path(id): Path<String>) -> Result<Json<OkResponse>, ApiError> {
-    simple::stage_conversation_delete(id)
+async fn delete_conversation(
+    Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
+) -> Result<Json<OkResponse>, ApiError> {
+    simple::stage_conversation_delete(validate_scope_id(query.scope_id)?, id)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(scoped_api_error)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
-async fn list_messages(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::local_messages_json(id).await)
+async fn list_messages(
+    Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
+) -> Result<Json<Value>, ApiError> {
+    scoped_json_result(simple::local_messages_json(validate_scope_id(query.scope_id)?, id).await)
 }
 
 async fn create_message(
     Json(request): Json<CreateMessageRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(
-        simple::stage_message_json(request.conversation_id, request.role, request.content).await,
+    scoped_json_result(
+        simple::stage_message_json(
+            validate_scope_id(request.scope_id)?,
+            request.conversation_id,
+            request.role,
+            request.content,
+        )
+        .await,
     )
 }
 
 async fn update_message(
     Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
     Json(message): Json<Message>,
 ) -> Result<Json<Value>, ApiError> {
     ensure_resource_id(&id, message.id)?;
-    json_result(simple::stage_message_update_json(to_json_string(&message)?).await)
+    scoped_json_result(
+        simple::stage_message_update_json(
+            validate_scope_id(query.scope_id)?,
+            to_json_string(&message)?,
+        )
+        .await,
+    )
 }
 
-async fn delete_message(Path(id): Path<String>) -> Result<Json<OkResponse>, ApiError> {
-    simple::stage_message_delete(id)
+async fn delete_message(
+    Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
+) -> Result<Json<OkResponse>, ApiError> {
+    simple::stage_message_delete(validate_scope_id(query.scope_id)?, id)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(scoped_api_error)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -742,48 +801,56 @@ async fn retrieve_scoped_memory(
     )
 }
 
-async fn run_memory_maintenance(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::run_memory_maintenance_json(state.scope_id).await)
+async fn run_memory_maintenance(
+    Json(request): Json<ScopeRequest>,
+) -> Result<Json<Value>, ApiError> {
+    json_result(simple::run_memory_maintenance_json(validate_scope_id(request.scope_id)?).await)
 }
 
-async fn list_memory_documents(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::list_memory_documents_json(state.scope_id).await)
+async fn list_memory_documents(Query(query): Query<ScopeRequest>) -> Result<Json<Value>, ApiError> {
+    json_result(simple::list_memory_documents_json(validate_scope_id(query.scope_id)?).await)
 }
 
 async fn read_memory_document(
-    State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::read_memory_document_json(state.scope_id, id).await)
+    json_result(simple::read_memory_document_json(validate_scope_id(query.scope_id)?, id).await)
 }
 
 async fn update_memory_document(
-    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<UpdateMemoryDocumentRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::update_memory_document_json(state.scope_id, id, request.markdown).await)
+    ok_json(
+        simple::update_memory_document_json(
+            validate_scope_id(request.scope_id)?,
+            id,
+            request.markdown,
+        )
+        .await,
+    )
 }
 
 async fn archive_memory_document(
-    State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::archive_memory_document_json(state.scope_id, id).await)
+    ok_json(simple::archive_memory_document_json(validate_scope_id(query.scope_id)?, id).await)
 }
 
 async fn restore_memory_document(
-    State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::restore_memory_document_json(state.scope_id, id).await)
+    ok_json(simple::restore_memory_document_json(validate_scope_id(query.scope_id)?, id).await)
 }
 
 async fn delete_memory_document(
-    State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::delete_memory_document_json(state.scope_id, id).await)
+    ok_json(simple::delete_memory_document_json(validate_scope_id(query.scope_id)?, id).await)
 }
 
 async fn apply_memory_patch(
@@ -794,12 +861,11 @@ async fn apply_memory_patch(
 }
 
 async fn submit_memory_patch_review(
-    State(state): State<AppState>,
     Json(request): Json<SubmitMemoryPatchReviewRequest>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::submit_memory_patch_review_json(
-            state.scope_id,
+            validate_scope_id(request.scope_id)?,
             request.conversation_id,
             request.patch_yaml,
             request.review_mode,
@@ -809,12 +875,11 @@ async fn submit_memory_patch_review(
 }
 
 async fn list_memory_patch_reviews(
-    State(state): State<AppState>,
     Query(query): Query<IncludeResolvedQuery>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::list_memory_patch_reviews_json(
-            state.scope_id,
+            validate_scope_id(query.scope_id)?,
             query.include_resolved.unwrap_or(false),
         )
         .await,
@@ -822,17 +887,21 @@ async fn list_memory_patch_reviews(
 }
 
 async fn approve_memory_patch_review(
-    State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::approve_memory_patch_review_json(state.scope_id, id).await)
+    json_result(
+        simple::approve_memory_patch_review_json(validate_scope_id(query.scope_id)?, id).await,
+    )
 }
 
 async fn reject_memory_patch_review(
-    State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ScopeRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::reject_memory_patch_review_json(state.scope_id, id).await)
+    json_result(
+        simple::reject_memory_patch_review_json(validate_scope_id(query.scope_id)?, id).await,
+    )
 }
 
 async fn list_nsg_nodes(Json(request): Json<ScopeRequest>) -> Result<Json<Value>, ApiError> {
@@ -840,13 +909,10 @@ async fn list_nsg_nodes(Json(request): Json<ScopeRequest>) -> Result<Json<Value>
     json_result(simple::list_nsg_nodes_json(scope_id, false).await)
 }
 
-async fn write_nsg_node(
-    State(state): State<AppState>,
-    Json(request): Json<WriteNsgNodeRequest>,
-) -> Result<Json<Value>, ApiError> {
+async fn write_nsg_node(Json(request): Json<WriteNsgNodeRequest>) -> Result<Json<Value>, ApiError> {
     ok_json(
         simple::write_nsg_node_json(
-            state.scope_id,
+            validate_scope_id(request.scope_id)?,
             request.target_file,
             to_json_string(&request.node)?,
         )
@@ -854,18 +920,18 @@ async fn write_nsg_node(
     )
 }
 
-async fn archive_nsg_node(
-    State(state): State<AppState>,
-    Json(request): Json<NsgTargetRequest>,
-) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::archive_nsg_node_json(state.scope_id, request.target_file).await)
+async fn archive_nsg_node(Json(request): Json<NsgTargetRequest>) -> Result<Json<Value>, ApiError> {
+    ok_json(
+        simple::archive_nsg_node_json(validate_scope_id(request.scope_id)?, request.target_file)
+            .await,
+    )
 }
 
-async fn delete_nsg_node(
-    State(state): State<AppState>,
-    Json(request): Json<NsgTargetRequest>,
-) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::delete_nsg_node_json(state.scope_id, request.target_file).await)
+async fn delete_nsg_node(Json(request): Json<NsgTargetRequest>) -> Result<Json<Value>, ApiError> {
+    ok_json(
+        simple::delete_nsg_node_json(validate_scope_id(request.scope_id)?, request.target_file)
+            .await,
+    )
 }
 
 async fn apply_nsg_patch(
@@ -899,21 +965,29 @@ async fn reject_nsg_pending_candidate(
 }
 
 async fn nsg_vector_status(
-    State(state): State<AppState>,
     Query(query): Query<NsgVectorStatusQuery>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(
-        simple::nsg_vector_status_json(state.scope_id, query.vector_space_id.unwrap_or_default())
-            .await,
+        simple::nsg_vector_status_json(
+            validate_scope_id(query.scope_id)?,
+            query.vector_space_id.unwrap_or_default(),
+        )
+        .await,
     )
 }
 
-async fn rebuild_nsg_vector_index(
-    State(state): State<AppState>,
-    Json(request): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
+async fn rebuild_nsg_vector_index(Json(mut request): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let scope_id = request
+        .as_object_mut()
+        .and_then(|object| object.remove("scope_id"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| ApiError::bad_request("scope_id is required"))?;
     json_result(
-        simple::rebuild_nsg_vector_index_json(state.scope_id, to_json_string(&request)?).await,
+        simple::rebuild_nsg_vector_index_json(
+            validate_scope_id(scope_id)?,
+            to_json_string(&request)?,
+        )
+        .await,
     )
 }
 
@@ -932,34 +1006,30 @@ async fn import_momo_config(
     json_result(simple::import_momo_config_json(request.input_path).await)
 }
 
-async fn export_moc(
-    State(state): State<AppState>,
-    Json(request): Json<MocExportRequest>,
-) -> Result<Json<Value>, ApiError> {
+async fn export_moc(Json(request): Json<MocExportRequest>) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::export_moc_json(to_json_string(&json!({
             "output_path": request.output_path,
-            "scope_id": state.scope_id,
+            "scope_id": validate_scope_id(request.scope_id)?,
             "settings": request.settings,
             "modules": request.modules,
             "compatibility": request.compatibility,
             "character_id": request.character_id,
             "protection": request.protection,
+            "host_modules": request.host_modules,
         }))?)
         .await,
     )
 }
 
-async fn import_moc(
-    State(state): State<AppState>,
-    Json(request): Json<MocImportRequest>,
-) -> Result<Json<Value>, ApiError> {
+async fn import_moc(Json(request): Json<MocImportRequest>) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::import_moc_json(
             request.input_path,
-            state.scope_id,
+            validate_scope_id(request.scope_id)?,
             request.conflict_mode,
             request.protection,
+            request.claim_unknown_to,
         )
         .await,
     )
@@ -987,6 +1057,23 @@ fn json_result(result: Result<String, String>) -> Result<Json<Value>, ApiError> 
     serde_json::from_str(&value)
         .map(Json)
         .map_err(|error| ApiError::internal(error.to_string()))
+}
+
+fn scoped_json_result(result: Result<String, String>) -> Result<Json<Value>, ApiError> {
+    let value = result.map_err(scoped_api_error)?;
+    serde_json::from_str(&value)
+        .map(Json)
+        .map_err(|error| ApiError::internal(error.to_string()))
+}
+
+fn scoped_api_error(error: String) -> ApiError {
+    if error.contains("does not belong to")
+        || error.contains("does not exist in the requested scope")
+    {
+        ApiError::not_found(error)
+    } else {
+        ApiError::internal(error)
+    }
 }
 
 fn embedding_api_error(error: simple::GenerateEmbeddingsError) -> ApiError {
@@ -1094,7 +1181,6 @@ mod tests {
 
     fn test_momo_api(origin: impl Into<String>) -> Arc<MomoApiService> {
         Arc::new(MomoApiService::new(
-            DEFAULT_SCOPE_ID,
             origin,
             None,
             reqwest::Client::new(),
@@ -1149,7 +1235,6 @@ mod tests {
         let initialized_dir = initialize_test_core().await;
         let app = build_app(AppState {
             data_dir: initialized_dir,
-            scope_id: DEFAULT_SCOPE_ID.to_owned(),
             momo_api: test_momo_api("http://127.0.0.1:9/v1"),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
@@ -1182,7 +1267,6 @@ mod tests {
         let initialized_dir = initialize_test_core().await;
         let app = build_app(AppState {
             data_dir: initialized_dir,
-            scope_id: DEFAULT_SCOPE_ID.to_owned(),
             momo_api: test_momo_api("http://127.0.0.1:9/v1"),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
@@ -1351,7 +1435,7 @@ mod tests {
                     .uri("/v1/characters/import-external")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        json!({"input_path": external_path, "format": "ccv2_json"}).to_string(),
+                        json!({"scope_id": TEST_SCOPE_ID, "input_path": external_path, "format": "ccv2_json"}).to_string(),
                     ))
                     .expect("external import request"),
             )
@@ -1379,6 +1463,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
+                            "scope_id": TEST_SCOPE_ID,
                             "output_path": exported_path,
                             "format": "ccv2_json"
                         })
@@ -1399,10 +1484,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/v1/characters")
+                    .uri(format!("/v1/characters?scope_id={TEST_SCOPE_ID}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
+                            "scope_id": TEST_SCOPE_ID,
                             "name": "HTTP test character",
                             "author_name": "momo-server test",
                             "description": "round trip",
@@ -1437,6 +1523,8 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
+                            "scope_id": TEST_SCOPE_ID,
+                            "character_scope_id": TEST_SCOPE_ID,
                             "title": "core contract",
                             "character_id": character_id,
                         })
@@ -1467,6 +1555,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
+                            "scope_id": TEST_SCOPE_ID,
                             "conversation_id": conversation_id,
                             "role": "user",
                             "content": "hello from client",
@@ -1488,6 +1577,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
+                            "scope_id": TEST_SCOPE_ID,
                             "target_file": "lore/vector-test.nsg",
                             "node": {
                                 "id": "vector_test",
@@ -1627,6 +1717,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
+                            "scope_id": TEST_SCOPE_ID,
                             "embedding": embedding,
                             "mode": "full",
                             "batch_size": 1
@@ -1662,7 +1753,7 @@ mod tests {
                     .body(Body::from(
                         json!({
                             "scopes": [{
-                                "scope_id": DEFAULT_SCOPE_ID,
+                                "scope_id": TEST_SCOPE_ID,
                                 "label": "default",
                                 "weight": 1
                             }],
@@ -1695,7 +1786,9 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/v1/conversations/{conversation_id}/messages"))
+                    .uri(format!(
+                        "/v1/conversations/{conversation_id}/messages?scope_id={TEST_SCOPE_ID}"
+                    ))
                     .body(Body::empty())
                     .expect("message list request"),
             )
@@ -1794,7 +1887,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/v1/characters")
+                    .uri(format!("/v1/characters?scope_id={TEST_SCOPE_ID}"))
                     .body(Body::empty())
                     .expect("list request"),
             )
@@ -1815,19 +1908,336 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_moc_host_modules_export_and_claim() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let initialized_dir = initialize_test_core().await;
+        let extension = TEST_DATA_DIR.path().join("host-weather-module");
+        std::fs::create_dir_all(&extension).expect("host module directory");
+        std::fs::write(extension.join("module.json"), br#"{"unit":"celsius"}"#)
+            .expect("host module payload");
+        let output = TEST_DATA_DIR.path().join("host-module.moc");
+        let claims = TEST_DATA_DIR.path().join("host-module-claims");
+        let app = build_app(AppState {
+            data_dir: initialized_dir,
+            momo_api: test_momo_api("http://127.0.0.1:9/v1"),
+            response_concurrency: Arc::new(Semaphore::new(8)),
+            response_timeout: std::time::Duration::from_secs(5),
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        let export = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/moc/export")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "scope_id": TEST_SCOPE_ID,
+                            "output_path": output,
+                            "modules": [],
+                            "host_modules": [{
+                                "id": "weather",
+                                "input_path": extension,
+                                "dependencies": ["config"],
+                                "import_order": 900
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("host module export request"),
+            )
+            .await
+            .expect("host module export response");
+        assert_eq!(export.status(), StatusCode::OK);
+
+        let import = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/moc/import")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "scope_id": TEST_SCOPE_ID,
+                            "input_path": output,
+                            "conflict_mode": "replace",
+                            "claim_unknown_to": claims
+                        })
+                        .to_string(),
+                    ))
+                    .expect("host module import request"),
+            )
+            .await
+            .expect("host module import response");
+        assert_eq!(import.status(), StatusCode::OK);
+        let report: Value = serde_json::from_slice(
+            &to_bytes(import.into_body(), 128 * 1024)
+                .await
+                .expect("host module report body"),
+        )
+        .expect("host module report JSON");
+        assert_eq!(report["unknown_modules"][0]["id"], "weather");
+        assert_eq!(
+            std::fs::read_to_string(claims.join("weather/module.json"))
+                .expect("claimed host payload"),
+            r#"{"unit":"celsius"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_and_messages_fail_closed_across_scopes() {
+        const OWNER_SCOPE: &str = "00000000-0000-4000-8000-000000000081";
+        const OTHER_SCOPE: &str = "00000000-0000-4000-8000-000000000082";
+
+        let _test_guard = TEST_LOCK.lock().await;
+        let initialized_dir = initialize_test_core().await;
+        let character: Value = serde_json::from_str(
+            &simple::stage_character_json(
+                OWNER_SCOPE.to_owned(),
+                "scope-test".to_owned(),
+                "Scoped character".to_owned(),
+                String::new(),
+                "Stay scoped.".to_owned(),
+                String::new(),
+            )
+            .await
+            .expect("stage scoped character"),
+        )
+        .expect("character JSON");
+        let character_id = character["id"].as_str().expect("character ID").to_owned();
+        let conversation: Value = serde_json::from_str(
+            &simple::stage_conversation_json(
+                None,
+                OWNER_SCOPE.to_owned(),
+                OWNER_SCOPE.to_owned(),
+                "private conversation".to_owned(),
+                character_id.clone(),
+            )
+            .await
+            .expect("stage scoped conversation"),
+        )
+        .expect("conversation JSON");
+        let conversation_id = conversation["id"]
+            .as_str()
+            .expect("conversation ID")
+            .to_owned();
+        let message: Value = serde_json::from_str(
+            &simple::stage_message_json(
+                OWNER_SCOPE.to_owned(),
+                conversation_id.clone(),
+                "user".to_owned(),
+                "owner-only history".to_owned(),
+            )
+            .await
+            .expect("stage owner message"),
+        )
+        .expect("message JSON");
+        let message_id = message["id"].as_str().expect("message ID").to_owned();
+
+        let app = build_app(AppState {
+            data_dir: initialized_dir,
+            momo_api: test_momo_api("http://127.0.0.1:9/v1"),
+            response_concurrency: Arc::new(Semaphore::new(8)),
+            response_timeout: std::time::Duration::from_secs(5),
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        let owner_read = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/conversations/{conversation_id}/messages?scope_id={OWNER_SCOPE}"
+                    ))
+                    .body(Body::empty())
+                    .expect("owner read"),
+            )
+            .await
+            .expect("owner response");
+        assert_eq!(owner_read.status(), StatusCode::OK);
+
+        let cross_scope_read = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/conversations/{conversation_id}/messages?scope_id={OTHER_SCOPE}"
+                    ))
+                    .body(Body::empty())
+                    .expect("cross-scope read"),
+            )
+            .await
+            .expect("cross-scope response");
+        assert_eq!(cross_scope_read.status(), StatusCode::NOT_FOUND);
+
+        let cross_scope_write = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "scope_id": OTHER_SCOPE,
+                            "conversation_id": conversation_id,
+                            "role": "user",
+                            "content": "must not be written"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("cross-scope write"),
+            )
+            .await
+            .expect("cross-scope write response");
+        assert_eq!(cross_scope_write.status(), StatusCode::NOT_FOUND);
+
+        let mut foreign_character = character.clone();
+        foreign_character["scope_id"] = json!(OTHER_SCOPE);
+        let mut foreign_conversation = conversation.clone();
+        foreign_conversation["scope_id"] = json!(OTHER_SCOPE);
+        let export_path = TEST_DATA_DIR.path().join("cross-scope-export.json");
+        let cross_scope_resource_requests = vec![
+            (
+                "character export",
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/v1/characters/{character_id}/export-external"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "scope_id": OTHER_SCOPE,
+                            "output_path": export_path,
+                            "format": "ccv2_json"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("cross-scope character export"),
+            ),
+            (
+                "character update",
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/v1/characters/{character_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(foreign_character.to_string()))
+                    .expect("cross-scope character update"),
+            ),
+            (
+                "character delete",
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!(
+                        "/v1/characters/{character_id}?scope_id={OTHER_SCOPE}"
+                    ))
+                    .body(Body::empty())
+                    .expect("cross-scope character delete"),
+            ),
+            (
+                "conversation update",
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/v1/conversations/{conversation_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(foreign_conversation.to_string()))
+                    .expect("cross-scope conversation update"),
+            ),
+            (
+                "conversation delete",
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!(
+                        "/v1/conversations/{conversation_id}?scope_id={OTHER_SCOPE}"
+                    ))
+                    .body(Body::empty())
+                    .expect("cross-scope conversation delete"),
+            ),
+            (
+                "message update",
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/v1/messages/{message_id}?scope_id={OTHER_SCOPE}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(message.to_string()))
+                    .expect("cross-scope message update"),
+            ),
+            (
+                "message delete",
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/v1/messages/{message_id}?scope_id={OTHER_SCOPE}"))
+                    .body(Body::empty())
+                    .expect("cross-scope message delete"),
+            ),
+        ];
+        for (route, request) in cross_scope_resource_requests {
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .unwrap_or_else(|error| panic!("{route} response: {error}"));
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+        }
+        assert!(!export_path.exists());
+
+        let cross_scope_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/momo/responses")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "input": "must not see owner history",
+                            "momo": {
+                                "request_id": "cross-scope-response",
+                                "scope_id": OTHER_SCOPE,
+                                "conversation_scope_id": OTHER_SCOPE,
+                                "character_scope_id": OWNER_SCOPE,
+                                "character_id": character_id,
+                                "conversation_id": conversation_id,
+                                "memory": false,
+                                "semantic_graph": false,
+                                "mo_state": false
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("cross-scope response request"),
+            )
+            .await
+            .expect("cross-scope native response");
+        assert_eq!(cross_scope_response.status(), StatusCode::BAD_REQUEST);
+
+        let owner_messages: Value = serde_json::from_str(
+            &simple::local_messages_json(OWNER_SCOPE.to_owned(), conversation_id)
+                .await
+                .expect("owner messages"),
+        )
+        .expect("messages JSON");
+        assert_eq!(owner_messages.as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
     async fn responses_forwards_upstream_sse_deltas_before_completion() {
         let _test_guard = TEST_LOCK.lock().await;
         let initialized_dir = initialize_test_core().await;
-        simple::stage_character_json(
-            DEFAULT_SCOPE_ID.to_owned(),
-            "stream-contract".to_owned(),
-            "MO".to_owned(),
-            "stream contract character".to_owned(),
-            "Be concise.".to_owned(),
-            String::new(),
+        let character: Value = serde_json::from_str(
+            &simple::stage_character_json(
+                TEST_SCOPE_ID.to_owned(),
+                "stream-contract".to_owned(),
+                "MO".to_owned(),
+                "stream contract character".to_owned(),
+                "Be concise.".to_owned(),
+                String::new(),
+            )
+            .await
+            .expect("stage character"),
         )
-        .await
-        .expect("stage character");
+        .expect("character JSON");
+        let character_id = character["id"].as_str().expect("character ID").to_owned();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1899,7 +2309,6 @@ mod tests {
 
         let app = build_app(AppState {
             data_dir: initialized_dir,
-            scope_id: DEFAULT_SCOPE_ID.to_owned(),
             momo_api: test_momo_api(format!("http://{address}/v1")),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
@@ -1922,8 +2331,12 @@ mod tests {
                                 "parameters": {"type": "object"}
                             }],
                             "momo": {
-                                "schema": "momo.responses/0.5",
+                                "schema": "momo.responses/1.0",
                                 "request_id": format!("stream-{}", simple::new_request_id()),
+                                "scope_id": TEST_SCOPE_ID,
+                                "conversation_scope_id": TEST_SCOPE_ID,
+                                "character_scope_id": TEST_SCOPE_ID,
+                                "character_id": character_id,
                                 "memory": false,
                                 "semantic_graph": false,
                                 "mo_state": false
@@ -2001,16 +2414,20 @@ mod tests {
     async fn responses_orchestrates_once_and_replays_by_request_id() {
         let _test_guard = TEST_LOCK.lock().await;
         let initialized_dir = initialize_test_core().await;
-        simple::stage_character_json(
-            DEFAULT_SCOPE_ID.to_owned(),
-            "contract".to_owned(),
-            "MO".to_owned(),
-            "contract character".to_owned(),
-            "Be concise.".to_owned(),
-            "The user is testing the contract.".to_owned(),
+        let character: Value = serde_json::from_str(
+            &simple::stage_character_json(
+                TEST_SCOPE_ID.to_owned(),
+                "contract".to_owned(),
+                "MO".to_owned(),
+                "contract character".to_owned(),
+                "Be concise.".to_owned(),
+                "The user is testing the contract.".to_owned(),
+            )
+            .await
+            .expect("stage character"),
         )
-        .await
-        .expect("stage character");
+        .expect("character JSON");
+        let character_id = character["id"].as_str().expect("character ID").to_owned();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2097,19 +2514,25 @@ mod tests {
 
         let app = build_app(AppState {
             data_dir: initialized_dir,
-            scope_id: DEFAULT_SCOPE_ID.to_owned(),
             momo_api: test_momo_api(format!("http://{address}/v1")),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
         });
-        let request_body = include_str!("../../../contracts/0.5/response_request.json");
+        let mut request_body: Value =
+            serde_json::from_str(include_str!("../../../contracts/1.0/response_request.json"))
+                .expect("1.0 response fixture");
+        request_body["momo"]["scope_id"] = json!(TEST_SCOPE_ID);
+        request_body["momo"]["conversation_scope_id"] = json!(TEST_SCOPE_ID);
+        request_body["momo"]["character_scope_id"] = json!(TEST_SCOPE_ID);
+        request_body["momo"]["character_id"] = json!(character_id);
+        let request_body = request_body.to_string();
         let invoke = || {
             Request::builder()
                 .method(Method::POST)
                 .uri("/v1/momo/responses")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(request_body))
+                .body(Body::from(request_body.clone()))
                 .expect("response request")
         };
         let first = app.clone().oneshot(invoke()).await.expect("first response");
@@ -2127,7 +2550,6 @@ mod tests {
         drop(app);
         let restarted_app = build_app(AppState {
             data_dir: TEST_DATA_DIR.path().to_string_lossy().into_owned(),
-            scope_id: DEFAULT_SCOPE_ID.to_owned(),
             momo_api: test_momo_api(format!("http://{address}/v1")),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
@@ -2153,7 +2575,7 @@ mod tests {
                     .uri("/v1/momo/responses")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(request_body.replace(
-                        "Hello from the cross-repository contract.",
+                        "Hello from the MOMO 1.0 cross-repository contract.",
                         "Different input.",
                     )))
                     .expect("conflicting request"),
@@ -2165,12 +2587,166 @@ mod tests {
             .as_str()
             .expect("conversation id");
         let messages: Value = serde_json::from_str(
-            &simple::local_messages_json(conversation_id.to_owned())
+            &simple::local_messages_json(TEST_SCOPE_ID.to_owned(), conversation_id.to_owned())
                 .await
                 .expect("stored messages"),
         )
         .expect("messages JSON");
         assert_eq!(messages.as_array().map(Vec::len), Some(2));
+    }
+
+    #[tokio::test]
+    async fn multimodal_conversation_receives_original_image_and_roleplay_prompt() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let initialized_dir = initialize_test_core().await;
+        let character: Value = serde_json::from_str(
+            &simple::stage_character_json(
+                TEST_SCOPE_ID.to_owned(),
+                "multimodal-test".to_owned(),
+                "Direct multimodal character".to_owned(),
+                String::new(),
+                "Keep the roleplay voice.".to_owned(),
+                String::new(),
+            )
+            .await
+            .expect("stage multimodal character"),
+        )
+        .expect("character JSON");
+        let character_id = character["id"].as_str().expect("character id").to_owned();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock multimodal gateway");
+        let address = listener.local_addr().expect("gateway address");
+        let gateway = tokio::spawn(async move {
+            let (mut capability_socket, _) = listener.accept().await.expect("capability request");
+            let mut request = vec![0_u8; 64 * 1024];
+            let read = capability_socket
+                .read(&mut request)
+                .await
+                .expect("read capability request");
+            assert!(
+                String::from_utf8_lossy(&request[..read])
+                    .starts_with("GET /v1/models/conversation ")
+            );
+            let capability = json!({
+                "id": "conversation",
+                "object": "model",
+                "momo": {
+                    "category": "chat",
+                    "context_window": 8192,
+                    "max_output_tokens": 1024,
+                    "modalities": ["text", "image"]
+                }
+            })
+            .to_string();
+            capability_socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        capability.len(), capability
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write capability response");
+
+            let (mut chat_socket, _) = listener.accept().await.expect("chat request");
+            let read = chat_socket
+                .read(&mut request)
+                .await
+                .expect("read chat request");
+            let request_text = String::from_utf8_lossy(&request[..read]);
+            assert!(request_text.starts_with("POST /v1/chat/completions "));
+            assert!(request_text.contains("Keep the roleplay voice."));
+            assert!(request_text.contains("https://example.test/original.png"));
+            assert!(request_text.contains("\"type\":\"image_url\""));
+            assert!(!request_text.contains("FALLBACK_ONLY_PROMPT"));
+            let completion = json!({
+                "id": "chatcmpl-multimodal",
+                "choices": [{
+                    "message": {"role": "assistant", "content": "I can see it directly."},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14}
+            })
+            .to_string();
+            chat_socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        completion.len(), completion
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write chat response");
+        });
+
+        let mut config = MomoConfig::default();
+        config.vision.enabled = true;
+        config.vision.prompt = "FALLBACK_ONLY_PROMPT".to_owned();
+        let momo_api = Arc::new(MomoApiService::new(
+            format!("http://{address}/v1"),
+            None,
+            reqwest::Client::new(),
+            Arc::new(config),
+        ));
+        let app = build_app(AppState {
+            data_dir: initialized_dir,
+            momo_api,
+            response_concurrency: Arc::new(Semaphore::new(8)),
+            response_timeout: std::time::Duration::from_secs(120),
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/momo/responses")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "conversation",
+                            "input": [{
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_text", "text": "Respond in character."},
+                                    {"type": "input_image", "image_url": "https://example.test/original.png", "detail": "high"}
+                                ]
+                            }],
+                            "momo": {
+                                "request_id": "direct-multimodal-contract-1",
+                                "character_id": character_id,
+                                "scope_id": TEST_SCOPE_ID,
+                                "conversation_scope_id": TEST_SCOPE_ID,
+                                "character_scope_id": TEST_SCOPE_ID,
+                                "memory": false,
+                                "semantic_graph": false,
+                                "mo_state": false
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("multimodal response request"),
+            )
+            .await
+            .expect("multimodal response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("response body"),
+        )
+        .expect("response JSON");
+        assert_eq!(body["output_text"], "I can see it directly.");
+        assert_eq!(body["momo"]["request_audit"]["vision"]["applied"], false);
+        assert_eq!(
+            body["momo"]["request_audit"]["vision"]["mode"],
+            "direct_multimodal"
+        );
+        gateway.await.expect("mock gateway task");
     }
 
     #[tokio::test]
@@ -2223,7 +2799,6 @@ mod tests {
         });
         let state = AppState {
             data_dir: initialized_dir,
-            scope_id: DEFAULT_SCOPE_ID.to_owned(),
             momo_api: test_momo_api(format!("http://{address}/v1")),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),

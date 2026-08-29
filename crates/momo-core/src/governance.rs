@@ -60,6 +60,13 @@ pub struct VisionDescriptionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenancePromptConfig {
+    pub memory_distillation: String,
+    pub semantic_graph_governance: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MomoRuntimeConfig {
     #[serde(default = "default_true")]
     pub memory_distillation_enabled: bool,
@@ -91,6 +98,15 @@ impl Default for VisionDescriptionConfig {
     }
 }
 
+impl Default for MaintenancePromptConfig {
+    fn default() -> Self {
+        Self {
+            memory_distillation: default_memory_distillation_prompt(),
+            semantic_graph_governance: default_semantic_graph_governance_prompt(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MomoConfig {
     #[serde(default = "schema_version")]
@@ -101,6 +117,7 @@ pub struct MomoConfig {
     pub runtime: MomoRuntimeConfig,
     #[serde(default)]
     pub vision: VisionDescriptionConfig,
+    pub prompts: MaintenancePromptConfig,
 }
 
 impl Default for MomoConfig {
@@ -110,6 +127,7 @@ impl Default for MomoConfig {
             request_overrides: RequestOverridePolicy::default(),
             runtime: MomoRuntimeConfig::default(),
             vision: VisionDescriptionConfig::default(),
+            prompts: MaintenancePromptConfig::default(),
         }
     }
 }
@@ -140,6 +158,22 @@ impl MomoConfig {
             return Err(GovernanceError::Invalid(
                 "vision.prompt must contain 1 to 65536 bytes".to_owned(),
             ));
+        }
+        for (name, prompt) in [
+            (
+                "prompts.memory_distillation",
+                &self.prompts.memory_distillation,
+            ),
+            (
+                "prompts.semantic_graph_governance",
+                &self.prompts.semantic_graph_governance,
+            ),
+        ] {
+            if prompt.trim().is_empty() || prompt.len() > 64 * 1024 {
+                return Err(GovernanceError::Invalid(format!(
+                    "{name} must contain 1 to 65536 bytes"
+                )));
+            }
         }
         if !(1..=200).contains(&self.runtime.memory_distill_every_turns)
             || !(1..=200).contains(&self.runtime.nsg_govern_every_turns)
@@ -438,6 +472,28 @@ fn default_visual_description_prompt() -> String {
     "Describe only visible facts that are relevant to the conversation. Do not infer identity, intent, private attributes, or text that is not legible.".to_owned()
 }
 
+fn default_memory_distillation_prompt() -> String {
+    concat!(
+        "You are the MOMO DMW memory distiller. Output YAML only with root key patches. ",
+        "Store only explicit durable facts useful in future conversations. Never store guesses, ",
+        "questions, greetings, transient mood, secrets, or a general transcript summary. ",
+        "Supported operations are create, append, replace, and update_frontmatter. ",
+        "Use safe relative .md targets. If nothing qualifies, output exactly: patches: []"
+    )
+    .to_owned()
+}
+
+fn default_semantic_graph_governance_prompt() -> String {
+    concat!(
+        "You are the MOMO NSG governor. Output YAML only with root key patches. ",
+        "Create only durable narrative rules, lore, causal relations, or constraints. ",
+        "Automatic create_node operations must use mode draft, status active, and zone auto. ",
+        "Never directly modify Canon; use revision_candidate with evidence. ",
+        "If nothing qualifies, output exactly: patches: []"
+    )
+    .to_owned()
+}
+
 #[derive(Debug, Error)]
 pub enum GovernanceError {
     #[error("MOMO configuration I/O failed: {0}")]
@@ -515,6 +571,10 @@ route = "primary"
 [vision]
 enabled = true
 prompt = "Describe the visible scene."
+
+[prompts]
+memory_distillation = "Distill durable memory as YAML patches."
+semantic_graph_governance = "Govern narrative rules as YAML patches."
 "#;
         let config: MomoConfig = toml::from_str(document).expect("portable config");
         config.validate().expect("valid config");
@@ -561,6 +621,10 @@ memory_distill_every_turns = 7
 semantic_graph_enabled = true
 nsg_govern_every_turns = 19
 max_concurrent_chats = 4
+
+[prompts]
+memory_distillation = "Distill durable memory as YAML patches."
+semantic_graph_governance = "Govern narrative rules as YAML patches."
 "#,
         )
         .expect("portable runtime");
@@ -576,5 +640,12 @@ max_concurrent_chats = 4
             invalid.validate(),
             Err(GovernanceError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn rejects_portable_document_without_maintenance_prompts() {
+        let error = validate_momo_document("schema_version = 1\n")
+            .expect_err("missing prompts must not use compatibility defaults");
+        assert!(matches!(error, GovernanceError::Toml(_)));
     }
 }

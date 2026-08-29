@@ -24,10 +24,16 @@ pub async fn begin_response_operation(
     request_id: String,
     request_fingerprint: String,
     conversation_id: String,
+    resolved_input_json: String,
 ) -> Result<(), String> {
     core()?
         .store()
-        .begin_response_operation(&request_id, &request_fingerprint, &conversation_id)
+        .begin_response_operation(
+            &request_id,
+            &request_fingerprint,
+            &conversation_id,
+            &resolved_input_json,
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -140,12 +146,26 @@ pub async fn cache_messages_json(messages_json: String) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn local_messages_json(conversation_id: String) -> Result<String, String> {
+pub async fn local_messages_json(
+    scope_id: String,
+    conversation_id: String,
+) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let conversation_id =
         uuid::Uuid::parse_str(&conversation_id).map_err(|error| error.to_string())?;
-    let messages = core()?
+    let core = core()?;
+    if core
         .store()
-        .list_messages(conversation_id)
+        .conversation_for_scope(scope_id, conversation_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("conversation does not belong to scope".to_owned());
+    }
+    let messages = core
+        .store()
+        .list_messages_for_scope(scope_id, conversation_id)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&messages).map_err(|error| error.to_string())
@@ -172,10 +192,12 @@ pub async fn local_conversations_json(scope_id: String) -> Result<String, String
 }
 
 pub async fn stage_message_json(
+    scope_id: String,
     conversation_id: String,
     role: String,
     content: String,
 ) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let conversation_id =
         uuid::Uuid::parse_str(&conversation_id).map_err(|error| error.to_string())?;
     let role = momo_domain::MessageRole::try_from(role.as_str()).map_err(str::to_owned)?;
@@ -187,6 +209,15 @@ pub async fn stage_message_json(
         created_at: chrono::Utc::now(),
     };
     let core = core()?;
+    if core
+        .store()
+        .conversation_for_scope(scope_id, conversation_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("conversation does not belong to scope".to_owned());
+    }
     core.store()
         .save_message(&message)
         .await
@@ -196,9 +227,12 @@ pub async fn stage_message_json(
 
 pub async fn append_response_user_message_json(
     request_id: String,
+    conversation_scope_id: String,
     conversation_id: String,
     content: String,
 ) -> Result<String, String> {
+    let conversation_scope_id =
+        uuid::Uuid::parse_str(&conversation_scope_id).map_err(|error| error.to_string())?;
     let conversation_id =
         uuid::Uuid::parse_str(&conversation_id).map_err(|error| error.to_string())?;
     let message = momo_domain::Message {
@@ -210,7 +244,7 @@ pub async fn append_response_user_message_json(
     };
     let inserted = core()?
         .store()
-        .append_response_user_message(&request_id, &message)
+        .append_response_user_message(&request_id, conversation_scope_id, &message)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&serde_json::json!({
@@ -220,20 +254,42 @@ pub async fn append_response_user_message_json(
     .map_err(|error| error.to_string())
 }
 
-pub async fn stage_message_update_json(message_json: String) -> Result<String, String> {
+pub async fn stage_message_update_json(
+    scope_id: String,
+    message_json: String,
+) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let message: momo_domain::Message =
         serde_json::from_str(&message_json).map_err(|error| error.to_string())?;
-    core()?
+    let core = core()?;
+    if core
         .store()
+        .message_for_scope(scope_id, message.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("message does not belong to scope".to_owned());
+    }
+    core.store()
         .save_message(&message)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&message).map_err(|error| error.to_string())
 }
 
-pub async fn stage_message_delete(id: String) -> Result<(), String> {
+pub async fn stage_message_delete(scope_id: String, id: String) -> Result<(), String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let id = uuid::Uuid::parse_str(&id).map_err(|error| error.to_string())?;
     let store = core()?.store();
+    if store
+        .message_for_scope(scope_id, id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("message does not belong to scope".to_owned());
+    }
     store
         .stage_message_delete(id)
         .await
@@ -271,21 +327,46 @@ pub async fn stage_character_json(
     serde_json::to_string(&card).map_err(|error| error.to_string())
 }
 
-pub async fn stage_character_update_json(character_json: String) -> Result<String, String> {
+pub async fn stage_character_update_json(
+    scope_id: String,
+    character_json: String,
+) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let mut card: momo_domain::CharacterCard =
         serde_json::from_str(&character_json).map_err(|error| error.to_string())?;
-    card.updated_at = chrono::Utc::now();
-    core()?
+    if card.scope_id != scope_id {
+        return Err("character body scope does not match request scope".to_owned());
+    }
+    let core = core()?;
+    if core
         .store()
+        .character_for_scope(scope_id, card.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("character does not belong to scope".to_owned());
+    }
+    card.updated_at = chrono::Utc::now();
+    core.store()
         .save_character(&card)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&card).map_err(|error| error.to_string())
 }
 
-pub async fn stage_character_delete(id: String) -> Result<(), String> {
+pub async fn stage_character_delete(scope_id: String, id: String) -> Result<(), String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let id = uuid::Uuid::parse_str(&id).map_err(|error| error.to_string())?;
     let store = core()?.store();
+    if store
+        .character_for_scope(scope_id, id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("character does not belong to scope".to_owned());
+    }
     store
         .stage_character_delete(id)
         .await
@@ -295,8 +376,9 @@ pub async fn stage_character_delete(id: String) -> Result<(), String> {
 pub async fn stage_conversation_json(
     id: Option<String>,
     scope_id: String,
+    character_scope_id: String,
     title: String,
-    character_id: Option<String>,
+    character_id: String,
 ) -> Result<String, String> {
     let id = id
         .map(|value| uuid::Uuid::parse_str(&value))
@@ -304,42 +386,75 @@ pub async fn stage_conversation_json(
         .map_err(|error| error.to_string())?
         .unwrap_or_else(momo_domain::new_id);
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
-    let character_id = character_id
-        .map(|id| uuid::Uuid::parse_str(&id))
-        .transpose()
-        .map_err(|error| error.to_string())?;
+    let character_scope_id =
+        uuid::Uuid::parse_str(&character_scope_id).map_err(|error| error.to_string())?;
+    let character_id = uuid::Uuid::parse_str(&character_id).map_err(|error| error.to_string())?;
+    let core = core()?;
+    if core
+        .store()
+        .character_for_scope(character_scope_id, character_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("character does not belong to character scope".to_owned());
+    }
     let now = chrono::Utc::now();
     let conversation = momo_domain::Conversation {
         id,
         scope_id,
-        character_id,
+        character_id: Some(character_id),
         title,
         created_at: now,
         updated_at: now,
     };
-    core()?
-        .store()
+    core.store()
         .save_conversation(&conversation)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&conversation).map_err(|error| error.to_string())
 }
 
-pub async fn stage_conversation_update_json(conversation_json: String) -> Result<String, String> {
+pub async fn stage_conversation_update_json(
+    scope_id: String,
+    conversation_json: String,
+) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let mut conversation: momo_domain::Conversation =
         serde_json::from_str(&conversation_json).map_err(|error| error.to_string())?;
-    conversation.updated_at = chrono::Utc::now();
-    core()?
+    if conversation.scope_id != scope_id {
+        return Err("conversation body scope does not match request scope".to_owned());
+    }
+    let core = core()?;
+    if core
         .store()
+        .conversation_for_scope(scope_id, conversation.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("conversation does not belong to scope".to_owned());
+    }
+    conversation.updated_at = chrono::Utc::now();
+    core.store()
         .save_conversation(&conversation)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&conversation).map_err(|error| error.to_string())
 }
 
-pub async fn stage_conversation_delete(id: String) -> Result<(), String> {
+pub async fn stage_conversation_delete(scope_id: String, id: String) -> Result<(), String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let id = uuid::Uuid::parse_str(&id).map_err(|error| error.to_string())?;
     let store = core()?.store();
+    if store
+        .conversation_for_scope(scope_id, id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("conversation does not belong to scope".to_owned());
+    }
     store
         .stage_conversation_delete(id)
         .await

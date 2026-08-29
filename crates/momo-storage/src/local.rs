@@ -89,6 +89,19 @@ impl LocalStore {
         rows.iter().map(character_from_row).collect()
     }
 
+    pub async fn character_for_scope(
+        &self,
+        scope_id: Uuid,
+        character_id: Uuid,
+    ) -> Result<Option<CharacterCard>, StorageError> {
+        let row = sqlx::query("SELECT * FROM character_cards WHERE id=? AND scope_id=?")
+            .bind(character_id.to_string())
+            .bind(scope_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(character_from_row).transpose()
+    }
+
     pub async fn stage_character(&self, card: &CharacterCard) -> Result<(), StorageError> {
         self.save_character(card).await
     }
@@ -142,6 +155,19 @@ impl LocalStore {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(conversation_from_row).collect()
+    }
+
+    pub async fn conversation_for_scope(
+        &self,
+        scope_id: Uuid,
+        conversation_id: Uuid,
+    ) -> Result<Option<Conversation>, StorageError> {
+        let row = sqlx::query("SELECT * FROM conversations WHERE id=? AND scope_id=?")
+            .bind(conversation_id.to_string())
+            .bind(scope_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(conversation_from_row).transpose()
     }
 
     pub async fn stage_conversation(
@@ -200,7 +226,7 @@ impl LocalStore {
         request_id: &str,
     ) -> Result<Option<ResponseOperation>, StorageError> {
         let row = sqlx::query(
-            "SELECT request_id, request_fingerprint, conversation_id, user_written, response_json \
+            "SELECT request_id, request_fingerprint, conversation_id, user_written, resolved_input_json, response_json \
              FROM response_operations WHERE request_id=?",
         )
         .bind(request_id)
@@ -212,6 +238,7 @@ impl LocalStore {
                 request_fingerprint: row.try_get("request_fingerprint")?,
                 conversation_id: row.try_get("conversation_id")?,
                 user_written: row.try_get::<i64, _>("user_written")? != 0,
+                resolved_input_json: row.try_get("resolved_input_json")?,
                 response_json: row.try_get("response_json")?,
             })
         })
@@ -223,16 +250,21 @@ impl LocalStore {
         request_id: &str,
         request_fingerprint: &str,
         conversation_id: &str,
+        resolved_input_json: &str,
     ) -> Result<(), StorageError> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO response_operations \
-             (request_id, request_fingerprint, conversation_id, user_written, created_at, updated_at) \
-             VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(request_id) DO NOTHING",
+             (request_id, request_fingerprint, conversation_id, user_written, resolved_input_json, created_at, updated_at) \
+             VALUES (?, ?, ?, 0, ?, ?, ?) ON CONFLICT(request_id) DO UPDATE SET \
+             resolved_input_json=COALESCE(response_operations.resolved_input_json, excluded.resolved_input_json) \
+             WHERE response_operations.request_fingerprint=excluded.request_fingerprint \
+             AND response_operations.conversation_id=excluded.conversation_id",
         )
         .bind(request_id)
         .bind(request_fingerprint)
         .bind(conversation_id)
+        .bind(resolved_input_json)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -257,6 +289,7 @@ impl LocalStore {
     pub async fn append_response_user_message(
         &self,
         request_id: &str,
+        conversation_scope_id: Uuid,
         message: &Message,
     ) -> Result<bool, StorageError> {
         let mut transaction = self.pool.begin().await?;
@@ -270,6 +303,17 @@ impl LocalStore {
         if conversation_id != message.conversation_id.to_string() {
             return Err(StorageError::Database(sqlx::Error::Protocol(
                 "response operation conversation does not match user message".to_owned(),
+            )));
+        }
+        let owned: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id=? AND scope_id=?")
+                .bind(message.conversation_id.to_string())
+                .bind(conversation_scope_id.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if owned != 1 {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "response conversation does not belong to conversation scope".to_owned(),
             )));
         }
         if row.try_get::<i64, _>("user_written")? != 0 {
@@ -488,6 +532,23 @@ impl LocalStore {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(message_from_row).collect()
+    }
+
+    pub async fn message_for_scope(
+        &self,
+        scope_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<Option<Message>, StorageError> {
+        let row = sqlx::query(
+            r#"SELECT messages.* FROM messages
+            INNER JOIN conversations ON conversations.id = messages.conversation_id
+            WHERE messages.id=? AND conversations.scope_id=?"#,
+        )
+        .bind(message_id.to_string())
+        .bind(scope_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(message_from_row).transpose()
     }
 
     pub async fn tombstone_ids(&self, object_type: &str) -> Result<Vec<String>, StorageError> {

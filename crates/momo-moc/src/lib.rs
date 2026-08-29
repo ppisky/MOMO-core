@@ -110,20 +110,43 @@ pub fn create(
     create_with_encryption(output, source_root, modules, None)
 }
 
+pub fn create_from_definitions(
+    output: impl AsRef<Path>,
+    source_root: impl AsRef<Path>,
+    modules: &[ModuleDefinition],
+) -> Result<Manifest, MocError> {
+    create_from_definitions_with_encryption(output, source_root, modules, None)
+}
+
 pub fn create_with_encryption(
     output: impl AsRef<Path>,
     source_root: impl AsRef<Path>,
     modules: &[(String, PathBuf)],
     encryption: Option<EncryptionMetadata>,
 ) -> Result<Manifest, MocError> {
+    let definitions = modules
+        .iter()
+        .map(|(module, source)| module_definition(module, source))
+        .collect::<Result<Vec<_>, _>>()?;
+    create_from_definitions_with_encryption(output, source_root, &definitions, encryption)
+}
+
+pub fn create_from_definitions_with_encryption(
+    output: impl AsRef<Path>,
+    source_root: impl AsRef<Path>,
+    modules: &[ModuleDefinition],
+    encryption: Option<EncryptionMetadata>,
+) -> Result<Manifest, MocError> {
     let output = output.as_ref();
     let source_root = source_root.as_ref().canonicalize()?;
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
-    let mut module_definitions = Vec::new();
+    let mut module_definitions = modules.to_vec();
     let mut seen_modules = HashSet::new();
 
-    for (module, relative_source) in modules {
+    for definition in modules {
+        let module = &definition.id;
+        let relative_source = Path::new(&definition.path);
         validate_relative(relative_source)?;
         validate_native_v2_module_id(module)?;
         if !seen_modules.insert(module.clone()) {
@@ -131,7 +154,6 @@ pub fn create_with_encryption(
                 "duplicate module definition: {module}"
             )));
         }
-        module_definitions.push(module_definition(module, relative_source)?);
         let source = source_root.join(relative_source).canonicalize()?;
         if !source.starts_with(&source_root) {
             return Err(MocError::SourceOutsideRoot(source));
@@ -582,6 +604,34 @@ mod tests {
         assert_eq!(
             fs::read_to_string(extracted.path().join("config/user.toml")).expect("extracted file"),
             "stream = true\n"
+        );
+    }
+
+    #[test]
+    fn creates_host_extension_from_explicit_module_definition() {
+        let root = tempfile::tempdir().expect("source directory");
+        let module_root = root.path().join("extensions/weather");
+        fs::create_dir_all(&module_root).expect("module directory");
+        fs::write(module_root.join("module.json"), br#"{"unit":"celsius"}"#)
+            .expect("module payload");
+        let output = root.path().join("extension.moc");
+        let definition = ModuleDefinition {
+            id: "weather".to_owned(),
+            path: "extensions/weather".to_owned(),
+            dependencies: vec!["config".to_owned()],
+            import_order: 900,
+        };
+
+        let manifest =
+            create_from_definitions(&output, root.path(), std::slice::from_ref(&definition))
+                .expect("create extension MOC");
+        assert_eq!(manifest.module_definitions, [definition]);
+        let extracted = tempfile::tempdir().expect("extracted directory");
+        extract(&output, extracted.path(), ExtractionLimits::default()).expect("extract");
+        assert_eq!(
+            fs::read_to_string(extracted.path().join("extensions/weather/module.json"))
+                .expect("claimed payload"),
+            r#"{"unit":"celsius"}"#
         );
     }
 

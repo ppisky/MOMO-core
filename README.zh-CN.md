@@ -19,11 +19,14 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 - MO State 编译
 - SQLite 业务存储与独立 Turso 向量存储
 - 原生 `MomoApi` 编排与面向模型服务的适配器接口
+- 通过可选视觉描述适配器处理的受治理图片输入
 - capability discovery 与上下文预算
 - 向量存储契约与确定性检索
 
-`crates/` 下的 crate 是 MOMO Core 的内部实现模块，不是彼此独立的产品。
-`momo-server` 通过仅限本机的 HTTP/SSE 接口提供同一组 Core 能力。
+`crates/` 下的 crate 是 MOMO Core 的内部实现模块，不是彼此独立的产品，也不会作为
+独立 crates.io 包发布。1.0 的产品稳定面是原生 HTTP 契约和已记录的可移植格式；嵌入方
+仍可直接从本 workspace 使用 Rust API。`momo-server` 通过仅限本机的 HTTP/SSE 接口提供
+同一组 Core 能力。
 
 ## 角色卡格式边界
 
@@ -81,11 +84,20 @@ DMW/NSG 检索、MO State、上下文预算、逻辑路由和助手持久化，�
 0.5.0 发布候选还统一了错误 envelope、请求与流上限、取消/超时/限流和逻辑路由指标。兼容变化和 1.0 门槛见
 [迁移说明](docs/migration_0_4_2_to_0_5_0.md)与[0.5.0 路线图](docs/roadmap_0_5_0.md)。
 
+本地 1.0 候选现已接入完整图片输入链路：单次最多八张用户图片；主对话模型声明
+`image` 时直接接收原图，纯文本主模型才使用可选的逻辑 `vision` 描述路由。解析结果与
+usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.responses/1.0` fixture 已冻结，
+但当前没有发布或打标签；真实 provider 凭据 smoke test 和所有者明确授权仍是发布门槛。详见
+[1.0.0 发布契约](docs/roadmap_1_0_0.md)。
+
 ## Scope 标识
 
 `scope_id` 是公开领域模型、API、存储、向量记录、Patch Review 与 MOC 操作使用的
 唯一命名空间标识。Scope 是一个不透明 UUID，其业务含义和访问策略由宿主应用决定。
-Core 将每个记忆 workspace 存储在 `memory/scopes/<scope_id>` 下。
+Core 将每个记忆 workspace 存储在 `memory/scopes/<scope_id>` 下。服务进程没有默认
+Scope，也不读取 `MOMO_SCOPE_ID`；每个有状态请求必须显式携带相关 UUID。对话、个人记忆
+与角色目录是三个独立边界，完整规则见
+[`docs/identity_scope_1_0.md`](docs/identity_scope_1_0.md)。
 
 ## 验证
 

@@ -12,7 +12,7 @@ Character-card compatibility is based on the public format specifications at:
   https://github.com/malfoyslastname/character-card-spec-v2/blob/8083fb388615ccbce768e97cbbd49d2b3214632c/spec_v2.md
   https://github.com/kwaroran/character-card-spec-v3/blob/f3a86af019fbd99f788f7a1155f399655b34ab35/SPEC_V3.md
 
-The v0.4.2 source tree and release archive do not redistribute any Character
+The MOMO Core source tree and release archives do not redistribute any Character
 Card v1/v2/v3 specification document. The v1/v2 repository did not declare a
 license when verified. The v3 repository declares MIT, but its specification
 is derived from the earlier v2 work; this project therefore applies the same

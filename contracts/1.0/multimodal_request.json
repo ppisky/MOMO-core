@@ -1,0 +1,33 @@
+{
+  "model": "conversation",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Describe the visible scene in character."
+        },
+        {
+          "type": "input_image",
+          "image_url": "https://example.test/momo-contract.png",
+          "detail": "high"
+        }
+      ]
+    }
+  ],
+  "stream": false,
+  "max_output_tokens": 1024,
+  "momo": {
+    "schema": "momo.responses/1.0",
+    "request_id": "contract-image-request-1001",
+    "scope_id": "01900000-0000-7000-8000-000000000101",
+    "conversation_scope_id": "01900000-0000-7000-8000-000000000102",
+    "character_scope_id": "01900000-0000-7000-8000-000000000103",
+    "character_id": "01900000-0000-7000-8000-000000000104",
+    "memory": true,
+    "semantic_graph": true,
+    "mo_state": true
+  }
+}

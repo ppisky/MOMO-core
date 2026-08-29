@@ -11,6 +11,11 @@ The public memory contract uses only `scope_id`. Memory retrieval, MO State
 compilation, and DMW/NSG patch requests require it; there is no implicit default
 scope and no `owner_id` compatibility field.
 
+This document describes memory workspaces. A complete response operation also
+has explicit conversation and character-catalogue namespaces; see
+[`identity_scope_1_0.md`](identity_scope_1_0.md). `momo.scope_id` is the personal
+memory namespace and must not be inferred from either of those other UUIDs.
+
 The same identifier is persisted as `scope_id` in SQLite, vector records, and
 patch reviews. Filesystem workspaces live at `memory/scopes/<scope_id>`. The
 0.3.1 migration converts the earlier database columns and directory name; it

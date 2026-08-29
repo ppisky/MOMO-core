@@ -20,12 +20,16 @@ local HTTP interface in one workspace.
 - MO State compilation
 - SQLite application storage and a separate Turso vector store
 - native `MomoApi` orchestration plus outbound model-adapter interfaces
+- governed image input through an optional visual-description adapter
 - capability discovery and context budgeting
 - vector-store contracts and deterministic retrieval
 
 The crates under `crates/` are implementation modules of MOMO Core. They are
-not separate products. `momo-server` exposes the same Core capabilities over a
-loopback HTTP/SSE interface for local applications.
+not separate products or independently published crates.io packages. The 1.0
+product stability surface is the native HTTP contract plus documented portable
+formats; embedders may still use the Rust API from this workspace. `momo-server`
+exposes the same Core capabilities over a loopback HTTP/SSE interface for local
+applications.
 
 ## Character-card format boundary
 
@@ -100,12 +104,25 @@ cancellation, timeout, rate-limit and logical-route metrics. See the
 [migration guide](docs/migration_0_4_2_to_0_5_0.md) for compatibility details
 and the 1.0 stability gates.
 
+The local 1.0 candidate includes the Core image-input path: up to eight user
+images go directly to an image-capable conversation model, or through the
+optional logical `vision` description route when the conversation model is
+text-only. Resolved input and usage are persisted for deterministic request-ID
+replay. The `momo.responses/1.0` cross-repository fixtures are frozen, but this
+is not a published 1.0 release; credentialed provider smoke testing and explicit
+release authorization remain gates. See the
+[1.0.0 release contract](docs/roadmap_1_0_0.md).
+
 ## Scope identity
 
 `scope_id` is the only namespace identifier used by public models, APIs,
 storage, vector records, patch reviews, and MOC operations. A scope is an
 opaque UUID whose meaning and access policy belong to the host application.
-Core stores each memory workspace under `memory/scopes/<scope_id>`.
+Core stores each memory workspace under `memory/scopes/<scope_id>`. The server
+has no default scope and does not read `MOMO_SCOPE_ID`; every stateful request
+must carry the relevant UUID explicitly. Conversation, personal-memory, and
+character-catalogue namespaces are distinct boundaries documented in the
+[1.0 identity and scope contract](docs/identity_scope_1_0.md).
 
 ## Validate
 

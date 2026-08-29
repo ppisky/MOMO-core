@@ -548,8 +548,8 @@ mod scoped_tests {
     #[test]
     fn scoped_budget_is_weighted_and_conserves_total() {
         let sources = [
-            source("00000000-0000-4000-8000-000000000001", "personal", 3),
-            source("00000000-0000-4000-8000-000000000002", "room", 2),
+            source("01900000-0000-7000-8000-000000000101", "personal", 3),
+            source("01900000-0000-7000-8000-000000000102", "room", 2),
         ];
         let budgets = weighted_scope_budgets(&sources, 1_024);
         assert_eq!(budgets, [615, 409]);
@@ -559,8 +559,8 @@ mod scoped_tests {
     #[test]
     fn scoped_sources_require_unique_valid_ids() {
         let sources = [
-            source("00000000-0000-4000-8000-000000000001", "personal", 1),
-            source("00000000-0000-4000-8000-000000000001", "room", 1),
+            source("01900000-0000-7000-8000-000000000101", "personal", 1),
+            source("01900000-0000-7000-8000-000000000101", "room", 1),
         ];
         assert!(validate_memory_scopes(&sources).is_err());
     }

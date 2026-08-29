@@ -71,8 +71,8 @@ Core 对这些字段的规范 JSON 做 SHA-256，生成
 
 `POST /v1/semantic-graph/vectors/rebuild`
 
-请求包含同样的 `embedding` 配置以及 `mode`；目标 scope 由当前本地服务实例的
-`scope_id` 决定：
+请求包含同样的 `embedding` 配置以及 `mode`；目标 scope 必须由调用方在请求文档中
+显式提供。服务实例不再持有默认 `scope_id`：
 
 - `full`：重新向量化该 scope 的全部 NSG 节点；
 - `incremental`：复用相同空间内 `node_id`、`source_hash` 和维度均匹配的记录，只生成
@@ -93,7 +93,7 @@ Core 对这些字段的规范 JSON 做 SHA-256，生成
 
 `GET /v1/semantic-graph/vector-status?vector_space_id=...`
 
-目标 scope 同样来自当前本地服务实例。响应明确回显 `vector_space_id`，并报告记录数、
+目标 scope 同样由请求中的 `scope_id` 显式提供。响应明确回显 `vector_space_id`，并报告记录数、
 维度和 missing/stale 节点。
 
 ## 验证与限制

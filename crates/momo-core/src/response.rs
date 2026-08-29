@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const MOMO_RESPONSE_SCHEMA: &str = "momo.responses/0.5";
+pub const MOMO_RESPONSE_SCHEMA: &str = "momo.responses/1.0";
 pub const MAX_RESPONSE_INPUT_BYTES: usize = 1024 * 1024;
 pub const MAX_RESPONSE_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_RESPONSE_INSTRUCTIONS_BYTES: usize = 256 * 1024;
@@ -13,6 +13,7 @@ pub const MAX_RESPONSE_TOOL_SCHEMA_BYTES: usize = 1024 * 1024;
 pub const MAX_RESPONSE_TOOLS: usize = 128;
 pub const MAX_RESPONSE_ID_BYTES: usize = 256;
 pub const MAX_RESPONSE_IMAGE_REFERENCE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_RESPONSE_IMAGES: usize = 8;
 pub const MAX_RESPONSE_SSE_EVENT_BYTES: usize = 1024 * 1024;
 pub const MAX_RESPONSE_STREAM_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_GATEWAY_HOPS: u8 = 1;
@@ -42,6 +43,97 @@ impl ResponseInput {
                 .join("\n"),
         };
         let text = text.trim().to_owned();
+        if text.is_empty() && !self.has_images() {
+            return Err(ResponseContractError::EmptyInput);
+        }
+        if text.len() > MAX_RESPONSE_INPUT_BYTES {
+            return Err(ResponseContractError::InputTooLarge);
+        }
+        Ok(text)
+    }
+
+    #[must_use]
+    pub fn image_inputs(&self) -> Vec<ResponseImageInput> {
+        let mut images = Vec::new();
+        if let Self::Items(items) = self {
+            for item in items {
+                match item {
+                    ResponseInputItem::Message { content, .. } => {
+                        content.collect_images(&mut images);
+                    }
+                    ResponseInputItem::InputImage { image_url, detail } => {
+                        images.push(ResponseImageInput {
+                            image_url: image_url.clone(),
+                            detail: detail.clone(),
+                        });
+                    }
+                    ResponseInputItem::InputText { .. }
+                    | ResponseInputItem::FunctionCall { .. }
+                    | ResponseInputItem::FunctionCallOutput { .. } => {}
+                }
+            }
+        }
+        images
+    }
+
+    #[must_use]
+    pub fn has_images(&self) -> bool {
+        match self {
+            Self::Text(_) => false,
+            Self::Items(items) => items.iter().any(|item| match item {
+                ResponseInputItem::Message { content, .. } => content.has_images(),
+                ResponseInputItem::InputImage { .. } => true,
+                ResponseInputItem::InputText { .. }
+                | ResponseInputItem::FunctionCall { .. }
+                | ResponseInputItem::FunctionCallOutput { .. } => false,
+            }),
+        }
+    }
+
+    pub fn text_with_image_descriptions(
+        &self,
+        descriptions: &[String],
+    ) -> Result<String, ResponseContractError> {
+        self.validate()?;
+        if self.image_inputs().len() != descriptions.len() {
+            return Err(ResponseContractError::ImageDescriptionCount);
+        }
+        if descriptions.iter().any(|value| value.trim().is_empty()) {
+            return Err(ResponseContractError::EmptyImageDescription);
+        }
+        let mut description_index = 0_usize;
+        let mut parts = Vec::new();
+        match self {
+            Self::Text(text) => parts.push(text.clone()),
+            Self::Items(items) => {
+                for item in items {
+                    match item {
+                        ResponseInputItem::Message { content, .. } => {
+                            content.resolved_texts(descriptions, &mut description_index, &mut parts)
+                        }
+                        ResponseInputItem::InputText { text } => parts.push(text.clone()),
+                        ResponseInputItem::InputImage { .. } => {
+                            push_image_description(
+                                descriptions,
+                                &mut description_index,
+                                &mut parts,
+                            );
+                        }
+                        ResponseInputItem::FunctionCall { .. } => {}
+                        ResponseInputItem::FunctionCallOutput { output, .. } => {
+                            parts.push(output.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let text = parts
+            .into_iter()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_owned();
         if text.is_empty() {
             return Err(ResponseContractError::EmptyInput);
         }
@@ -62,6 +154,21 @@ impl ResponseInput {
                 for item in items {
                     item.validate(&mut text_bytes)?;
                 }
+                let image_count = self.image_inputs().len();
+                if image_count > MAX_RESPONSE_IMAGES {
+                    return Err(ResponseContractError::TooManyImages);
+                }
+                if image_count > 0
+                    && items.iter().any(|item| {
+                        matches!(
+                            item,
+                            ResponseInputItem::FunctionCall { .. }
+                                | ResponseInputItem::FunctionCallOutput { .. }
+                        )
+                    })
+                {
+                    return Err(ResponseContractError::ImageInputWithTools);
+                }
                 if text_bytes > MAX_RESPONSE_INPUT_BYTES {
                     return Err(ResponseContractError::InputTooLarge);
                 }
@@ -81,7 +188,7 @@ impl ResponseInput {
         match self {
             Self::Text(text) => messages.push(crate::GatewayMessage {
                 role: crate::GatewayMessageRole::User,
-                content: Some(text.clone()),
+                content: Some(text.clone().into()),
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             }),
@@ -97,13 +204,13 @@ impl ResponseInput {
                                     return Err(ResponseContractError::InvalidRole(role.clone()));
                                 }
                             },
-                            content: Some(content.texts().join("\n")),
+                            content: Some(content.gateway_content()),
                             tool_call_id: None,
                             tool_calls: Vec::new(),
                         },
                         ResponseInputItem::InputText { text } => crate::GatewayMessage {
                             role: crate::GatewayMessageRole::User,
-                            content: Some(text.clone()),
+                            content: Some(text.clone().into()),
                             tool_call_id: None,
                             tool_calls: Vec::new(),
                         },
@@ -127,12 +234,26 @@ impl ResponseInput {
                         ResponseInputItem::FunctionCallOutput { call_id, output } => {
                             crate::GatewayMessage {
                                 role: crate::GatewayMessageRole::Tool,
-                                content: Some(output.clone()),
+                                content: Some(output.clone().into()),
                                 tool_call_id: Some(call_id.clone()),
                                 tool_calls: Vec::new(),
                             }
                         }
-                        ResponseInputItem::InputImage { .. } => unreachable!("validated above"),
+                        ResponseInputItem::InputImage { image_url, detail } => {
+                            crate::GatewayMessage {
+                                role: crate::GatewayMessageRole::User,
+                                content: Some(crate::GatewayMessageContent::Parts(vec![
+                                    crate::GatewayContentPart::ImageUrl {
+                                        image_url: crate::GatewayImageUrl {
+                                            url: image_url.clone(),
+                                            detail: detail.clone(),
+                                        },
+                                    },
+                                ])),
+                                tool_call_id: None,
+                                tool_calls: Vec::new(),
+                            }
+                        }
                     };
                     messages.push(message);
                 }
@@ -174,6 +295,109 @@ impl ResponseMessageContent {
         }
         Ok(())
     }
+
+    fn has_images(&self) -> bool {
+        matches!(self, Self::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ResponseContentBlock::InputImage { .. })))
+    }
+
+    fn collect_images(&self, output: &mut Vec<ResponseImageInput>) {
+        if let Self::Blocks(blocks) = self {
+            for block in blocks {
+                if let ResponseContentBlock::InputImage { image_url, detail } = block {
+                    output.push(ResponseImageInput {
+                        image_url: image_url.clone(),
+                        detail: detail.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn gateway_content(&self) -> crate::GatewayMessageContent {
+        match self {
+            Self::Text(text) => text.clone().into(),
+            Self::Blocks(blocks)
+                if blocks
+                    .iter()
+                    .any(|block| matches!(block, ResponseContentBlock::InputImage { .. })) =>
+            {
+                crate::GatewayMessageContent::Parts(
+                    blocks
+                        .iter()
+                        .map(|block| match block {
+                            ResponseContentBlock::InputText { text }
+                            | ResponseContentBlock::OutputText { text, .. } => {
+                                crate::GatewayContentPart::Text { text: text.clone() }
+                            }
+                            ResponseContentBlock::Refusal { refusal } => {
+                                crate::GatewayContentPart::Text {
+                                    text: refusal.clone(),
+                                }
+                            }
+                            ResponseContentBlock::InputImage { image_url, detail } => {
+                                crate::GatewayContentPart::ImageUrl {
+                                    image_url: crate::GatewayImageUrl {
+                                        url: image_url.clone(),
+                                        detail: detail.clone(),
+                                    },
+                                }
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            Self::Blocks(_) => self.texts().join("\n").into(),
+        }
+    }
+
+    fn resolved_texts(
+        &self,
+        descriptions: &[String],
+        description_index: &mut usize,
+        output: &mut Vec<String>,
+    ) {
+        match self {
+            Self::Text(text) => output.push(text.clone()),
+            Self::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        ResponseContentBlock::InputText { text }
+                        | ResponseContentBlock::OutputText { text, .. } => {
+                            output.push(text.clone());
+                        }
+                        ResponseContentBlock::Refusal { refusal } => {
+                            output.push(refusal.clone());
+                        }
+                        ResponseContentBlock::InputImage { .. } => {
+                            push_image_description(descriptions, description_index, output)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseImageInput {
+    pub image_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+fn push_image_description(
+    descriptions: &[String],
+    description_index: &mut usize,
+    output: &mut Vec<String>,
+) {
+    let index = *description_index;
+    output.push(format!(
+        "[Visual description for image {}]\n{}",
+        index + 1,
+        descriptions[index].trim()
+    ));
+    *description_index += 1;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -222,7 +446,6 @@ impl ResponseContentBlock {
                 {
                     return Err(ResponseContractError::InvalidImageDetail);
                 }
-                return Err(ResponseContractError::UnsupportedInputModality("image"));
             }
         }
         Ok(())
@@ -263,6 +486,9 @@ impl ResponseInputItem {
                 if !matches!(role.as_str(), "system" | "user" | "assistant") {
                     return Err(ResponseContractError::InvalidRole(role.clone()));
                 }
+                if role != "user" && content.has_images() {
+                    return Err(ResponseContractError::InvalidImageRole(role.clone()));
+                }
                 content.validate(text_bytes)?;
             }
             Self::InputText { text } => *text_bytes = text_bytes.saturating_add(text.len()),
@@ -274,7 +500,6 @@ impl ResponseInputItem {
                 {
                     return Err(ResponseContractError::InvalidImageDetail);
                 }
-                return Err(ResponseContractError::UnsupportedInputModality("image"));
             }
             Self::FunctionCall {
                 call_id,
@@ -326,6 +551,10 @@ pub struct MomoResponseExtension {
     #[serde(default)]
     pub scope_id: Option<String>,
     #[serde(default)]
+    pub conversation_scope_id: Option<String>,
+    #[serde(default)]
+    pub character_scope_id: Option<String>,
+    #[serde(default)]
     pub title: Option<String>,
     #[serde(default = "default_true")]
     pub memory: bool,
@@ -345,6 +574,8 @@ impl Default for MomoResponseExtension {
             conversation_id: None,
             character_id: None,
             scope_id: None,
+            conversation_scope_id: None,
+            character_scope_id: None,
             title: None,
             memory: true,
             semantic_graph: true,
@@ -400,6 +631,7 @@ impl MomoResponseRequest {
         {
             return Err(ResponseContractError::RequestTooLarge);
         }
+        let input_text = self.input.text()?;
         if let Some(instructions) = &self.instructions {
             validate_len(
                 instructions,
@@ -441,17 +673,34 @@ impl MomoResponseRequest {
                 }
             }
         }
-        for (value, field) in [
-            (self.momo.request_id.as_deref(), "request ID"),
-            (self.momo.conversation_id.as_deref(), "conversation ID"),
-            (self.momo.character_id.as_deref(), "character ID"),
-            (self.momo.scope_id.as_deref(), "scope ID"),
-        ] {
+        if let Some(value) = self.momo.request_id.as_deref() {
+            validate_id(value, "request ID")?;
+        }
+        if let Some(value) = self.momo.conversation_id.as_deref() {
+            validate_uuid(value, "conversation ID")?;
+        }
+        for (value, field) in [(self.momo.character_id.as_deref(), "character ID")] {
             if let Some(value) = value {
-                validate_id(value, field)?;
+                validate_uuid(value, field)?;
             }
         }
-        self.input.text()
+        if self.momo.character_id.is_none() {
+            return Err(ResponseContractError::InvalidUuid("character ID"));
+        }
+        for (value, field) in [
+            (self.momo.scope_id.as_deref(), "scope ID"),
+            (
+                self.momo.conversation_scope_id.as_deref(),
+                "conversation scope ID",
+            ),
+            (
+                self.momo.character_scope_id.as_deref(),
+                "character scope ID",
+            ),
+        ] {
+            validate_required_uuid(value, field)?;
+        }
+        Ok(input_text)
     }
 }
 
@@ -538,7 +787,7 @@ pub struct ResponseError {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ResponseContractError {
-    #[error("response input must contain text")]
+    #[error("response input must contain text, an image, or function output")]
     EmptyInput,
     #[error("response input exceeds the {MAX_RESPONSE_INPUT_BYTES} byte limit")]
     InputTooLarge,
@@ -548,6 +797,8 @@ pub enum ResponseContractError {
     EmptyModel,
     #[error("{0} must not be empty and may not exceed {MAX_RESPONSE_ID_BYTES} bytes")]
     InvalidId(&'static str),
+    #[error("{0} is required and must be a UUID")]
+    InvalidUuid(&'static str),
     #[error("message role {0:?} is not supported")]
     InvalidRole(String),
     #[error("structured message content must not be empty")]
@@ -556,8 +807,16 @@ pub enum ResponseContractError {
     InvalidImageDetail,
     #[error("temperature must be finite")]
     InvalidTemperature,
-    #[error("{0} input is reserved for a future capability and is not enabled in 0.5")]
-    UnsupportedInputModality(&'static str),
+    #[error("image input is allowed only in user content, not role {0:?}")]
+    InvalidImageRole(String),
+    #[error("image input cannot be combined with function-call continuation items")]
+    ImageInputWithTools,
+    #[error("response request may contain at most {MAX_RESPONSE_IMAGES} images")]
+    TooManyImages,
+    #[error("the visual-description adapter returned the wrong number of descriptions")]
+    ImageDescriptionCount,
+    #[error("the visual-description adapter returned an empty description")]
+    EmptyImageDescription,
     #[error(
         "image reference is invalid or exceeds the {MAX_RESPONSE_IMAGE_REFERENCE_BYTES} byte limit"
     )]
@@ -592,6 +851,23 @@ fn validate_id(value: &str, field: &'static str) -> Result<(), ResponseContractE
     } else {
         Ok(())
     }
+}
+
+fn validate_required_uuid(
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<(), ResponseContractError> {
+    let Some(value) = value else {
+        return Err(ResponseContractError::InvalidUuid(field));
+    };
+    validate_uuid(value, field)
+}
+
+fn validate_uuid(value: &str, field: &'static str) -> Result<(), ResponseContractError> {
+    validate_id(value, field)?;
+    uuid::Uuid::parse_str(value)
+        .map(|_| ())
+        .map_err(|_| ResponseContractError::InvalidUuid(field))
 }
 
 fn validate_tool_name(value: &str) -> Result<(), ResponseContractError> {
@@ -638,14 +914,26 @@ mod tests {
     fn accepts_string_and_structured_text_input() {
         let string: MomoResponseRequest = serde_json::from_value(serde_json::json!({
             "input": "hello",
-            "momo": {"schema": MOMO_RESPONSE_SCHEMA}
+            "momo": {
+                "schema": MOMO_RESPONSE_SCHEMA,
+                "scope_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_scope_id": "00000000-0000-4000-8000-000000000012",
+                "character_scope_id": "00000000-0000-4000-8000-000000000013",
+                "character_id": "00000000-0000-4000-8000-000000000014"
+            }
         }))
         .expect("string request");
         assert_eq!(string.validate().expect("text"), "hello");
 
         let structured: MomoResponseRequest = serde_json::from_value(serde_json::json!({
             "input": [{"type": "input_text", "text": "hello"}],
-            "momo": {"schema": MOMO_RESPONSE_SCHEMA}
+            "momo": {
+                "schema": MOMO_RESPONSE_SCHEMA,
+                "scope_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_scope_id": "00000000-0000-4000-8000-000000000012",
+                "character_scope_id": "00000000-0000-4000-8000-000000000013",
+                "character_id": "00000000-0000-4000-8000-000000000014"
+            }
         }))
         .expect("structured request");
         assert_eq!(structured.validate().expect("text"), "hello");
@@ -665,24 +953,94 @@ mod tests {
     }
 
     #[test]
-    fn validates_content_blocks_and_rejects_deferred_images() {
+    fn validates_and_resolves_governed_image_input() {
         let structured: MomoResponseRequest = serde_json::from_value(serde_json::json!({
             "input": [{
                 "type": "message",
                 "role": "user",
                 "content": [{"type": "input_text", "text": "hello"}]
-            }]
+            }],
+            "momo": {
+                "scope_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_scope_id": "00000000-0000-4000-8000-000000000012",
+                "character_scope_id": "00000000-0000-4000-8000-000000000013",
+                "character_id": "00000000-0000-4000-8000-000000000014"
+            }
         }))
         .expect("content blocks");
         assert_eq!(structured.validate().expect("text"), "hello");
 
         let image: MomoResponseRequest = serde_json::from_value(serde_json::json!({
-            "input": [{"type": "input_image", "image_url": "https://example.test/image.png"}]
+            "input": [
+                {"type": "input_text", "text": "What is shown?"},
+                {"type": "input_image", "image_url": "https://example.test/image.png", "detail": "high"}
+            ],
+            "momo": {
+                "scope_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_scope_id": "00000000-0000-4000-8000-000000000012",
+                "character_scope_id": "00000000-0000-4000-8000-000000000013",
+                "character_id": "00000000-0000-4000-8000-000000000014"
+            }
         }))
         .expect("image structure");
+        assert_eq!(image.validate().expect("image contract"), "What is shown?");
         assert_eq!(
-            image.validate(),
-            Err(ResponseContractError::UnsupportedInputModality("image"))
+            image.input.image_inputs(),
+            vec![ResponseImageInput {
+                image_url: "https://example.test/image.png".to_owned(),
+                detail: Some("high".to_owned()),
+            }]
+        );
+        assert_eq!(
+            image
+                .input
+                .text_with_image_descriptions(&["A red umbrella.".to_owned()])
+                .expect("resolved input"),
+            "What is shown?\n[Visual description for image 1]\nA red umbrella."
+        );
+        let messages = image.input.gateway_messages().expect("multimodal messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, Some("What is shown?".into()));
+        assert_eq!(
+            messages[1].content,
+            Some(crate::GatewayMessageContent::Parts(vec![
+                crate::GatewayContentPart::ImageUrl {
+                    image_url: crate::GatewayImageUrl {
+                        url: "https://example.test/image.png".to_owned(),
+                        detail: Some("high".to_owned()),
+                    },
+                },
+            ]))
+        );
+    }
+
+    #[test]
+    fn rejects_images_in_non_user_roles_or_tool_continuations() {
+        let assistant_image: MomoResponseRequest = serde_json::from_value(serde_json::json!({
+            "input": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "input_image", "image_url": "https://example.test/image.png"}]
+            }]
+        }))
+        .expect("image request");
+        assert_eq!(
+            assistant_image.validate(),
+            Err(ResponseContractError::InvalidImageRole(
+                "assistant".to_owned()
+            ))
+        );
+
+        let mixed: MomoResponseRequest = serde_json::from_value(serde_json::json!({
+            "input": [
+                {"type": "input_image", "image_url": "https://example.test/image.png"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "done"}
+            ]
+        }))
+        .expect("mixed request");
+        assert_eq!(
+            mixed.validate(),
+            Err(ResponseContractError::ImageInputWithTools)
         );
     }
 
@@ -739,19 +1097,30 @@ mod tests {
     #[test]
     fn parses_cross_repository_golden_request() {
         let request: MomoResponseRequest =
-            serde_json::from_str(include_str!("../../../contracts/0.5/response_request.json"))
+            serde_json::from_str(include_str!("../../../contracts/1.0/response_request.json"))
                 .expect("golden response request");
         assert_eq!(request.model, "conversation");
         assert_eq!(
             request.validate().expect("valid contract"),
-            "Hello from the cross-repository contract."
+            "Hello from the MOMO 1.0 cross-repository contract."
         );
+    }
+
+    #[test]
+    fn parses_cross_repository_multimodal_request() {
+        let request: MomoResponseRequest = serde_json::from_str(include_str!(
+            "../../../contracts/1.0/multimodal_request.json"
+        ))
+        .expect("golden multimodal request");
+        request.validate().expect("valid multimodal contract");
+        assert_eq!(request.input.image_inputs().len(), 1);
+        assert_eq!(request.momo.schema, MOMO_RESPONSE_SCHEMA);
     }
 
     #[test]
     fn parses_cross_repository_tool_contract() {
         let fixture: Value =
-            serde_json::from_str(include_str!("../../../contracts/0.5/tool_turn.json"))
+            serde_json::from_str(include_str!("../../../contracts/1.0/tool_turn.json"))
                 .expect("tool fixture");
         let tools: Vec<ResponseTool> =
             serde_json::from_value(fixture["tools"].clone()).expect("tools");

@@ -8,7 +8,7 @@ use std::{
 use chrono::Utc;
 use momo_config::ConfigDocument;
 use momo_domain::{CharacterCard, Conversation, Message};
-use momo_moc::{ExtractionLimits, Manifest};
+use momo_moc::{ExtractionLimits, Manifest, ModuleDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tempfile::{NamedTempFile, TempDir};
@@ -96,9 +96,9 @@ pub struct MocExportPlan {
 }
 
 impl MocExportPlan {
-    fn validate(&self) -> Result<HashSet<MocModule>, PortableError> {
+    fn validate(&self, allow_empty: bool) -> Result<HashSet<MocModule>, PortableError> {
         let modules = self.modules.iter().copied().collect::<HashSet<_>>();
-        if modules.is_empty() {
+        if modules.is_empty() && !allow_empty {
             return Err(PortableError::EmptySelection);
         }
         if modules.len() != self.modules.len() {
@@ -157,8 +157,29 @@ pub struct ImportReport {
     pub memory_files_imported: usize,
     pub semantic_graph_files_imported: usize,
     pub skipped_conflicts: usize,
-    pub unknown_modules_preserved: Vec<String>,
+    pub unknown_modules: Vec<UnknownMocModule>,
     pub momo_config: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostMocModule {
+    pub id: String,
+    pub input_path: PathBuf,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default = "default_host_module_import_order")]
+    pub import_order: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnknownMocModule {
+    pub id: String,
+    pub declared_path: String,
+    pub dependencies: Vec<String>,
+    pub import_order: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -217,12 +238,23 @@ pub async fn export_moc(
     settings: &JsonValue,
     plan: &MocExportPlan,
 ) -> Result<Manifest, PortableError> {
-    let selected = plan.validate()?;
+    export_moc_with_host_modules(core, output, scope_id, settings, plan, &[]).await
+}
+
+pub async fn export_moc_with_host_modules(
+    core: &MomoCore,
+    output: impl AsRef<Path>,
+    scope_id: Uuid,
+    settings: &JsonValue,
+    plan: &MocExportPlan,
+    host_modules: &[HostMocModule],
+) -> Result<Manifest, PortableError> {
+    let selected = plan.validate(!host_modules.is_empty())?;
     let staging = TempDir::new()?;
     let mut modules = Vec::new();
     if selected.contains(&MocModule::MomoConfig) {
         merged_momo_config(core, settings)?.save(staging.path().join("config/momo.toml"))?;
-        modules.push(("config".to_owned(), PathBuf::from("config")));
+        modules.push(known_module_definition("config"));
     }
     if selected.contains(&MocModule::Characters) {
         export_characters(
@@ -233,26 +265,53 @@ pub async fn export_moc(
             plan.compatibility,
         )
         .await?;
-        modules.push(("characters".to_owned(), PathBuf::from("characters")));
+        modules.push(known_module_definition("characters"));
         if staging.path().join("tavern_compat").exists() {
-            modules.push(("tavern_compat".to_owned(), PathBuf::from("tavern_compat")));
+            modules.push(ModuleDefinition {
+                id: "tavern_compat".to_owned(),
+                path: "tavern_compat".to_owned(),
+                dependencies: vec!["characters".to_owned()],
+                import_order: 1_000,
+            });
         }
     }
     if selected.contains(&MocModule::Conversations) {
         export_conversations(core, staging.path(), scope_id).await?;
-        modules.push(("conversations".to_owned(), PathBuf::from("conversations")));
+        modules.push(known_module_definition("conversations"));
     }
     if selected.contains(&MocModule::Memory) {
         let memory = core.memory_for_scope(scope_id)?;
         copy_tree_filtered(memory.root(), &staging.path().join("memory"), false)?;
-        modules.push(("memory".to_owned(), PathBuf::from("memory")));
+        modules.push(known_module_definition("memory"));
     }
     if selected.contains(&MocModule::SemanticGraph) {
         let memory = core.memory_for_scope(scope_id)?;
         copy_tree_filtered(memory.root(), &staging.path().join("semantic_graph"), true)?;
-        modules.push(("semantic_graph".to_owned(), PathBuf::from("semantic_graph")));
+        modules.push(known_module_definition("semantic_graph"));
     }
-    Ok(momo_moc::create(output, staging.path(), &modules)?)
+    let mut module_ids = modules
+        .iter()
+        .map(|module| module.id.clone())
+        .collect::<HashSet<_>>();
+    for module in host_modules {
+        validate_host_module(module, &mut module_ids)?;
+        let relative = PathBuf::from("extensions").join(&module.id);
+        copy_host_module_tree(&module.input_path, &staging.path().join(&relative))?;
+        modules.push(ModuleDefinition {
+            id: module.id.clone(),
+            path: relative.to_string_lossy().replace('\\', "/"),
+            dependencies: module.dependencies.clone(),
+            import_order: module.import_order,
+        });
+    }
+    if modules.is_empty() {
+        return Err(PortableError::EmptySelection);
+    }
+    Ok(momo_moc::create_from_definitions(
+        output,
+        staging.path(),
+        &modules,
+    )?)
 }
 
 pub async fn import_moc(
@@ -264,6 +323,24 @@ pub async fn import_moc(
     import_moc_with_passphrase(core, input, scope_id, conflict_mode, None).await
 }
 
+pub async fn import_moc_claiming_unknown_modules(
+    core: &MomoCore,
+    input: impl AsRef<Path>,
+    scope_id: Uuid,
+    conflict_mode: ConflictMode,
+    claim_directory: impl AsRef<Path>,
+) -> Result<ImportReport, PortableError> {
+    import_moc_with_passphrase_and_claims(
+        core,
+        input,
+        scope_id,
+        conflict_mode,
+        None,
+        Some(claim_directory.as_ref()),
+    )
+    .await
+}
+
 pub async fn export_private_moc(
     core: &MomoCore,
     output: impl AsRef<Path>,
@@ -272,12 +349,25 @@ pub async fn export_private_moc(
     plan: &MocExportPlan,
     passphrase: &str,
 ) -> Result<Manifest, PortableError> {
+    export_private_moc_with_host_modules(core, output, scope_id, settings, plan, &[], passphrase)
+        .await
+}
+
+pub async fn export_private_moc_with_host_modules(
+    core: &MomoCore,
+    output: impl AsRef<Path>,
+    scope_id: Uuid,
+    settings: &JsonValue,
+    plan: &MocExportPlan,
+    host_modules: &[HostMocModule],
+    passphrase: &str,
+) -> Result<Manifest, PortableError> {
     if passphrase.is_empty() {
         return Err(PortableError::MissingPassphrase);
     }
     let temporary = TempDir::new()?;
     let inner_path = temporary.path().join("payload.moc");
-    export_moc(core, &inner_path, scope_id, settings, plan).await?;
+    export_moc_with_host_modules(core, &inner_path, scope_id, settings, plan, host_modules).await?;
     let metadata = fs::metadata(&inner_path)?;
     if metadata.len() > PRIVATE_MOC_MAX_BYTES {
         return Err(PortableError::PrivateMocTooLarge);
@@ -316,6 +406,18 @@ pub async fn import_moc_with_passphrase(
     conflict_mode: ConflictMode,
     passphrase: Option<&str>,
 ) -> Result<ImportReport, PortableError> {
+    import_moc_with_passphrase_and_claims(core, input, scope_id, conflict_mode, passphrase, None)
+        .await
+}
+
+pub async fn import_moc_with_passphrase_and_claims(
+    core: &MomoCore,
+    input: impl AsRef<Path>,
+    scope_id: Uuid,
+    conflict_mode: ConflictMode,
+    passphrase: Option<&str>,
+    claim_directory: Option<&Path>,
+) -> Result<ImportReport, PortableError> {
     let mode = conflict_mode;
     let outer = TempDir::new()?;
     let manifest = momo_moc::extract(input, outer.path(), ExtractionLimits::default())?;
@@ -349,23 +451,18 @@ pub async fn import_moc_with_passphrase(
         None
     };
     let extracted = inner.as_ref().map_or(outer.path(), TempDir::path);
-    let unknown_modules_preserved = payload_manifest
+    let mut unknown_modules = payload_manifest
         .module_definitions
         .iter()
-        .filter(|module| {
-            !matches!(
-                module.id.as_str(),
-                "config"
-                    | "characters"
-                    | "conversations"
-                    | "memory"
-                    | "semantic_graph"
-                    | "tavern_compat"
-                    | "encrypted-container"
-            )
+        .filter(|module| !is_core_moc_module(&module.id))
+        .map(|module| UnknownMocModule {
+            id: module.id.clone(),
+            declared_path: module.path.clone(),
+            dependencies: module.dependencies.clone(),
+            import_order: module.import_order,
+            claimed_path: None,
         })
-        .map(|module| module.id.clone())
-        .collect();
+        .collect::<Vec<_>>();
     let mut report = ImportReport {
         source_format_version: payload_manifest.format_version,
         characters_imported: 0,
@@ -374,7 +471,7 @@ pub async fn import_moc_with_passphrase(
         memory_files_imported: 0,
         semantic_graph_files_imported: 0,
         skipped_conflicts: 0,
-        unknown_modules_preserved,
+        unknown_modules: Vec::new(),
         momo_config: None,
     };
     if payload_manifest
@@ -392,6 +489,13 @@ pub async fn import_moc_with_passphrase(
     import_conversations(core, extracted, scope_id, mode, &mut report).await?;
     import_memory(core, extracted, scope_id, mode, &mut report)?;
     import_semantic_graph(core, extracted, scope_id, mode, &mut report)?;
+    if let Some(claim_directory) = claim_directory {
+        for module in &mut unknown_modules {
+            let claimed = claim_unknown_module(extracted, claim_directory, module)?;
+            module.claimed_path = Some(claimed.to_string_lossy().into_owned());
+        }
+    }
+    report.unknown_modules = unknown_modules;
     Ok(report)
 }
 
@@ -971,6 +1075,136 @@ fn copy_tree_filtered(
     Ok(())
 }
 
+fn known_module_definition(id: &str) -> ModuleDefinition {
+    let (path, dependencies, import_order): (&str, &[&str], u32) = match id {
+        "config" => ("config", &[], 10),
+        "characters" => ("characters", &[], 20),
+        "conversations" => ("conversations", &["characters"], 30),
+        "memory" => ("memory", &[], 40),
+        "semantic_graph" => ("semantic_graph", &[], 50),
+        _ => unreachable!("known module definition requested for {id}"),
+    };
+    ModuleDefinition {
+        id: id.to_owned(),
+        path: path.to_owned(),
+        dependencies: dependencies
+            .iter()
+            .map(|dependency| (*dependency).to_owned())
+            .collect(),
+        import_order,
+    }
+}
+
+fn is_core_moc_module(id: &str) -> bool {
+    matches!(
+        id,
+        "config"
+            | "characters"
+            | "conversations"
+            | "memory"
+            | "semantic_graph"
+            | "tavern_compat"
+            | "encrypted-container"
+    )
+}
+
+fn validate_module_id(id: &str) -> Result<(), PortableError> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(PortableError::InvalidData(format!(
+            "invalid host MOC module id: {id}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_host_module(
+    module: &HostMocModule,
+    module_ids: &mut HashSet<String>,
+) -> Result<(), PortableError> {
+    validate_module_id(&module.id)?;
+    if is_core_moc_module(&module.id) {
+        return Err(PortableError::InvalidData(format!(
+            "host module cannot replace Core module {}",
+            module.id
+        )));
+    }
+    if !module_ids.insert(module.id.clone()) {
+        return Err(PortableError::InvalidData(format!(
+            "duplicate MOC module id: {}",
+            module.id
+        )));
+    }
+    let mut dependencies = HashSet::new();
+    for dependency in &module.dependencies {
+        validate_module_id(dependency)?;
+        if dependency == &module.id || !dependencies.insert(dependency) {
+            return Err(PortableError::InvalidData(format!(
+                "invalid dependency for host module {}",
+                module.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn copy_host_module_tree(source: &Path, destination: &Path) -> Result<(), PortableError> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PortableError::InvalidData(format!(
+            "host MOC module source must be a regular directory: {}",
+            source.display()
+        )));
+    }
+    fs::create_dir_all(destination)?;
+    for item in WalkDir::new(source).follow_links(false) {
+        let item = item?;
+        if item.file_type().is_symlink() {
+            return Err(PortableError::InvalidData(format!(
+                "host MOC module contains a symbolic link: {}",
+                item.path().display()
+            )));
+        }
+        if !item.file_type().is_file() {
+            continue;
+        }
+        let relative = item
+            .path()
+            .strip_prefix(source)
+            .map_err(|_| PortableError::InvalidData("invalid host module path".to_owned()))?;
+        atomic_write(&destination.join(relative), &fs::read(item.path())?)?;
+    }
+    Ok(())
+}
+
+fn claim_unknown_module(
+    extracted: &Path,
+    claim_directory: &Path,
+    module: &UnknownMocModule,
+) -> Result<PathBuf, PortableError> {
+    validate_module_id(&module.id)?;
+    fs::create_dir_all(claim_directory)?;
+    let destination = claim_directory.join(&module.id);
+    if destination.exists() {
+        return Err(PortableError::InvalidData(format!(
+            "claimed MOC module destination already exists: {}",
+            destination.display()
+        )));
+    }
+    let temporary = TempDir::new_in(claim_directory)?;
+    let staged = temporary.path().join(&module.id);
+    copy_host_module_tree(&extracted.join(&module.declared_path), &staged)?;
+    fs::rename(&staged, &destination)?;
+    Ok(destination)
+}
+
+const fn default_host_module_import_order() -> u32 {
+    1_000
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), PortableError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
@@ -1220,6 +1454,10 @@ mod tests {
         let settings = serde_json::json!({
             "schema_version": 1,
             "model_use": { "chat": "primary" },
+            "prompts": {
+                "memory_distillation": "Distill durable memory as YAML patches.",
+                "semantic_graph_governance": "Govern narrative rules as YAML patches."
+            },
             "future": { "preserved": true }
         });
         let manifest = export_moc(
@@ -1362,6 +1600,95 @@ mod tests {
                 .scope_id,
             new_scope
         );
+    }
+
+    #[tokio::test]
+    async fn host_modules_are_explicitly_exported_reported_and_claimed() {
+        let source_directory = tempfile::tempdir().expect("source directory");
+        let source = MomoCore::initialize(source_directory.path())
+            .await
+            .expect("source core");
+        let extension = source_directory.path().join("weather-module");
+        fs::create_dir_all(&extension).expect("extension directory");
+        fs::write(
+            extension.join("module.json"),
+            br#"{"provider":"local-weather"}"#,
+        )
+        .expect("extension payload");
+        let output = source_directory.path().join("extension-only.moc");
+        let host_module = HostMocModule {
+            id: "weather".to_owned(),
+            input_path: extension,
+            dependencies: vec!["config".to_owned()],
+            import_order: 900,
+        };
+        let manifest = export_moc_with_host_modules(
+            &source,
+            &output,
+            new_id(),
+            &serde_json::json!({}),
+            &MocExportPlan {
+                modules: vec![],
+                character_id: None,
+                compatibility: MocCompatibility::None,
+            },
+            std::slice::from_ref(&host_module),
+        )
+        .await
+        .expect("export host module");
+        assert_eq!(manifest.module_definitions[0].id, "weather");
+        assert_eq!(manifest.module_definitions[0].dependencies, ["config"]);
+
+        let destination_directory = tempfile::tempdir().expect("destination directory");
+        let destination = MomoCore::initialize(destination_directory.path())
+            .await
+            .expect("destination core");
+        let report = import_moc(&destination, &output, new_id(), ConflictMode::Replace)
+            .await
+            .expect("report unknown module");
+        assert_eq!(report.unknown_modules.len(), 1);
+        assert_eq!(report.unknown_modules[0].id, "weather");
+        assert_eq!(report.unknown_modules[0].claimed_path, None);
+
+        let claims = destination_directory.path().join("claims");
+        let report = import_moc_claiming_unknown_modules(
+            &destination,
+            &output,
+            new_id(),
+            ConflictMode::Replace,
+            &claims,
+        )
+        .await
+        .expect("claim unknown module");
+        assert_eq!(
+            report.unknown_modules[0].claimed_path.as_deref(),
+            Some(claims.join("weather").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            fs::read_to_string(claims.join("weather/module.json")).expect("claimed payload"),
+            r#"{"provider":"local-weather"}"#
+        );
+
+        let reserved = HostMocModule {
+            id: "characters".to_owned(),
+            ..host_module
+        };
+        assert!(matches!(
+            export_moc_with_host_modules(
+                &source,
+                source_directory.path().join("invalid.moc"),
+                new_id(),
+                &serde_json::json!({}),
+                &MocExportPlan {
+                    modules: vec![],
+                    character_id: None,
+                    compatibility: MocCompatibility::None,
+                },
+                &[reserved],
+            )
+            .await,
+            Err(PortableError::InvalidData(_))
+        ));
     }
 
     #[tokio::test]
@@ -1529,6 +1856,10 @@ name = "Creator"
                 "schema_version": 1,
                 "model_use": { "chat": "primary" },
                 "runtime": { "memory_enabled": true },
+                "prompts": {
+                    "memory_distillation": "Distill durable memory as YAML patches.",
+                    "semantic_graph_governance": "Govern narrative rules as YAML patches."
+                },
                 "extension": { "preserved": true }
             }),
         )
