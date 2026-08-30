@@ -2779,6 +2779,36 @@ mod tests {
                 let read = socket.read(&mut request).await.expect("read maintenance");
                 let request = String::from_utf8_lossy(&request[..read]);
                 assert!(request.contains(&format!("\"model\":\"{expected_model}\"")));
+                let request_body = request
+                    .split_once("\r\n\r\n")
+                    .expect("maintenance HTTP body")
+                    .1;
+                let request_json: Value =
+                    serde_json::from_str(request_body).expect("maintenance request JSON");
+                let maintenance_input: Value = serde_json::from_str(
+                    request_json["messages"][1]["content"]
+                        .as_str()
+                        .expect("structured maintenance input"),
+                )
+                .expect("maintenance input JSON");
+                assert_eq!(
+                    maintenance_input["maintenance_kind"],
+                    if expected_model == "memory_distillation" {
+                        "memory"
+                    } else {
+                        "semantic_graph"
+                    }
+                );
+                assert!(maintenance_input["existing_context"].is_array());
+                assert_eq!(
+                    maintenance_input["pending_turns"][0]["request_id"],
+                    "maintenance-contract-1"
+                );
+                assert!(
+                    maintenance_input["current_unix_timestamp"]
+                        .as_i64()
+                        .is_some()
+                );
                 let body = json!({
                     "choices": [{
                         "message": {"role": "assistant", "content": "patches: []"},

@@ -103,11 +103,15 @@ temporary unknown payloads are discarded when import finishes.
 
 ## Portable maintenance prompts
 
-The previously embedded DMW distillation and NSG governance system prompts are
-now required under `[prompts]` in `momo.toml`. Core rejects a portable document
-that omits either field; there is no compatibility fallback while parsing a
-file. This makes the effective background maintenance policy auditable and
-portable.
+The DMW distillation and NSG governance system prompts are full Markdown files.
+`momo.toml` references them through `memory_distillation_file` and
+`semantic_graph_governance_file`; MOC config import/export moves those files
+with the TOML. Core rejects missing, unsafe, escaping, non-UTF-8, empty, or
+oversized references. It does not replace a missing file with an abbreviated
+compatibility prompt.
+
+`[prompts]` itself is optional: omission selects the standard relative files
+`prompts/dmw_distiller.md` and `prompts/nsg_governor.md`.
 
 ## Wire compatibility during the release candidate
 

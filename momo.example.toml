@@ -1,0 +1,48 @@
+# Portable MOMO product behaviour. This file may be included in a MOC export.
+# Never place credentials, listener addresses, Discord IDs, executables, or
+# absolute host paths in this document.
+schema_version = 1
+
+# memory 和 semantic_graph 指向同一个逻辑 profile 就是共用模型；也可分别
+# 指向 config.toml 中不同的模型 profile。
+[model_use]
+chat = "chat-main"
+memory = "refiner-shared"
+semantic_graph = "refiner-shared"
+embedding = "" # 留空关闭向量请求；填 embedding-main 即启用 /embeddings。
+vision = "" # 多模态主模型留空；纯文本主模型可填 config.toml 的 vision-fallback。
+
+[runtime]
+character_scope_id = "01900000-0000-7000-8000-000000000201" # 示例角色目录 UUID；实际部署必须替换。
+character_id = "01900000-0000-7000-8000-000000000202" # 示例角色 UUID；实际部署必须替换。
+memory_enabled = true          # DMW 检索与个人长期记忆。
+semantic_graph_enabled = true  # NSG 检索；关闭后不会调用 embedding。
+mo_state_enabled = true
+max_concurrent_chats = 4
+transient_retries = 2
+memory_distillation_enabled = true
+memory_distill_every_turns = 12
+nsg_govern_every_turns = 12
+
+# allow: apply the request value after range/capability checks.
+# ignore: keep the configured/default value and report the ignored override.
+# reject: reject the entire request when that value is supplied.
+[request_overrides]
+context_window = "ignore"
+max_output_tokens = "allow"
+sampling = "ignore"
+instructions = "allow"
+visual_description_prompt = "ignore"
+tools = "allow"
+allowed_parameters = [] # e.g. ["seed", "stop"], never protocol-owned fields.
+
+# 打开后允许图片输入。主 chat 模型支持 image 时直接看图；否则才通过
+# model_use.vision 的回退模型生成受治理的文字描述。
+[vision]
+enabled = true # 允许图片输入；并不表示一定会调用 vision 回退模型。
+prompt = "Describe only visible facts relevant to the conversation. Do not infer identity, intent, private attributes, or illegible text." # 仅回退路径使用。
+
+# MOMO Core 后台维护提示词。路径相对于本文件；MOC 会连同文件一起移动。
+[prompts]
+memory_distillation_file = "prompts/dmw_distiller.md"
+semantic_graph_governance_file = "prompts/nsg_governor.md"

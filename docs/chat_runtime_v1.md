@@ -25,6 +25,12 @@ validate request and request ID
   -> store the completed response for idempotent replay
 ```
 
+When a maintenance threshold is reached, Core retrieves relevant existing DMW
+and NSG material from the same personal Scope and sends that read-only context,
+the pending turns, and the current timestamp to the selected maintenance route.
+Context retrieval must succeed before a model may propose a patch; Core never
+falls back to transcript-only blind writes.
+
 Image references are never silently dropped. When image input is present,
 `vision.enabled` must be true. If the conversation route advertises `image`,
 Core sends the original image blocks directly and does not use the fallback

@@ -87,8 +87,14 @@ DMW/NSG 检索、MO State、上下文预算、逻辑路由和助手持久化，�
 本地 1.0 候选现已接入完整图片输入链路：单次最多八张用户图片；主对话模型声明
 `image` 时直接接收原图，纯文本主模型才使用可选的逻辑 `vision` 描述路由。解析结果与
 usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.responses/1.0` fixture 已冻结，
-但当前没有发布或打标签；真实 provider 凭据 smoke test 和所有者明确授权仍是发布门槛。详见
+当前只有本地 `v1.0.0` 候选标签，没有 push 或发布 GitHub Release；带真实凭据的所有者测试
+仍是 GitHub 发布门槛。详见
 [1.0.0 发布契约](docs/roadmap_1_0_0.md)。
+
+后台维护提示词使用可移植 Markdown 文件，不再把简化文本内联到 TOML。请从
+[momo.example.toml](momo.example.toml) 开始，并阅读
+[简体中文配置指南](docs/maintenance_prompts.zh-CN.md)或
+[English guide](docs/maintenance_prompts.en.md)。
 
 ## Scope 标识
 

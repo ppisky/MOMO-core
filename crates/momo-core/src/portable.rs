@@ -213,7 +213,7 @@ pub fn export_momo_config(
     let document = merged_momo_config(core, settings)?;
     crate::validate_momo_document(&document.to_toml_string()?)
         .map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    document.save(output)?;
+    export_config_bundle(&document, &momo_config_path(core), output.as_ref())?;
     // Exporting a subset must not turn that subset into the local import
     // baseline. The baseline changes only after an explicit import.
     Ok(())
@@ -223,11 +223,15 @@ pub fn import_momo_config(
     core: &MomoCore,
     input: impl AsRef<Path>,
 ) -> Result<JsonValue, PortableError> {
+    let input = input.as_ref();
     let document = ConfigDocument::load(input)?;
     crate::validate_momo_document(&document.to_toml_string()?)
         .map_err(|error| PortableError::InvalidData(error.to_string()))?;
+    crate::MomoConfig::load(input)
+        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
     reject_credentials(document.values(), "")?;
-    document.save(momo_config_path(core))?;
+    let destination = momo_config_path(core);
+    import_config_bundle(&document, input, &destination)?;
     Ok(serde_json::to_value(document.values())?)
 }
 
@@ -253,7 +257,12 @@ pub async fn export_moc_with_host_modules(
     let staging = TempDir::new()?;
     let mut modules = Vec::new();
     if selected.contains(&MocModule::MomoConfig) {
-        merged_momo_config(core, settings)?.save(staging.path().join("config/momo.toml"))?;
+        let document = merged_momo_config(core, settings)?;
+        export_config_bundle(
+            &document,
+            &momo_config_path(core),
+            &staging.path().join("config/momo.toml"),
+        )?;
         modules.push(known_module_definition("config"));
     }
     if selected.contains(&MocModule::Characters) {
@@ -520,6 +529,101 @@ fn merged_momo_config(
     crate::validate_momo_document(&document.to_toml_string()?)
         .map_err(|error| PortableError::InvalidData(error.to_string()))?;
     Ok(document)
+}
+
+fn export_config_bundle(
+    document: &ConfigDocument,
+    source_config: &Path,
+    destination_config: &Path,
+) -> Result<(), PortableError> {
+    copy_config_bundle(document, source_config, destination_config)
+}
+
+fn import_config_bundle(
+    document: &ConfigDocument,
+    source_config: &Path,
+    destination_config: &Path,
+) -> Result<(), PortableError> {
+    copy_config_bundle(document, source_config, destination_config)
+}
+
+fn copy_config_bundle(
+    document: &ConfigDocument,
+    source_config: &Path,
+    destination_config: &Path,
+) -> Result<(), PortableError> {
+    let text = document.to_toml_string()?;
+    crate::validate_momo_document(&text)
+        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
+    let config: crate::MomoConfig =
+        toml::from_str(&text).map_err(|error| PortableError::InvalidData(error.to_string()))?;
+    let source_base = source_config.parent().unwrap_or_else(|| Path::new("."));
+    let destination_base = destination_config
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(destination_base)?;
+    let canonical_source_base = fs::canonicalize(source_base).map_err(|error| {
+        PortableError::InvalidData(format!(
+            "cannot resolve portable config directory {}: {error}",
+            source_base.display()
+        ))
+    })?;
+    let canonical_destination_base = fs::canonicalize(destination_base)?;
+    for reference in [
+        &config.prompts.memory_distillation_file,
+        &config.prompts.semantic_graph_governance_file,
+    ] {
+        let relative = validate_asset_path(&reference.to_string_lossy())?;
+        let source = source_base.join(&relative);
+        let canonical_source = fs::canonicalize(&source).map_err(|error| {
+            PortableError::InvalidData(format!(
+                "cannot read referenced maintenance prompt {}: {error}",
+                source.display()
+            ))
+        })?;
+        if !canonical_source.starts_with(&canonical_source_base) {
+            return Err(PortableError::InvalidData(format!(
+                "maintenance prompt escapes the portable config directory: {}",
+                reference.display()
+            )));
+        }
+        let metadata = fs::metadata(&canonical_source)?;
+        if !metadata.is_file() || metadata.len() > 256 * 1024 {
+            return Err(PortableError::InvalidData(format!(
+                "maintenance prompt must be a regular file no larger than 262144 bytes: {}",
+                reference.display()
+            )));
+        }
+        let bytes = fs::read(&canonical_source)?;
+        let prompt = std::str::from_utf8(&bytes).map_err(|error| {
+            PortableError::InvalidData(format!(
+                "maintenance prompt is not UTF-8 ({}): {error}",
+                reference.display()
+            ))
+        })?;
+        if prompt.trim().is_empty() || bytes.contains(&0) {
+            return Err(PortableError::InvalidData(format!(
+                "maintenance prompt is empty or contains NUL bytes: {}",
+                reference.display()
+            )));
+        }
+        let destination = destination_base.join(relative);
+        let destination_parent = destination.parent().ok_or_else(|| {
+            PortableError::InvalidData("prompt destination has no parent".to_owned())
+        })?;
+        fs::create_dir_all(destination_parent)?;
+        if !fs::canonicalize(destination_parent)?.starts_with(&canonical_destination_base) {
+            return Err(PortableError::InvalidData(format!(
+                "maintenance prompt destination escapes the portable config directory: {}",
+                destination.display()
+            )));
+        }
+        if canonical_source != destination.canonicalize().unwrap_or_default() {
+            atomic_write(&destination, &bytes)?;
+        }
+    }
+    document.save(destination_config)?;
+    Ok(())
 }
 
 fn merge_table(target: &mut Table, incoming: &Table) {
@@ -1390,12 +1494,30 @@ mod tests {
     use super::*;
     use momo_domain::{MessageRole, new_id};
 
+    fn write_prompt_bundle(core: &MomoCore) {
+        let base = momo_config_path(core)
+            .parent()
+            .expect("config directory")
+            .to_path_buf();
+        atomic_write(
+            &base.join("prompts/dmw_distiller.md"),
+            b"full DMW test prompt",
+        )
+        .expect("DMW prompt");
+        atomic_write(
+            &base.join("prompts/nsg_governor.md"),
+            b"full NSG test prompt",
+        )
+        .expect("NSG prompt");
+    }
+
     #[tokio::test]
     async fn round_trips_selected_moc_modules_and_rebinds_scope() {
         let source_directory = tempfile::tempdir().expect("source directory");
         let source = MomoCore::initialize(source_directory.path())
             .await
             .expect("source core");
+        write_prompt_bundle(&source);
         let original_scope = new_id();
         let character_id = new_id();
         let now = Utc::now();
@@ -1455,8 +1577,8 @@ mod tests {
             "schema_version": 1,
             "model_use": { "chat": "primary" },
             "prompts": {
-                "memory_distillation": "Distill durable memory as YAML patches.",
-                "semantic_graph_governance": "Govern narrative rules as YAML patches."
+                "memory_distillation_file": "prompts/dmw_distiller.md",
+                "semantic_graph_governance_file": "prompts/nsg_governor.md"
             },
             "future": { "preserved": true }
         });
@@ -1504,6 +1626,26 @@ mod tests {
         assert_eq!(
             report.momo_config.expect("config")["future"]["preserved"],
             true
+        );
+        assert_eq!(
+            fs::read_to_string(
+                momo_config_path(&destination)
+                    .parent()
+                    .expect("destination config directory")
+                    .join("prompts/dmw_distiller.md")
+            )
+            .expect("imported DMW prompt"),
+            "full DMW test prompt"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                momo_config_path(&destination)
+                    .parent()
+                    .expect("destination config directory")
+                    .join("prompts/nsg_governor.md")
+            )
+            .expect("imported NSG prompt"),
+            "full NSG test prompt"
         );
         let imported_cards = destination.store().list_characters().await.expect("cards");
         assert_eq!(imported_cards[0].scope_id, new_scope);
@@ -1825,6 +1967,7 @@ name = "Creator"
     async fn refuses_credentials_in_momo_config() {
         let directory = tempfile::tempdir().expect("directory");
         let core = MomoCore::initialize(directory.path()).await.expect("core");
+        write_prompt_bundle(&core);
         let error = export_momo_config(
             &core,
             directory.path().join("unsafe.toml"),
@@ -1848,6 +1991,7 @@ name = "Creator"
     async fn momo_config_preserves_product_extensions_and_rejects_host_wiring() {
         let directory = tempfile::tempdir().expect("directory");
         let core = MomoCore::initialize(directory.path()).await.expect("core");
+        write_prompt_bundle(&core);
         let output = directory.path().join("portable.toml");
         export_momo_config(
             &core,
@@ -1857,8 +2001,8 @@ name = "Creator"
                 "model_use": { "chat": "primary" },
                 "runtime": { "memory_enabled": true },
                 "prompts": {
-                    "memory_distillation": "Distill durable memory as YAML patches.",
-                    "semantic_graph_governance": "Govern narrative rules as YAML patches."
+                    "memory_distillation_file": "prompts/dmw_distiller.md",
+                    "semantic_graph_governance_file": "prompts/nsg_governor.md"
                 },
                 "extension": { "preserved": true }
             }),
@@ -1868,6 +2012,16 @@ name = "Creator"
         assert!(document.values().contains_key("model_use"));
         assert!(document.values().contains_key("runtime"));
         assert!(document.values().contains_key("extension"));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("prompts/dmw_distiller.md"))
+                .expect("exported DMW prompt"),
+            "full DMW test prompt"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("prompts/nsg_governor.md"))
+                .expect("exported NSG prompt"),
+            "full NSG test prompt"
+        );
 
         let error = export_momo_config(
             &core,

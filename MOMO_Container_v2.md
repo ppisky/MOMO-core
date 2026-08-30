@@ -67,6 +67,13 @@ sha256 = "<lowercase SHA-256 hex>"
 All payload paths MUST be normalized relative paths below their declared module
 root. `manifest.toml` is reserved and MUST NOT appear in the payload index.
 
+The `config` module contains `config/momo.toml` and every maintenance-prompt
+Markdown file referenced by that document. Prompt references remain relative
+to `momo.toml`, MUST resolve within `config/`, and MUST be present in the file
+index. Importers MUST reject a config module whose prompt reference is missing,
+unsafe, escaping, empty, non-UTF-8, or oversized; they MUST NOT substitute an
+inline fallback prompt.
+
 ## 3. DMW and NSG semantic-web partition
 
 `memory` and `semantic_graph` share one runtime workspace but are independent

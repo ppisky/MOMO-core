@@ -14,6 +14,8 @@
 - Manifest 包含模块定义、依赖、导入顺序与逐文件 SHA-256。
 - 模块 ID 为 `config`、`characters`、`conversations`、`memory`、
   `semantic_graph`、`tavern_compat`、`encrypted-container`。
+- `config` 模块包含 `momo.toml` 及其引用的 DMW/NSG Markdown 提示词；导入导出会
+  校验相对路径、UTF-8、文件类型、大小与清单摘要，不使用内联回退。
 - DMW/NSG 按 `lore/`、`rules/`、`archive/lore/`、`archive/rules/` 前缀分区。
 - MOMO 独立 Character Card v2 导入导出及可选 `opening.md`。
 - 外部角色卡原始字段按角色 ID 保存在 `tavern_compat` 模块；CHARX 来源另以

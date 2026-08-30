@@ -31,8 +31,8 @@ enabled = false
 prompt = "Describe only visible facts that are relevant to the conversation. Do not infer identity, intent, private attributes, or text that is not legible."
 
 [prompts]
-memory_distillation = "You are the MOMO DMW memory distiller. Output YAML only with root key patches. Store only explicit durable facts useful in future conversations. Never store guesses, questions, greetings, transient mood, secrets, or a general transcript summary. Supported operations are create, append, replace, and update_frontmatter. Use safe relative .md targets. If nothing qualifies, output exactly: patches: []"
-semantic_graph_governance = "You are the MOMO NSG governor. Output YAML only with root key patches. Create only durable narrative rules, lore, causal relations, or constraints. Automatic create_node operations must use mode draft, status active, and zone auto. Never directly modify Canon; use revision_candidate with evidence. If nothing qualifies, output exactly: patches: []"
+memory_distillation_file = "prompts/dmw_distiller.md"
+semantic_graph_governance_file = "prompts/nsg_governor.md"
 ```
 
 ## Request governance
@@ -68,14 +68,22 @@ extra instruction for a multimodal conversation model.
 
 ## Maintenance prompts
 
-`prompts.memory_distillation` and `prompts.semantic_graph_governance` are the
-system instructions for Core-owned background maintenance. They used to be
-embedded literals. In 1.0 both fields are mandatory in every `momo.toml`, so the
-portable configuration records the exact policy that produces DMW patches and
-NSG draft/revision candidates. Core does not silently inject these fields while
-parsing an older document. An embedding host may still deliberately construct
-`MomoConfig::default()` through the Rust API. Each prompt must contain 1 to
-65,536 bytes.
+`prompts.memory_distillation_file` and
+`prompts.semantic_graph_governance_file` reference the complete system
+instructions for Core-owned background maintenance. Paths are relative to the
+directory containing `momo.toml`; they must be safe `.md` paths and cannot use
+absolute paths, `..`, symlinks that escape the directory, or files larger than
+256 KiB. A MOC config module carries the referenced files with `momo.toml`.
+
+The `[prompts]` table may be omitted when the standard files exist at
+`prompts/dmw_distiller.md` and `prompts/nsg_governor.md`. Write the table only
+to select different safe relative Markdown files. There are no abbreviated
+inline prompt fields.
+
+The shipped prompt files combine the complete v1 Distiller rules with the v2
+discipline additions. TOML contains references rather than abbreviated inline
+prompts. An embedding host that deliberately constructs `MomoConfig::default()`
+uses the same full bundled Markdown content.
 
 ## Compatibility
 
@@ -84,8 +92,9 @@ parsing an older document. An embedding host may still deliberately construct
   does not claim to execute fields it does not own.
 - Runtime maintenance intervals must be between 1 and 200 turns.
 - The vision prompt must contain 1 to 65,536 bytes.
-- The `[prompts]` section and both maintenance prompts are required.
-- Each maintenance prompt must contain 1 to 65,536 bytes.
+- Omitting `[prompts]` selects the two standard relative files; custom
+  references must provide both fields.
+- Each referenced prompt must be non-empty UTF-8 Markdown no larger than 256 KiB.
 - Secret-shaped fields and host-only top-level sections are rejected.
 
 The former schema-v2 document that described `active_model_profile`, embedded

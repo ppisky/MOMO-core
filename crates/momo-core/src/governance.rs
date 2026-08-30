@@ -1,12 +1,19 @@
 //! Portable request-governance and visual-description configuration.
 
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 pub const MOMO_CONFIG_SCHEMA_VERSION: u32 = 1;
+const MAX_MAINTENANCE_PROMPT_BYTES: u64 = 256 * 1024;
+const DEFAULT_MEMORY_PROMPT_FILE: &str = "prompts/dmw_distiller.md";
+const DEFAULT_NSG_PROMPT_FILE: &str = "prompts/nsg_governor.md";
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -62,7 +69,11 @@ pub struct VisionDescriptionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenancePromptConfig {
+    pub memory_distillation_file: PathBuf,
+    pub semantic_graph_governance_file: PathBuf,
+    #[serde(skip)]
     pub memory_distillation: String,
+    #[serde(skip)]
     pub semantic_graph_governance: String,
 }
 
@@ -101,8 +112,10 @@ impl Default for VisionDescriptionConfig {
 impl Default for MaintenancePromptConfig {
     fn default() -> Self {
         Self {
-            memory_distillation: default_memory_distillation_prompt(),
-            semantic_graph_governance: default_semantic_graph_governance_prompt(),
+            memory_distillation_file: PathBuf::from(DEFAULT_MEMORY_PROMPT_FILE),
+            semantic_graph_governance_file: PathBuf::from(DEFAULT_NSG_PROMPT_FILE),
+            memory_distillation: include_str!("../../../prompts/dmw_distiller.md").to_owned(),
+            semantic_graph_governance: include_str!("../../../prompts/nsg_governor.md").to_owned(),
         }
     }
 }
@@ -117,6 +130,7 @@ pub struct MomoConfig {
     pub runtime: MomoRuntimeConfig,
     #[serde(default)]
     pub vision: VisionDescriptionConfig,
+    #[serde(default)]
     pub prompts: MaintenancePromptConfig,
 }
 
@@ -134,9 +148,11 @@ impl Default for MomoConfig {
 
 impl MomoConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, GovernanceError> {
+        let path = path.as_ref();
         let text = fs::read_to_string(path)?;
         validate_document_ownership(&text)?;
-        let config: Self = toml::from_str(&text)?;
+        let mut config: Self = toml::from_str(&text)?;
+        config.load_maintenance_prompts(path)?;
         config.validate()?;
         Ok(config)
     }
@@ -151,6 +167,29 @@ impl MomoConfig {
     }
 
     pub fn validate(&self) -> Result<(), GovernanceError> {
+        self.validate_portable_fields()?;
+        for (name, prompt) in [
+            (
+                "prompts.memory_distillation_file",
+                &self.prompts.memory_distillation,
+            ),
+            (
+                "prompts.semantic_graph_governance_file",
+                &self.prompts.semantic_graph_governance,
+            ),
+        ] {
+            if prompt.trim().is_empty()
+                || u64::try_from(prompt.len()).unwrap_or(u64::MAX) > MAX_MAINTENANCE_PROMPT_BYTES
+            {
+                return Err(GovernanceError::Invalid(format!(
+                    "the file referenced by {name} must contain 1 to {MAX_MAINTENANCE_PROMPT_BYTES} UTF-8 bytes"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_portable_fields(&self) -> Result<(), GovernanceError> {
         if self.schema_version != MOMO_CONFIG_SCHEMA_VERSION {
             return Err(GovernanceError::UnsupportedSchema(self.schema_version));
         }
@@ -159,21 +198,17 @@ impl MomoConfig {
                 "vision.prompt must contain 1 to 65536 bytes".to_owned(),
             ));
         }
-        for (name, prompt) in [
+        for (name, path) in [
             (
-                "prompts.memory_distillation",
-                &self.prompts.memory_distillation,
+                "prompts.memory_distillation_file",
+                &self.prompts.memory_distillation_file,
             ),
             (
-                "prompts.semantic_graph_governance",
-                &self.prompts.semantic_graph_governance,
+                "prompts.semantic_graph_governance_file",
+                &self.prompts.semantic_graph_governance_file,
             ),
         ] {
-            if prompt.trim().is_empty() || prompt.len() > 64 * 1024 {
-                return Err(GovernanceError::Invalid(format!(
-                    "{name} must contain 1 to 65536 bytes"
-                )));
-            }
+            validate_prompt_reference(name, path)?;
         }
         if !(1..=200).contains(&self.runtime.memory_distill_every_turns)
             || !(1..=200).contains(&self.runtime.nsg_govern_every_turns)
@@ -202,6 +237,21 @@ impl MomoConfig {
                 "allowed_parameters contains reserved field {field:?}"
             )));
         }
+        Ok(())
+    }
+
+    fn load_maintenance_prompts(&mut self, config_path: &Path) -> Result<(), GovernanceError> {
+        self.validate_portable_fields()?;
+        self.prompts.memory_distillation = read_prompt_file(
+            config_path,
+            "prompts.memory_distillation_file",
+            &self.prompts.memory_distillation_file,
+        )?;
+        self.prompts.semantic_graph_governance = read_prompt_file(
+            config_path,
+            "prompts.semantic_graph_governance_file",
+            &self.prompts.semantic_graph_governance_file,
+        )?;
         Ok(())
     }
 
@@ -248,7 +298,7 @@ const fn default_maintenance_turns() -> usize {
 pub fn validate_momo_document(text: &str) -> Result<(), GovernanceError> {
     validate_document_ownership(text)?;
     let config: MomoConfig = toml::from_str(text)?;
-    config.validate()
+    config.validate_portable_fields()
 }
 
 fn validate_document_ownership(text: &str) -> Result<(), GovernanceError> {
@@ -472,26 +522,51 @@ fn default_visual_description_prompt() -> String {
     "Describe only visible facts that are relevant to the conversation. Do not infer identity, intent, private attributes, or text that is not legible.".to_owned()
 }
 
-fn default_memory_distillation_prompt() -> String {
-    concat!(
-        "You are the MOMO DMW memory distiller. Output YAML only with root key patches. ",
-        "Store only explicit durable facts useful in future conversations. Never store guesses, ",
-        "questions, greetings, transient mood, secrets, or a general transcript summary. ",
-        "Supported operations are create, append, replace, and update_frontmatter. ",
-        "Use safe relative .md targets. If nothing qualifies, output exactly: patches: []"
-    )
-    .to_owned()
+fn validate_prompt_reference(name: &str, path: &Path) -> Result<(), GovernanceError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        || !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    {
+        return Err(GovernanceError::Invalid(format!(
+            "{name} must be a safe relative .md path beneath momo.toml"
+        )));
+    }
+    Ok(())
 }
 
-fn default_semantic_graph_governance_prompt() -> String {
-    concat!(
-        "You are the MOMO NSG governor. Output YAML only with root key patches. ",
-        "Create only durable narrative rules, lore, causal relations, or constraints. ",
-        "Automatic create_node operations must use mode draft, status active, and zone auto. ",
-        "Never directly modify Canon; use revision_candidate with evidence. ",
-        "If nothing qualifies, output exactly: patches: []"
-    )
-    .to_owned()
+fn read_prompt_file(
+    config_path: &Path,
+    name: &str,
+    relative: &Path,
+) -> Result<String, GovernanceError> {
+    let base = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let canonical_base = fs::canonicalize(base)?;
+    let path = base.join(relative);
+    let canonical_path = fs::canonicalize(&path)?;
+    if !canonical_path.starts_with(&canonical_base) {
+        return Err(GovernanceError::Invalid(format!(
+            "{name} resolves outside the momo.toml directory"
+        )));
+    }
+    let metadata = fs::metadata(&canonical_path)?;
+    if !metadata.is_file() || metadata.len() > MAX_MAINTENANCE_PROMPT_BYTES {
+        return Err(GovernanceError::Invalid(format!(
+            "the file referenced by {name} must be a regular file no larger than {MAX_MAINTENANCE_PROMPT_BYTES} bytes"
+        )));
+    }
+    let prompt = fs::read_to_string(&canonical_path)?;
+    if prompt.trim().is_empty() || prompt.as_bytes().contains(&0) {
+        return Err(GovernanceError::Invalid(format!(
+            "the file referenced by {name} must be non-empty UTF-8 text without NUL bytes"
+        )));
+    }
+    Ok(prompt)
 }
 
 #[derive(Debug, Error)]
@@ -573,10 +648,12 @@ enabled = true
 prompt = "Describe the visible scene."
 
 [prompts]
-memory_distillation = "Distill durable memory as YAML patches."
-semantic_graph_governance = "Govern narrative rules as YAML patches."
+memory_distillation_file = "prompts/dmw_distiller.md"
+semantic_graph_governance_file = "prompts/nsg_governor.md"
 "#;
-        let config: MomoConfig = toml::from_str(document).expect("portable config");
+        let mut config: MomoConfig = toml::from_str(document).expect("portable config");
+        config.prompts.memory_distillation = "full memory prompt".to_owned();
+        config.prompts.semantic_graph_governance = "full graph prompt".to_owned();
         config.validate().expect("valid config");
         let parameters = Map::new();
         let effective = config
@@ -623,11 +700,14 @@ nsg_govern_every_turns = 19
 max_concurrent_chats = 4
 
 [prompts]
-memory_distillation = "Distill durable memory as YAML patches."
-semantic_graph_governance = "Govern narrative rules as YAML patches."
+memory_distillation_file = "prompts/dmw_distiller.md"
+semantic_graph_governance_file = "prompts/nsg_governor.md"
 "#,
         )
         .expect("portable runtime");
+        let mut config = config;
+        config.prompts.memory_distillation = "full memory prompt".to_owned();
+        config.prompts.semantic_graph_governance = "full graph prompt".to_owned();
         config.validate().expect("valid runtime");
         assert!(!config.runtime.memory_distillation_enabled);
         assert_eq!(config.runtime.memory_distill_every_turns, 7);
@@ -643,9 +723,46 @@ semantic_graph_governance = "Govern narrative rules as YAML patches."
     }
 
     #[test]
-    fn rejects_portable_document_without_maintenance_prompts() {
-        let error = validate_momo_document("schema_version = 1\n")
-            .expect_err("missing prompts must not use compatibility defaults");
-        assert!(matches!(error, GovernanceError::Toml(_)));
+    fn omitted_prompt_table_uses_standard_file_references() {
+        let config: MomoConfig = toml::from_str("schema_version = 1\n").expect("portable config");
+        assert_eq!(
+            config.prompts.memory_distillation_file,
+            PathBuf::from(DEFAULT_MEMORY_PROMPT_FILE)
+        );
+        assert_eq!(
+            config.prompts.semantic_graph_governance_file,
+            PathBuf::from(DEFAULT_NSG_PROMPT_FILE)
+        );
+    }
+
+    #[test]
+    fn loads_safe_relative_prompt_files_and_rejects_traversal() {
+        let directory = tempfile::tempdir().expect("directory");
+        fs::create_dir(directory.path().join("prompts")).expect("prompt directory");
+        fs::write(
+            directory.path().join(DEFAULT_MEMORY_PROMPT_FILE),
+            "memory rules",
+        )
+        .expect("memory prompt");
+        fs::write(
+            directory.path().join(DEFAULT_NSG_PROMPT_FILE),
+            "graph rules",
+        )
+        .expect("graph prompt");
+        let path = directory.path().join("momo.toml");
+        fs::write(
+            &path,
+            "schema_version = 1\n[prompts]\nmemory_distillation_file = 'prompts/dmw_distiller.md'\nsemantic_graph_governance_file = 'prompts/nsg_governor.md'\n",
+        )
+        .expect("config");
+        let config = MomoConfig::load(&path).expect("load references");
+        assert_eq!(config.prompts.memory_distillation, "memory rules");
+        assert_eq!(config.prompts.semantic_graph_governance, "graph rules");
+
+        let unsafe_document = "schema_version = 1\n[prompts]\nmemory_distillation_file = '../outside.md'\nsemantic_graph_governance_file = 'prompts/nsg_governor.md'\n";
+        assert!(matches!(
+            validate_momo_document(unsafe_document),
+            Err(GovernanceError::Invalid(_))
+        ));
     }
 }

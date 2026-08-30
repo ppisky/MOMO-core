@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex as SyncMutex, Weak},
 };
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -605,6 +606,25 @@ impl MomoApiService {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
+        let existing_context = simple::retrieve_memory_json(
+            scope_id.to_owned(),
+            transcript.clone(),
+            4_096,
+        )
+        .await
+        .map_err(|error| {
+            MomoApiError::internal(format!(
+                "maintenance context retrieval failed; refusing transcript-only write: {error}"
+            ))
+        })?;
+        let existing_context: Vec<Value> = serde_json::from_str(&existing_context)
+            .map_err(|error| MomoApiError::internal(error.to_string()))?;
+        let maintenance_input = json!({
+            "maintenance_kind": storage_kind,
+            "current_unix_timestamp": Utc::now().timestamp(),
+            "existing_context": existing_context,
+            "pending_turns": turns,
+        });
         let (route, system) = match kind {
             MaintenanceKind::Memory => (
                 "memory_distillation",
@@ -622,7 +642,7 @@ impl MomoApiService {
                 "model": route,
                 "messages": [
                     {"role": "system", "content": system},
-                    {"role": "user", "content": transcript}
+                    {"role": "user", "content": maintenance_input.to_string()}
                 ],
                 "request_parameters": {"max_tokens": 2048, "momo_hop": 1}
             })

@@ -109,9 +109,14 @@ images go directly to an image-capable conversation model, or through the
 optional logical `vision` description route when the conversation model is
 text-only. Resolved input and usage are persisted for deterministic request-ID
 replay. The `momo.responses/1.0` cross-repository fixtures are frozen, but this
-is not a published 1.0 release; credentialed provider smoke testing and explicit
-release authorization remain gates. See the
+is only a local `v1.0.0` candidate and has not been pushed or published;
+credentialed owner testing remains the GitHub publication gate. See the
 [1.0.0 release contract](docs/roadmap_1_0_0.md).
+
+Background maintenance prompts are portable Markdown files rather than
+abbreviated inline TOML. Start from [momo.example.toml](momo.example.toml) and
+read the [English configuration guide](docs/maintenance_prompts.en.md) or the
+[简体中文指南](docs/maintenance_prompts.zh-CN.md).
 
 ## Scope identity
 

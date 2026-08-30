@@ -56,6 +56,9 @@ green.
 - [x] Expose host hand-off for unknown MOC modules: explicit validated claim on
   import and explicit extension-module contribution on export, without Core
   interpreting or executing extension payloads.
+- [x] Replace abbreviated inline maintenance prompts with bounded portable
+  Markdown references; ship complete DMW/NSG files and move them with the MOC
+  config module.
 - [x] Enforce the normative
   [identity and scope contract](identity_scope_1_0.md): no server default scope,
   explicit personal/conversation/character scopes, scoped resource ownership,
