@@ -104,6 +104,8 @@ Core 将每个记忆 workspace 存储在 `memory/scopes/<scope_id>` 下。服务
 Scope，也不读取 `MOMO_SCOPE_ID`；每个有状态请求必须显式携带相关 UUID。对话、个人记忆
 与角色目录是三个独立边界，完整规则见
 [`docs/identity_scope_1_0.md`](docs/identity_scope_1_0.md)。
+`character_scope_id` 标识角色卡目录及其所有权边界，`character_id` 才标识目录中的一张
+具体角色卡；前者不是同一角色的第二个 UUID。
 
 ## 验证
 

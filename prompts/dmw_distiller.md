@@ -129,7 +129,7 @@ patches:
   - target_file: "relationships/player_xiaohong.md"
     operations:
       - type: append
-        section: "关键变化"
+        section: "Key Changes"
         content: "- During the farewell conversation, Xiaohong rejected separation but grabbed the protagonist's clothes and asked them not to leave."
       - type: update_frontmatter
         fields:

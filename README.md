@@ -128,6 +128,9 @@ has no default scope and does not read `MOMO_SCOPE_ID`; every stateful request
 must carry the relevant UUID explicitly. Conversation, personal-memory, and
 character-catalogue namespaces are distinct boundaries documented in the
 [1.0 identity and scope contract](docs/identity_scope_1_0.md).
+`character_scope_id` identifies a catalogue/ownership boundary;
+`character_id` selects one card inside it. It is not a second UUID for the same
+character.
 
 ## Validate
 

@@ -39,6 +39,28 @@ host decision, not a Core fallback. All three fields are explicit in a 1.0
 response request. A `character_id` must resolve inside `character_scope_id`; a
 `conversation_id` must resolve inside `conversation_scope_id`.
 
+### Character catalogue versus character identity
+
+`character_scope_id` is not a second identity for one character. It names the
+catalogue and ownership boundary that may contain multiple character cards.
+`character_id` names one concrete card inside that catalogue. Characters in the
+same catalogue share one `character_scope_id` but have different
+`character_id` values.
+
+The current SQLite schema gives every character a globally unique primary key,
+so `character_id` is sufficient to locate a row mechanically. It is not
+sufficient to prove that the host intended to authorize that row. Core queries
+the pair `(character_scope_id, character_id)` and fails when the character does
+not belong to the supplied catalogue. This is the same distinction as a tenant
+or repository ID plus a resource ID: the first establishes the allowed
+namespace, and the second selects the resource within it.
+
+A host with one fixed catalogue should persist its catalogue UUID once rather
+than generate a new one per character or request. mobot 0.1 exposes both values
+in deployment configuration because it selects one fixed character; this is a
+host configuration detail, not a requirement for an end user to type two UUIDs
+for every message.
+
 This separation is required for mobot's documented Discord behaviour. A channel
 may intentionally share short-term conversation history while each speaker
 continues to retrieve and update only their personal long-term memory. Using
@@ -104,10 +126,12 @@ character catalogue selected by the host. It must not continue to use that UUID
 as the personal scope of every user. Existing data must be inspected and then
 migrated or assigned to an explicit namespace according to its real ownership.
 
-Because 1.0 has not been tagged, the release candidate may still change its
-request schema and SQLite keys to enforce this contract. A 1.0 tag is blocked
-until cross-scope negative tests prove that conversations, messages, operations,
-cancellation, characters, memory, NSG and portable operations fail closed.
+The local `v1.0.0` candidate tag records this contract after cross-scope
+negative tests proved that conversations, messages, operations, cancellation,
+characters, memory, NSG and portable operations fail closed. The tag has not
+been pushed and no GitHub release has been published; external publication
+remains subject to the release roadmap, including credentialed provider smoke
+tests.
 
 A host-side session cache is not proof of ownership unless it stores the
 conversation scope alongside the conversation ID. The 1.0 host does not decode
