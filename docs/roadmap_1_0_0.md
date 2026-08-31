@@ -1,13 +1,30 @@
 # MOMO Core 1.0.0 release contract
 
 **Status:** approved for a local `v1.0.0` tag; GitHub publication is prohibited pending owner testing
-**Updated:** 2026-08-30
+**Updated:** 2026-08-31
 
-MOMO 1.0 is a stability release, not a version-number-only release. The 0.5
-architecture remains the ownership boundary: Core owns native orchestration and
-portable policy, while provider and application integrations remain adapters.
+MOMO 1.0 is a stability release, not a version-number-only release. Core owns
+native orchestration and portable policy, while provider and application
+integrations remain adapters. The unpublished 0.5 wire and ownership shapes are
+not compatibility surfaces.
 
-## Image-input gate
+## Gate 1: native contract and Space boundaries
+
+- [x] Freeze `momo.responses/1.0` with explicit `personal_space_id`,
+  `conversation_space_id`, weighted `memory_sources`, and one optional
+  `memory_write_space_id`.
+- [x] Remove the process-wide default UUID, `MOMO_SCOPE_ID`, and the withdrawn
+  character-catalogue UUID. Characters are globally addressed by
+  `character_id`; optional `owner_space_id` is management/export ownership.
+- [x] Keep new session, conversation deletion, selective DMW/NSG clearing, and
+  character switching as separate structured controls that do not pass through
+  a model.
+- [x] Reject the unpublished scope-shaped request and session formats. No 0.5
+  compatibility fixtures or decoder remain in the release candidate.
+- [x] Keep Core embeddable; `momo-server` is an optional HTTP transport rather
+  than a required product process.
+
+## Gate 2: multimodal and model boundary
 
 - [x] Native structured requests accept bounded HTTP(S) and `data:image/`
   references with `auto`, `low`, or `high` detail.
@@ -38,14 +55,13 @@ does block GitHub publication until the owner has tested the candidate. Local
 direct-multimodal, fallback, persistence, replay, and cross-protocol tests are
 green.
 
-## Stable-surface gate
+## Gate 3: portable data and fail-closed validation
 
 - [x] Treat the workspace crates as implementation modules rather than
   independently published crates.io SemVer APIs; every package is marked
   `publish = false`. The native HTTP/MOC contracts remain the product stability
   surface.
-- [x] Freeze the `momo.responses/1.0` native response schema and add new cross-repository golden
-  fixtures without deleting the 0.5 fixtures.
+- [x] Keep byte-identical Core/mobot `contracts/1.0` golden fixtures.
 - [x] Publish [draft migration notes](migration_0_5_0_to_1_0_0.md) for the
   `MomoApiService::execute` ownership change, multimodal gateway-message
   content type, and SQLite migration.
@@ -59,25 +75,42 @@ green.
 - [x] Replace abbreviated inline maintenance prompts with bounded portable
   Markdown references; ship complete DMW/NSG files and move them with the MOC
   config module.
-- [x] Enforce the normative
-  [identity and scope contract](identity_scope_1_0.md): no server default scope,
-  explicit personal/conversation/character scopes, scoped resource ownership,
-  and scope-bound request replay and cancellation.
-- [x] Add cross-scope negative tests for the stateful character, conversation,
-  message, and native response routes. A resource from scope A cannot be read,
-  written, replayed, or cancelled from scope B.
-- [x] Enforce explicit scopes in the native response path, scoped local
-  character/conversation/message routes, and request-ID cancellation keys.
-- [x] Keep workspace-document access inside its filesystem capability boundary
-  and portable import inside its explicit destination-scope boundary; neither
-  route falls back to a process-global identity.
-- [x] Re-run the complete Core and mobot verification matrix after the first
-  identity remediation pass. Credentialed provider smoke testing remains open.
-- [x] Receive owner authorization to create a local `v1.0.0` tag. Do not push
-  the commit or tag, and do not create a GitHub Release.
+- [x] Replace the unpublished MOC v2 shape with MOC v3 Space modules. Export
+  selects character ownership, conversations, DMW, and NSG independently;
+  import preserves source Space IDs unless an explicit one-to-one `space_map`
+  converts them.
+- [x] Validate the complete container and all known business payloads before
+  committing imported data. Unknown host modules are reported and copied only
+  after an explicit claim.
+- [x] Keep workspace and maintenance-prompt file access inside validated
+  filesystem boundaries; reject traversal, links, missing/empty prompt files,
+  and credential-like portable keys.
+
+## Gate 4: release candidate reproducibility
+
+- [x] Provide aligned detailed `momo.example.toml` files, complete referenced
+  DMW/NSG Markdown prompts, and Simplified Chinese and English configuration
+  and Space/control guides.
+- [x] Re-run formatting, all-target/all-feature tests, strict Clippy, rustdoc,
+  cross-repository fixture comparison, and Release builds from the final
+  revisions.
+- [x] Confirm both services remain stopped, scan Release binaries for the
+  removed default UUID/constants, and record SHA-256 hashes.
+- [x] Commit and move the annotated local `v1.0.0` tag to the verified commit.
+  Do not push the commit/tag and do not create a GitHub Release.
+- [x] Receive owner authorization for local-only commit/tag creation.
 
 ## Explicitly outside 1.0
 
 Audio, video, realtime media, automatic provider failover, arbitrary vendor
 extension conversion, MOC v1 migration, incremental MOC, APNG LSB carriers,
 and lossy image carriers are not part of the 1.0 gate.
+
+## Verified local artifacts
+
+- `target/release/momo-server.exe`
+  SHA-256: `A67125947B96A8A0557B57736197482C31A8B118A3B829F8F47D100B6200B7E0`
+- `D:/mobot/target/release/momo-bot.exe`
+  SHA-256: `7E8D397274393F24558CB54EFED3D8D845F6A7038AABCDF656370498898AFACB`
+
+These are local test artifacts, not published release assets.

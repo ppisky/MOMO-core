@@ -13,7 +13,7 @@ local HTTP interface in one workspace.
 - Character Card v1/v2 JSON and PNG import
 - Character Card v3 JSON, PNG, and full CHARX-container import; APNG is rejected
 - Character Card v2/v3 JSON and CHARX export with source preservation
-- typed MOC v2 snapshot import/export with explicit compatibility profiles
+- typed multi-Space MOC v3 import/export with explicit one-to-one Space mapping
 - typed MOMO LSB carriers for PNG and lossless WebP (no APNG or AVIF)
 - Dual-Mem Wiki (DMW) long-term memory
 - Narrative Semantic Graph (NSG)
@@ -36,7 +36,7 @@ applications.
 MOMO Character Card v2 is an independent format defined by this repository in
 [`Character_Card_v2.md`](Character_Card_v2.md). Its “v2” does not mean the
 external `chara_card_v2` JSON/PNG format. Core currently imports and exports the
-MOMO format inside MOC v2. It also imports external CCv1/v2 JSON and PNG plus
+MOMO format inside MOC v3. It also imports external CCv1/v2 JSON and PNG plus
 CCv3 JSON, PNG, and CHARX, and exports CCv2/CCv3 JSON and CHARX. APNG is
 intentionally unsupported. CHARX
 assets, `x_meta`, `module.risum`, and unknown safe entries are retained with the
@@ -77,7 +77,7 @@ in one SQLite file:
   source container so binary assets and application extensions can round-trip
   through MOC.
 
-DMW and NSG YAML/Markdown documents under `memory/scopes/<scope_id>` remain the
+DMW and NSG YAML/Markdown documents under `spaces/<space_id>/memory` remain the
 portable sources of truth. Turso vectors are validated by source hash and
 vector-space identity, can be rebuilt from those documents, and are not stored
 in MOC files. `NsgVectorStore` is only the internal boundary that keeps Turso
@@ -118,19 +118,17 @@ abbreviated inline TOML. Start from [momo.example.toml](momo.example.toml) and
 read the [English configuration guide](docs/maintenance_prompts.en.md) or the
 [简体中文指南](docs/maintenance_prompts.zh-CN.md).
 
-## Scope identity
+## Space identity
 
-`scope_id` is the only namespace identifier used by public models, APIs,
-storage, vector records, patch reviews, and MOC operations. A scope is an
-opaque UUID whose meaning and access policy belong to the host application.
-Core stores each memory workspace under `memory/scopes/<scope_id>`. The server
-has no default scope and does not read `MOMO_SCOPE_ID`; every stateful request
-must carry the relevant UUID explicitly. Conversation, personal-memory, and
-character-catalogue namespaces are distinct boundaries documented in the
-[1.0 identity and scope contract](docs/identity_scope_1_0.md).
-`character_scope_id` identifies a catalogue/ownership boundary;
-`character_id` selects one card inside it. It is not a second UUID for the same
-character.
+One Core instance root contains many independent Spaces; it is not itself one
+person's Space. Public contracts use role-qualified UUIDs:
+`personal_space_id`, `conversation_space_id`, memory-source `space_id`, and
+`memory_write_space_id`. Retrieval may read several authorized Spaces with
+independent weights, while one maintenance run writes to exactly one explicit
+Space. Character cards use a globally unique `character_id`; `owner_space_id`
+is only their management/export ownership, and there is no character-catalogue
+UUID. See the [normative Space model](docs/space_model_1_0.md) and the
+[host guide](docs/spaces_and_controls.en.md).
 
 ## Validate
 

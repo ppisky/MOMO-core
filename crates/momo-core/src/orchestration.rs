@@ -218,12 +218,12 @@ impl MomoApiService {
         request
             .validate()
             .map_err(|error| MomoApiError::bad_request(error.to_string()))?;
-        let scope_id = request
+        let personal_space_id = request
             .momo
-            .scope_id
+            .personal_space_id
             .as_deref()
-            .ok_or_else(|| MomoApiError::bad_request("scope_id is required"))?;
-        let operation_key = scoped_operation_key(scope_id, request_id);
+            .ok_or_else(|| MomoApiError::bad_request("personal_space_id is required"))?;
+        let operation_key = scoped_operation_key(personal_space_id, request_id);
         let _operation = self.enter_operation(&operation_key);
         self.execute_active(request, request_id, &operation_key, stream)
             .await
@@ -380,16 +380,26 @@ impl MomoApiService {
             "upstream_request_ids": &resolved_input.vision_upstream_request_ids,
         });
         self.ensure_active(operation_key)?;
-        let scope_id = request.momo.scope_id.clone().expect("validated scope_id");
-        let memory =
-            !response.output_text.is_empty() && (request.momo.memory || request.momo.mo_state);
+        let write_source = request
+            .momo
+            .memory_write_space_id
+            .as_ref()
+            .and_then(|space_id| {
+                request
+                    .momo
+                    .memory_sources
+                    .iter()
+                    .find(|source| &source.space_id == space_id)
+            });
+        let memory = !response.output_text.is_empty() && write_source.is_some_and(|s| s.memory);
         let semantic_graph = !response.output_text.is_empty()
-            && (request.momo.semantic_graph || request.momo.mo_state);
+            && write_source.is_some_and(|source| source.semantic_graph);
+        let memory_write_space_id = request.momo.memory_write_space_id.clone();
         let maintenance_registered = if memory || semantic_graph {
             match simple::append_maintenance_turn_json(
                 json!({
                     "request_id": operation_key,
-                    "scope_id": scope_id,
+                    "scope_id": memory_write_space_id,
                     "user_content": &resolved_input.text,
                     "assistant_content": response.output_text,
                 })
@@ -418,7 +428,9 @@ impl MomoApiService {
         .await
         .map_err(MomoApiError::internal)?;
         if maintenance_registered {
-            self.schedule_maintenance(scope_id);
+            self.schedule_maintenance(
+                memory_write_space_id.expect("maintenance write Space was validated"),
+            );
         }
         Ok(response)
     }
@@ -694,38 +706,17 @@ impl MomoApiService {
         let input = resolved_input.text.as_str();
         let direct_multimodal =
             resolved_input.image_handling == ImageInputHandling::DirectMultimodal;
-        let scope_id = request
+        let personal_space_id = request
             .momo
-            .scope_id
+            .personal_space_id
             .clone()
-            .expect("validated personal scope");
-        let conversation_scope_id = request
+            .expect("validated personal Space");
+        let conversation_space_id = request
             .momo
-            .conversation_scope_id
+            .conversation_space_id
             .clone()
-            .expect("validated conversation scope");
-        let character_scope_id = request
-            .momo
-            .character_scope_id
-            .clone()
-            .expect("validated character scope");
-        let characters =
-            parse_json(simple::local_characters_json(character_scope_id.clone()).await)?;
-        let characters = characters
-            .as_array()
-            .ok_or_else(|| MomoApiError::internal("character store returned a non-array"))?;
-        let requested_character_id = request
-            .momo
-            .character_id
-            .as_deref()
-            .expect("validated character ID");
-        let character = characters
-            .iter()
-            .find(|character| {
-                character.get("id").and_then(Value::as_str) == Some(requested_character_id)
-            })
-            .ok_or_else(|| MomoApiError::bad_request("no matching character is available"))?;
-        let character_id = required_str(character, "id")?;
+            .expect("validated conversation Space");
+        let requested_character_id = request.momo.character_id.as_deref();
         let attempted_conversation = persisted
             .and_then(|operation| operation["conversation_id"].as_str())
             .map(str::to_owned)
@@ -735,20 +726,49 @@ impl MomoApiService {
                 .await
                 .get(operation_key)
                 .cloned());
-        let conversation_id = if let Some(id) = request
+        let existing_conversation_id = request
             .momo
             .conversation_id
             .as_deref()
             .map(str::to_owned)
-            .or(attempted_conversation)
-        {
-            id
+            .or(attempted_conversation);
+        let (conversation_id, character_id) = if let Some(id) = existing_conversation_id {
+            let conversations =
+                parse_json(simple::local_conversations_json(conversation_space_id.clone()).await)?;
+            let conversation = conversations
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|conversation| {
+                        conversation.get("id").and_then(Value::as_str) == Some(id.as_str())
+                    })
+                })
+                .ok_or_else(|| {
+                    MomoApiError::bad_request(
+                        "conversation_id does not belong to conversation_space_id",
+                    )
+                })?;
+            let stored_character_id = conversation
+                .get("character_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    MomoApiError::bad_request(
+                        "conversation has no character; use switch_character control first",
+                    )
+                })?;
+            if requested_character_id.is_some_and(|value| value != stored_character_id) {
+                return Err(MomoApiError::bad_request(
+                    "character_id differs from the conversation; use switch_character control",
+                ));
+            }
+            (id, stored_character_id.to_owned())
         } else {
+            let character_id = requested_character_id.ok_or_else(|| {
+                MomoApiError::bad_request("character_id is required for a new conversation")
+            })?;
             let created = parse_json(
                 simple::stage_conversation_json(
                     None,
-                    conversation_scope_id.clone(),
-                    character_scope_id,
+                    conversation_space_id.clone(),
                     request
                         .momo
                         .title
@@ -763,20 +783,10 @@ impl MomoApiService {
                 .lock()
                 .await
                 .insert(operation_key.to_owned(), id.clone());
-            id
+            (id, character_id.to_owned())
         };
-        let conversations =
-            parse_json(simple::local_conversations_json(conversation_scope_id.clone()).await)?;
-        let conversation_owned = conversations.as_array().is_some_and(|items| {
-            items.iter().any(|conversation| {
-                conversation.get("id").and_then(Value::as_str) == Some(conversation_id.as_str())
-            })
-        });
-        if !conversation_owned {
-            return Err(MomoApiError::bad_request(
-                "conversation_id does not belong to conversation_scope_id",
-            ));
-        }
+        let character = parse_json(simple::local_character_json(character_id.clone()).await)
+            .map_err(|_| MomoApiError::bad_request("character_id does not exist"))?;
         self.response_attempts
             .lock()
             .await
@@ -799,7 +809,7 @@ impl MomoApiService {
         if !user_already_written {
             simple::append_response_user_message_json(
                 operation_key.to_owned(),
-                conversation_scope_id.clone(),
+                conversation_space_id.clone(),
                 conversation_id.clone(),
                 input.to_owned(),
             )
@@ -809,7 +819,17 @@ impl MomoApiService {
 
         let context_window = governed.context_window;
         let reserve_output_tokens = governed.max_output_tokens;
-        let query_embedding = if request.momo.semantic_graph || request.momo.mo_state {
+        let include_memory = request
+            .momo
+            .memory_sources
+            .iter()
+            .any(|source| source.memory);
+        let include_semantic_graph = request
+            .momo
+            .memory_sources
+            .iter()
+            .any(|source| source.semantic_graph);
+        let query_embedding = if include_semantic_graph {
             match self.generate_query_embedding(input).await {
                 Ok(value) => Some(value),
                 Err(error) => {
@@ -820,18 +840,15 @@ impl MomoApiService {
         } else {
             None
         };
-        let retrieval_enabled =
-            request.momo.memory || request.momo.semantic_graph || request.momo.mo_state;
+        let retrieval_enabled = !request.momo.memory_sources.is_empty();
         let retrieved = if retrieval_enabled {
             let payload = json!({
-                "scopes": [{"scope_id": scope_id, "label": "personal", "weight": 100}],
+                "spaces": request.momo.memory_sources,
                 "query": input,
                 "max_tokens": context_window
                     .saturating_sub(reserve_output_tokens)
                     .saturating_div(8)
                     .clamp(128, 2_048),
-                "include_memory": request.momo.memory || request.momo.mo_state,
-                "include_semantic_graph": request.momo.semantic_graph || request.momo.mo_state,
                 "vector_space_id": query_embedding.as_ref().map(|value| &value.0),
                 "query_vector": query_embedding.as_ref().map(|value| &value.1),
             });
@@ -852,7 +869,7 @@ impl MomoApiService {
             .partition(|item| item.get("graph_id").is_some());
         let state_result = if request.momo.mo_state {
             match simple::compile_mo_state_json(
-                scope_id.clone(),
+                personal_space_id.clone(),
                 serde_json::to_string(&memory)
                     .map_err(|error| MomoApiError::internal(error.to_string()))?,
                 serde_json::to_string(&nsg)
@@ -873,7 +890,7 @@ impl MomoApiService {
         };
 
         let history = parse_json(
-            simple::local_messages_json(conversation_scope_id.clone(), conversation_id.clone())
+            simple::local_messages_json(conversation_space_id.clone(), conversation_id.clone())
                 .await,
         )?;
         let mut messages = history
@@ -907,9 +924,9 @@ impl MomoApiService {
             json!({
                 "character_markdown": character.get("character_markdown").and_then(Value::as_str).unwrap_or_default(),
                 "user_markdown": character.get("user_markdown").and_then(Value::as_str).unwrap_or_default(),
-                "memory_markdown": if request.momo.memory { joined_bodies(&memory) } else { String::new() },
+                "memory_markdown": if include_memory { joined_bodies(&memory) } else { String::new() },
                 "state_context": state_result.get("context").and_then(Value::as_str).unwrap_or_default(),
-                "nsg_markdown": if request.momo.semantic_graph { joined_bodies(&nsg) } else { String::new() },
+                "nsg_markdown": if include_semantic_graph { joined_bodies(&nsg) } else { String::new() },
                 "messages": messages,
                 "context_window": context_window,
                 "reserve_output_tokens": reserve_output_tokens,
@@ -1070,7 +1087,7 @@ impl MomoApiService {
         }
         if !content.is_empty() {
             simple::stage_message_json(
-                conversation_scope_id,
+                conversation_space_id,
                 conversation_id.clone(),
                 "assistant".to_owned(),
                 content.clone(),

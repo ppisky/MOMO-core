@@ -2,27 +2,26 @@
 
 use super::*;
 
-const MAX_MEMORY_SCOPES: usize = 8;
+const MAX_MEMORY_SPACES: usize = 16;
 
 /// A client-defined memory namespace participating in one retrieval. Core does
 /// not attach platform semantics to the namespace; labels are returned only so
 /// the host can keep personal, room, project, or other memories distinguishable.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct MemoryScopeSource {
-    pub scope_id: String,
+pub struct MemorySpaceSource {
+    pub space_id: String,
     pub label: String,
-    #[serde(default = "default_scope_weight")]
-    pub weight: usize,
+    pub weight: u8,
+    pub memory: bool,
+    pub semantic_graph: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScopedMemoryJsonRequest {
-    scopes: Vec<MemoryScopeSource>,
+    spaces: Vec<MemorySpaceSource>,
     query: String,
     max_tokens: usize,
-    include_memory: bool,
-    include_semantic_graph: bool,
     vector_space_id: Option<String>,
     query_vector: Option<Vec<f64>>,
     #[serde(default)]
@@ -43,20 +42,14 @@ struct RetrievalPlan {
     vector: Option<VectorQuery>,
 }
 
-const fn default_scope_weight() -> usize {
-    1
-}
-
 /// Retrieve from several isolated memory workspaces while preserving the
 /// source namespace on every result. The total token budget is divided by
 /// caller-provided weights; platform identity and ACL rules stay in the host.
 pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String, String> {
     let request: ScopedMemoryJsonRequest =
         serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
-    validate_memory_scopes(&request.scopes)?;
-    if !request.include_memory && !request.include_semantic_graph {
-        return Err("at least one retrieval component must be enabled".to_owned());
-    }
+    validate_memory_spaces(&request.spaces)?;
+    let has_semantic_graph = request.spaces.iter().any(|source| source.semantic_graph);
     match (&request.vector_space_id, &request.query_vector) {
         (Some(_), Some(_)) | (None, None) => {}
         _ => {
@@ -71,9 +64,7 @@ pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String,
                 .to_owned(),
         );
     }
-    if !request.include_semantic_graph
-        && (request.vector_space_id.is_some() || request.embedding.is_some())
-    {
+    if !has_semantic_graph && (request.vector_space_id.is_some() || request.embedding.is_some()) {
         return Err("vector retrieval requires semantic graph retrieval".to_owned());
     }
 
@@ -91,14 +82,14 @@ pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String,
         .map(|(_, vector)| vector)
         .or(request.query_vector.as_ref());
 
-    let budgets = weighted_scope_budgets(&request.scopes, request.max_tokens);
+    let budgets = weighted_space_budgets(&request.spaces, request.max_tokens);
     let mut combined = Vec::new();
-    for (source, budget) in request.scopes.into_iter().zip(budgets) {
+    for (source, budget) in request.spaces.into_iter().zip(budgets) {
         if budget == 0 {
             continue;
         }
         let scope_id =
-            uuid::Uuid::parse_str(&source.scope_id).map_err(|error| error.to_string())?;
+            uuid::Uuid::parse_str(&source.space_id).map_err(|error| error.to_string())?;
         let vector = vector_space_id
             .zip(query_vector)
             .map(|(space_id, vector)| VectorQuery {
@@ -109,8 +100,8 @@ pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String,
             scope_id,
             query: request.query.clone(),
             max_tokens: budget,
-            include_memory: request.include_memory,
-            include_semantic_graph: request.include_semantic_graph,
+            include_memory: source.memory,
+            include_semantic_graph: source.semantic_graph,
             vector,
         })
         .await?;
@@ -121,9 +112,9 @@ pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String,
                 .as_object_mut()
                 .ok_or_else(|| "memory retrieval result was not an object".to_owned())?;
             object.insert(
-                "memory_scope".to_owned(),
+                "memory_space".to_owned(),
                 serde_json::json!({
-                    "id": source.scope_id,
+                    "id": source.space_id,
                     "label": source.label,
                 }),
             );
@@ -133,34 +124,39 @@ pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String,
     serde_json::to_string(&combined).map_err(|error| error.to_string())
 }
 
-fn validate_memory_scopes(sources: &[MemoryScopeSource]) -> Result<(), String> {
-    if sources.is_empty() || sources.len() > MAX_MEMORY_SCOPES {
+fn validate_memory_spaces(sources: &[MemorySpaceSource]) -> Result<(), String> {
+    if sources.is_empty() || sources.len() > MAX_MEMORY_SPACES {
         return Err(format!(
-            "memory retrieval requires between 1 and {MAX_MEMORY_SCOPES} scopes"
+            "memory retrieval requires between 1 and {MAX_MEMORY_SPACES} Spaces"
         ));
     }
     let mut seen = std::collections::HashSet::new();
     for source in sources {
         let scope_id =
-            uuid::Uuid::parse_str(&source.scope_id).map_err(|error| error.to_string())?;
+            uuid::Uuid::parse_str(&source.space_id).map_err(|error| error.to_string())?;
         if !seen.insert(scope_id) {
-            return Err("memory retrieval scopes must be unique".to_owned());
+            return Err("memory retrieval Spaces must be unique".to_owned());
         }
         if source.label.trim().is_empty() || source.label.chars().count() > 64 {
-            return Err("memory scope labels must contain 1 to 64 characters".to_owned());
+            return Err("memory Space labels must contain 1 to 64 characters".to_owned());
         }
-        if source.weight == 0 || source.weight > 1_000 {
-            return Err("memory scope weights must be between 1 and 1000".to_owned());
+        if !(1..=100).contains(&source.weight) || (!source.memory && !source.semantic_graph) {
+            return Err(
+                "memory Space weights must be between 1 and 100 and enable DMW or NSG".to_owned(),
+            );
         }
     }
     Ok(())
 }
 
-fn weighted_scope_budgets(sources: &[MemoryScopeSource], max_tokens: usize) -> Vec<usize> {
-    let total_weight = sources.iter().map(|source| source.weight).sum::<usize>();
+fn weighted_space_budgets(sources: &[MemorySpaceSource], max_tokens: usize) -> Vec<usize> {
+    let total_weight = sources
+        .iter()
+        .map(|source| usize::from(source.weight))
+        .sum::<usize>();
     let mut budgets = sources
         .iter()
-        .map(|source| max_tokens.saturating_mul(source.weight) / total_weight)
+        .map(|source| max_tokens.saturating_mul(usize::from(source.weight)) / total_weight)
         .collect::<Vec<_>>();
     let assigned = budgets.iter().sum::<usize>();
     let remainder = max_tokens.saturating_sub(assigned);
@@ -190,7 +186,7 @@ pub async fn retrieve_memory_json(
 
 async fn retrieve_memory(plan: RetrievalPlan) -> Result<String, String> {
     let workspace = core()?
-        .memory_for_scope(plan.scope_id)
+        .memory_for_space(plan.scope_id)
         .map_err(|error| error.to_string())?;
     let vector_ranked_ids = if let Some(vector_query) = &plan.vector {
         validate_query_vector(vector_query)?;
@@ -276,7 +272,7 @@ pub async fn compile_mo_state_json(
     let retrieved_nsg: Vec<momo_memory::nsg::RetrievedNsg> =
         serde_json::from_str(&retrieved_nsg_json).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let context = workspace
         .compile_mo_state(
@@ -307,7 +303,7 @@ pub async fn apply_memory_patch_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     workspace
         .apply_patch(&patch_yaml)
@@ -331,7 +327,7 @@ pub async fn submit_memory_patch_review_json(
     }
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let summary = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?
         .summarize_patch(&patch_yaml)
         .map_err(|error| error.to_string())?;
@@ -427,7 +423,7 @@ pub async fn reject_memory_patch_review_json(
 pub async fn list_memory_documents_json(scope_id: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let documents = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?
         .list_documents()
         .map_err(|error| error.to_string())?;
@@ -440,7 +436,7 @@ pub async fn read_memory_document_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let document = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?
         .read_document_by_id(&document_id)
         .map_err(|error| error.to_string())?;
@@ -468,7 +464,7 @@ pub async fn update_memory_document_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let _document = workspace
         .read_document_by_id(&document_id)
@@ -485,7 +481,7 @@ pub async fn archive_memory_document_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let _document = workspace
         .read_document_by_id(&document_id)
@@ -511,7 +507,7 @@ pub async fn restore_memory_document_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     workspace
         .restore_archived_authorized(&document_id)
@@ -525,7 +521,7 @@ pub async fn delete_memory_document_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let workspace = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     workspace
         .delete_document_authorized(&document_id)
@@ -534,34 +530,36 @@ pub async fn delete_memory_document_json(
 }
 
 #[cfg(test)]
-mod scoped_tests {
+mod space_tests {
     use super::*;
 
-    fn source(id: &str, label: &str, weight: usize) -> MemoryScopeSource {
-        MemoryScopeSource {
-            scope_id: id.to_owned(),
+    fn source(id: &str, label: &str, weight: u8) -> MemorySpaceSource {
+        MemorySpaceSource {
+            space_id: id.to_owned(),
             label: label.to_owned(),
             weight,
+            memory: true,
+            semantic_graph: true,
         }
     }
 
     #[test]
-    fn scoped_budget_is_weighted_and_conserves_total() {
+    fn space_budget_is_weighted_and_conserves_total() {
         let sources = [
             source("01900000-0000-7000-8000-000000000101", "personal", 3),
             source("01900000-0000-7000-8000-000000000102", "room", 2),
         ];
-        let budgets = weighted_scope_budgets(&sources, 1_024);
+        let budgets = weighted_space_budgets(&sources, 1_024);
         assert_eq!(budgets, [615, 409]);
         assert_eq!(budgets.iter().sum::<usize>(), 1_024);
     }
 
     #[test]
-    fn scoped_sources_require_unique_valid_ids() {
+    fn space_sources_require_unique_valid_ids() {
         let sources = [
             source("01900000-0000-7000-8000-000000000101", "personal", 1),
             source("01900000-0000-7000-8000-000000000101", "room", 1),
         ];
-        assert!(validate_memory_scopes(&sources).is_err());
+        assert!(validate_memory_spaces(&sources).is_err());
     }
 }

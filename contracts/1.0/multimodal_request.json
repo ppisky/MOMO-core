@@ -22,12 +22,26 @@
   "momo": {
     "schema": "momo.responses/1.0",
     "request_id": "contract-image-request-1001",
-    "scope_id": "01900000-0000-7000-8000-000000000101",
-    "conversation_scope_id": "01900000-0000-7000-8000-000000000102",
-    "character_scope_id": "01900000-0000-7000-8000-000000000103",
+    "personal_space_id": "01900000-0000-7000-8000-000000000101",
+    "conversation_space_id": "01900000-0000-7000-8000-000000000102",
     "character_id": "01900000-0000-7000-8000-000000000104",
-    "memory": true,
-    "semantic_graph": true,
+    "memory_sources": [
+      {
+        "space_id": "01900000-0000-7000-8000-000000000101",
+        "label": "personal",
+        "weight": 70,
+        "memory": true,
+        "semantic_graph": true
+      },
+      {
+        "space_id": "01900000-0000-7000-8000-000000000102",
+        "label": "conversation",
+        "weight": 30,
+        "memory": true,
+        "semantic_graph": true
+      }
+    ],
+    "memory_write_space_id": "01900000-0000-7000-8000-000000000101",
     "mo_state": true
   }
 }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use chrono::{TimeZone, Utc};
 use momo_core::{
-    MocCompatibility, MocExportPlan, MocModule, MomoCore, export_moc,
+    MocCharacterSelection, MocCompatibility, MocExportPlan, MomoCore, export_moc,
     momo_domain::{CharacterCard, Conversation, Message, MessageRole},
 };
 use uuid::Uuid;
@@ -94,16 +94,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     export_moc(
         &core,
         &output,
-        scope_id,
         &serde_json::json!({"schema_version": 2}),
         &MocExportPlan {
-            modules: vec![
-                MocModule::Characters,
-                MocModule::Conversations,
-                MocModule::Memory,
-                MocModule::SemanticGraph,
-            ],
-            character_id: None,
+            include_config: false,
+            characters: vec![MocCharacterSelection {
+                space_id: scope_id,
+                character_ids: vec![],
+            }],
+            conversations: vec![scope_id],
+            memory: vec![scope_id],
+            semantic_graph: vec![scope_id],
             compatibility: MocCompatibility::None,
         },
     )

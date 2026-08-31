@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -8,7 +8,7 @@ use std::{
 use chrono::Utc;
 use momo_config::ConfigDocument;
 use momo_domain::{CharacterCard, Conversation, Message};
-use momo_moc::{ExtractionLimits, Manifest, ModuleDefinition};
+use momo_moc::{ExtractionLimits, Manifest, ModuleDefinition, SpaceModuleDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tempfile::{NamedTempFile, TempDir};
@@ -86,30 +86,48 @@ pub enum MocCompatibility {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MocExportPlan {
-    pub modules: Vec<MocModule>,
-    /// Limits the `characters` module to one character. It is invalid unless
-    /// that module is selected.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub character_id: Option<Uuid>,
+    #[serde(default)]
+    pub include_config: bool,
+    #[serde(default)]
+    pub characters: Vec<MocCharacterSelection>,
+    #[serde(default)]
+    pub conversations: Vec<Uuid>,
+    #[serde(default)]
+    pub memory: Vec<Uuid>,
+    #[serde(default)]
+    pub semantic_graph: Vec<Uuid>,
     #[serde(default)]
     pub compatibility: MocCompatibility,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MocCharacterSelection {
+    pub space_id: Uuid,
+    #[serde(default)]
+    pub character_ids: Vec<Uuid>,
+}
+
 impl MocExportPlan {
     fn validate(&self, allow_empty: bool) -> Result<HashSet<MocModule>, PortableError> {
-        let modules = self.modules.iter().copied().collect::<HashSet<_>>();
+        let mut modules = HashSet::new();
+        if self.include_config {
+            modules.insert(MocModule::MomoConfig);
+        }
+        if !self.characters.is_empty() {
+            modules.insert(MocModule::Characters);
+        }
+        if !self.conversations.is_empty() {
+            modules.insert(MocModule::Conversations);
+        }
+        if !self.memory.is_empty() {
+            modules.insert(MocModule::Memory);
+        }
+        if !self.semantic_graph.is_empty() {
+            modules.insert(MocModule::SemanticGraph);
+        }
         if modules.is_empty() && !allow_empty {
             return Err(PortableError::EmptySelection);
-        }
-        if modules.len() != self.modules.len() {
-            return Err(PortableError::InvalidData(
-                "MOC export modules must not contain duplicates".to_owned(),
-            ));
-        }
-        if self.character_id.is_some() && !modules.contains(&MocModule::Characters) {
-            return Err(PortableError::InvalidData(
-                "character_id requires the characters module".to_owned(),
-            ));
         }
         if self.compatibility != MocCompatibility::None && !modules.contains(&MocModule::Characters)
         {
@@ -117,8 +135,41 @@ impl MocExportPlan {
                 "character compatibility requires the characters module".to_owned(),
             ));
         }
+        validate_unique_spaces(
+            self.characters.iter().map(|selection| selection.space_id),
+            "characters",
+        )?;
+        for selection in &self.characters {
+            let unique = selection
+                .character_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            if unique.len() != selection.character_ids.len() {
+                return Err(PortableError::InvalidData(format!(
+                    "character selection for Space {} contains duplicate IDs",
+                    selection.space_id
+                )));
+            }
+        }
+        validate_unique_spaces(self.conversations.iter().copied(), "conversations")?;
+        validate_unique_spaces(self.memory.iter().copied(), "memory")?;
+        validate_unique_spaces(self.semantic_graph.iter().copied(), "semantic_graph")?;
         Ok(modules)
     }
+}
+
+fn validate_unique_spaces(
+    spaces: impl Iterator<Item = Uuid>,
+    module: &str,
+) -> Result<(), PortableError> {
+    let spaces = spaces.collect::<Vec<_>>();
+    if spaces.iter().copied().collect::<HashSet<_>>().len() != spaces.len() {
+        return Err(PortableError::InvalidData(format!(
+            "{module} contains duplicate Space selections"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +177,21 @@ impl MocExportPlan {
 pub enum ConflictMode {
     KeepExisting,
     Replace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MocImportPlan {
+    #[serde(default)]
+    pub apply_config: bool,
+    #[serde(default)]
+    pub space_map: BTreeMap<Uuid, Uuid>,
+    #[serde(default = "default_conflict_mode")]
+    pub conflict_mode: ConflictMode,
+}
+
+fn default_conflict_mode() -> ConflictMode {
+    ConflictMode::KeepExisting
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -238,17 +304,15 @@ pub fn import_momo_config(
 pub async fn export_moc(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    scope_id: Uuid,
     settings: &JsonValue,
     plan: &MocExportPlan,
 ) -> Result<Manifest, PortableError> {
-    export_moc_with_host_modules(core, output, scope_id, settings, plan, &[]).await
+    export_moc_with_host_modules(core, output, settings, plan, &[]).await
 }
 
 pub async fn export_moc_with_host_modules(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    scope_id: Uuid,
     settings: &JsonValue,
     plan: &MocExportPlan,
     host_modules: &[HostMocModule],
@@ -256,6 +320,7 @@ pub async fn export_moc_with_host_modules(
     let selected = plan.validate(!host_modules.is_empty())?;
     let staging = TempDir::new()?;
     let mut modules = Vec::new();
+    let mut space_modules = Vec::new();
     if selected.contains(&MocModule::MomoConfig) {
         let document = merged_momo_config(core, settings)?;
         export_config_bundle(
@@ -266,14 +331,17 @@ pub async fn export_moc_with_host_modules(
         modules.push(known_module_definition("config"));
     }
     if selected.contains(&MocModule::Characters) {
-        export_characters(
-            core,
-            staging.path(),
-            scope_id,
-            plan.character_id,
-            plan.compatibility,
-        )
-        .await?;
+        for selection in &plan.characters {
+            export_characters(
+                core,
+                staging.path(),
+                selection.space_id,
+                &selection.character_ids,
+                plan.compatibility,
+            )
+            .await?;
+            space_modules.push(space_module_definition("characters", selection.space_id));
+        }
         modules.push(known_module_definition("characters"));
         if staging.path().join("tavern_compat").exists() {
             modules.push(ModuleDefinition {
@@ -285,17 +353,40 @@ pub async fn export_moc_with_host_modules(
         }
     }
     if selected.contains(&MocModule::Conversations) {
-        export_conversations(core, staging.path(), scope_id).await?;
+        for space_id in &plan.conversations {
+            export_conversations(core, staging.path(), *space_id).await?;
+            space_modules.push(space_module_definition("conversations", *space_id));
+        }
         modules.push(known_module_definition("conversations"));
     }
     if selected.contains(&MocModule::Memory) {
-        let memory = core.memory_for_scope(scope_id)?;
-        copy_tree_filtered(memory.root(), &staging.path().join("memory"), false)?;
+        for space_id in &plan.memory {
+            let memory = core.memory_for_space(*space_id)?;
+            copy_tree_filtered(
+                memory.root(),
+                &staging
+                    .path()
+                    .join("memory/spaces")
+                    .join(space_id.to_string()),
+                false,
+            )?;
+            space_modules.push(space_module_definition("memory", *space_id));
+        }
         modules.push(known_module_definition("memory"));
     }
     if selected.contains(&MocModule::SemanticGraph) {
-        let memory = core.memory_for_scope(scope_id)?;
-        copy_tree_filtered(memory.root(), &staging.path().join("semantic_graph"), true)?;
+        for space_id in &plan.semantic_graph {
+            let memory = core.memory_for_space(*space_id)?;
+            copy_tree_filtered(
+                memory.root(),
+                &staging
+                    .path()
+                    .join("semantic_graph/spaces")
+                    .join(space_id.to_string()),
+                true,
+            )?;
+            space_modules.push(space_module_definition("semantic_graph", *space_id));
+        }
         modules.push(known_module_definition("semantic_graph"));
     }
     let mut module_ids = modules
@@ -316,56 +407,45 @@ pub async fn export_moc_with_host_modules(
     if modules.is_empty() {
         return Err(PortableError::EmptySelection);
     }
-    Ok(momo_moc::create_from_definitions(
+    Ok(momo_moc::create_from_definitions_and_spaces(
         output,
         staging.path(),
         &modules,
+        &space_modules,
     )?)
 }
 
 pub async fn import_moc(
     core: &MomoCore,
     input: impl AsRef<Path>,
-    scope_id: Uuid,
-    conflict_mode: ConflictMode,
+    plan: &MocImportPlan,
 ) -> Result<ImportReport, PortableError> {
-    import_moc_with_passphrase(core, input, scope_id, conflict_mode, None).await
+    import_moc_with_passphrase(core, input, plan, None).await
 }
 
 pub async fn import_moc_claiming_unknown_modules(
     core: &MomoCore,
     input: impl AsRef<Path>,
-    scope_id: Uuid,
-    conflict_mode: ConflictMode,
+    plan: &MocImportPlan,
     claim_directory: impl AsRef<Path>,
 ) -> Result<ImportReport, PortableError> {
-    import_moc_with_passphrase_and_claims(
-        core,
-        input,
-        scope_id,
-        conflict_mode,
-        None,
-        Some(claim_directory.as_ref()),
-    )
-    .await
+    import_moc_with_passphrase_and_claims(core, input, plan, None, Some(claim_directory.as_ref()))
+        .await
 }
 
 pub async fn export_private_moc(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    scope_id: Uuid,
     settings: &JsonValue,
     plan: &MocExportPlan,
     passphrase: &str,
 ) -> Result<Manifest, PortableError> {
-    export_private_moc_with_host_modules(core, output, scope_id, settings, plan, &[], passphrase)
-        .await
+    export_private_moc_with_host_modules(core, output, settings, plan, &[], passphrase).await
 }
 
 pub async fn export_private_moc_with_host_modules(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    scope_id: Uuid,
     settings: &JsonValue,
     plan: &MocExportPlan,
     host_modules: &[HostMocModule],
@@ -376,7 +456,7 @@ pub async fn export_private_moc_with_host_modules(
     }
     let temporary = TempDir::new()?;
     let inner_path = temporary.path().join("payload.moc");
-    export_moc_with_host_modules(core, &inner_path, scope_id, settings, plan, host_modules).await?;
+    export_moc_with_host_modules(core, &inner_path, settings, plan, host_modules).await?;
     let metadata = fs::metadata(&inner_path)?;
     if metadata.len() > PRIVATE_MOC_MAX_BYTES {
         return Err(PortableError::PrivateMocTooLarge);
@@ -411,23 +491,20 @@ pub fn moc_is_encrypted(input: impl AsRef<Path>) -> Result<bool, PortableError> 
 pub async fn import_moc_with_passphrase(
     core: &MomoCore,
     input: impl AsRef<Path>,
-    scope_id: Uuid,
-    conflict_mode: ConflictMode,
+    plan: &MocImportPlan,
     passphrase: Option<&str>,
 ) -> Result<ImportReport, PortableError> {
-    import_moc_with_passphrase_and_claims(core, input, scope_id, conflict_mode, passphrase, None)
-        .await
+    import_moc_with_passphrase_and_claims(core, input, plan, passphrase, None).await
 }
 
 pub async fn import_moc_with_passphrase_and_claims(
     core: &MomoCore,
     input: impl AsRef<Path>,
-    scope_id: Uuid,
-    conflict_mode: ConflictMode,
+    plan: &MocImportPlan,
     passphrase: Option<&str>,
     claim_directory: Option<&Path>,
 ) -> Result<ImportReport, PortableError> {
-    let mode = conflict_mode;
+    let mode = plan.conflict_mode;
     let outer = TempDir::new()?;
     let manifest = momo_moc::extract(input, outer.path(), ExtractionLimits::default())?;
     let mut payload_manifest = manifest.clone();
@@ -483,21 +560,72 @@ pub async fn import_moc_with_passphrase_and_claims(
         unknown_modules: Vec::new(),
         momo_config: None,
     };
-    if payload_manifest
-        .modules
+    let source_spaces = payload_manifest
+        .space_modules
         .iter()
-        .any(|entry| entry.module == "config")
+        .map(|space| Uuid::parse_str(&space.space_id))
+        .collect::<Result<HashSet<_>, _>>()?;
+    if plan
+        .space_map
+        .keys()
+        .any(|source| !source_spaces.contains(source))
+    {
+        return Err(PortableError::InvalidData(
+            "space_map contains a source Space absent from the MOC".to_owned(),
+        ));
+    }
+    if plan
+        .space_map
+        .values()
+        .copied()
+        .collect::<HashSet<_>>()
+        .len()
+        != plan.space_map.len()
+    {
+        return Err(PortableError::InvalidData(
+            "space_map cannot collapse multiple source Spaces into one target Space".to_owned(),
+        ));
+    }
+    preflight_moc_payload(core, extracted, &payload_manifest, plan, claim_directory).await?;
+    if plan.apply_config
+        && payload_manifest
+            .modules
+            .iter()
+            .any(|entry| entry.module == "config")
     {
         let path = extracted.join("config/momo.toml");
         if path.exists() {
             report.momo_config = Some(import_momo_config(core, path)?);
         }
     }
-    import_characters(core, extracted, scope_id, mode, &mut report).await?;
-    import_external_character_sources(core, extracted, scope_id).await?;
-    import_conversations(core, extracted, scope_id, mode, &mut report).await?;
-    import_memory(core, extracted, scope_id, mode, &mut report)?;
-    import_semantic_graph(core, extracted, scope_id, mode, &mut report)?;
+    for space in &payload_manifest.space_modules {
+        let source_space = Uuid::parse_str(&space.space_id)?;
+        let target_space = plan
+            .space_map
+            .get(&source_space)
+            .copied()
+            .unwrap_or(source_space);
+        let directory = extracted.join(&space.path);
+        match space.module.as_str() {
+            "characters" => {
+                import_characters(core, &directory, target_space, mode, &mut report).await?;
+            }
+            "conversations" => {
+                import_conversations(core, &directory, target_space, mode, &mut report).await?;
+            }
+            "memory" => import_memory(core, &directory, target_space, mode, &mut report)?,
+            "semantic_graph" => {
+                import_semantic_graph(core, &directory, target_space, mode, &mut report)?;
+            }
+            _ => {
+                return Err(PortableError::InvalidData(format!(
+                    "unknown Core Space module: {}",
+                    space.module
+                )));
+            }
+        }
+    }
+    import_external_character_sources(core, extracted).await?;
     if let Some(claim_directory) = claim_directory {
         for module in &mut unknown_modules {
             let claimed = claim_unknown_module(extracted, claim_directory, module)?;
@@ -506,6 +634,304 @@ pub async fn import_moc_with_passphrase_and_claims(
     }
     report.unknown_modules = unknown_modules;
     Ok(report)
+}
+
+async fn preflight_moc_payload(
+    core: &MomoCore,
+    extracted: &Path,
+    manifest: &Manifest,
+    plan: &MocImportPlan,
+    claim_directory: Option<&Path>,
+) -> Result<(), PortableError> {
+    if plan.apply_config
+        && manifest
+            .modules
+            .iter()
+            .any(|entry| entry.module == "config")
+    {
+        preflight_config_bundle(extracted.join("config/momo.toml"))?;
+    }
+
+    let existing_characters = core
+        .store()
+        .list_characters()
+        .await?
+        .into_iter()
+        .map(|character| character.id)
+        .collect::<HashSet<_>>();
+    let mut character_ids = existing_characters.clone();
+    let mut imported_character_ids = HashSet::new();
+    let mut conversation_ids = HashSet::new();
+    let mut message_ids = HashSet::new();
+
+    for space in &manifest.space_modules {
+        let source_space = Uuid::parse_str(&space.space_id)?;
+        let directory = extracted.join(&space.path);
+        match space.module.as_str() {
+            "characters" => {
+                let ids = preflight_characters(&directory)?;
+                for id in ids {
+                    if !imported_character_ids.insert(id) {
+                        return Err(PortableError::InvalidData(format!(
+                            "character {id} occurs in more than one Space module"
+                        )));
+                    }
+                    character_ids.insert(id);
+                }
+            }
+            "conversations" => preflight_conversations(
+                &directory,
+                source_space,
+                &mut conversation_ids,
+                &mut message_ids,
+            )?,
+            "memory" | "semantic_graph" => preflight_workspace_tree(&directory)?,
+            _ => {
+                return Err(PortableError::InvalidData(format!(
+                    "unknown Core Space module: {}",
+                    space.module
+                )));
+            }
+        }
+    }
+    preflight_external_character_sources(extracted, &character_ids)?;
+
+    if let Some(claim_directory) = claim_directory {
+        for module in manifest
+            .module_definitions
+            .iter()
+            .filter(|module| !is_core_moc_module(&module.id))
+        {
+            validate_module_id(&module.id)?;
+            let destination = claim_directory.join(&module.id);
+            if destination.exists() {
+                return Err(PortableError::InvalidData(format!(
+                    "claimed MOC module destination already exists: {}",
+                    destination.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preflight_config_bundle(source: PathBuf) -> Result<(), PortableError> {
+    let document = ConfigDocument::load(&source)?;
+    let text = document.to_toml_string()?;
+    crate::validate_momo_document(&text)
+        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
+    crate::MomoConfig::load(&source)
+        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
+    reject_credentials(document.values(), "")?;
+    let destination = TempDir::new()?;
+    import_config_bundle(&document, &source, &destination.path().join("momo.toml"))?;
+    Ok(())
+}
+
+fn preflight_characters(directory: &Path) -> Result<HashSet<Uuid>, PortableError> {
+    if !directory.is_dir() {
+        return Err(PortableError::InvalidData(format!(
+            "declared character Space is not a directory: {}",
+            directory.display()
+        )));
+    }
+    let index: Vec<Uuid> = serde_json::from_slice(&fs::read(directory.join("index.json"))?)?;
+    let expected = index.iter().copied().collect::<HashSet<_>>();
+    if expected.len() != index.len() {
+        return Err(PortableError::InvalidData(
+            "character index contains duplicate IDs".to_owned(),
+        ));
+    }
+    let mut discovered = HashSet::new();
+    for item in fs::read_dir(directory)? {
+        let item = item?;
+        if item.file_name() == "index.json" {
+            continue;
+        }
+        if !item.file_type()?.is_dir() {
+            return Err(PortableError::InvalidData(format!(
+                "character Space contains an unexpected non-directory entry: {}",
+                item.path().display()
+            )));
+        }
+        let asset_directory = item.path();
+        let directory_id = Uuid::parse_str(&item.file_name().to_string_lossy())?;
+        let metadata_document = ConfigDocument::load(asset_directory.join("character.toml"))?;
+        let (metadata, _) = parse_character_metadata(metadata_document.values())?;
+        validate_character_metadata(&metadata)?;
+        let id = parse_character_id(&metadata.id)?;
+        if id != directory_id {
+            return Err(PortableError::InvalidData(format!(
+                "character directory {directory_id} does not match metadata ID {id}"
+            )));
+        }
+        if !discovered.insert(id) {
+            return Err(PortableError::InvalidData(format!(
+                "character {id} is declared by more than one asset"
+            )));
+        }
+        let character_file = validate_asset_path(&metadata.character_file)?;
+        let default_user_file = asset_directory
+            .join("user.md")
+            .exists()
+            .then_some("user.md");
+        let user_file = metadata
+            .user_file
+            .as_deref()
+            .or(default_user_file)
+            .map(validate_asset_path)
+            .transpose()?;
+        let default_opening_file = asset_directory
+            .join("opening.md")
+            .exists()
+            .then_some("opening.md");
+        let opening_file = metadata
+            .opening_file
+            .as_deref()
+            .or(default_opening_file)
+            .map(validate_asset_path)
+            .transpose()?;
+        let character_key = portable_case_fold(&character_file);
+        let user_key = user_file.as_deref().map(portable_case_fold);
+        let opening_key = opening_file.as_deref().map(portable_case_fold);
+        if user_key.as_ref().is_some_and(|user| user == &character_key)
+            || opening_key.as_ref().is_some_and(|opening| {
+                opening == &character_key || user_key.as_ref().is_some_and(|user| opening == user)
+            })
+        {
+            return Err(PortableError::InvalidData(
+                "character_file, user_file, and opening_file must refer to different files"
+                    .to_owned(),
+            ));
+        }
+        read_markdown_asset(&asset_directory, &character_file)?;
+        if let Some(path) = user_file.as_deref() {
+            read_markdown_asset(&asset_directory, path)?;
+        }
+        if let Some(path) = opening_file.as_deref() {
+            read_markdown_asset(&asset_directory, path)?;
+        }
+    }
+    if discovered != expected {
+        return Err(PortableError::InvalidData(
+            "character index does not match the character assets".to_owned(),
+        ));
+    }
+    Ok(discovered)
+}
+
+fn preflight_conversations(
+    directory: &Path,
+    source_space: Uuid,
+    all_conversation_ids: &mut HashSet<Uuid>,
+    all_message_ids: &mut HashSet<Uuid>,
+) -> Result<(), PortableError> {
+    if !directory.is_dir() {
+        return Err(PortableError::InvalidData(format!(
+            "declared conversation Space is not a directory: {}",
+            directory.display()
+        )));
+    }
+    let conversations: Vec<Conversation> =
+        serde_json::from_slice(&fs::read(directory.join("index.json"))?)?;
+    let mut local_conversations = HashSet::new();
+    for conversation in conversations {
+        if conversation.scope_id != source_space {
+            return Err(PortableError::InvalidData(format!(
+                "conversation {} declares Space {} but is stored in Space {}",
+                conversation.id, conversation.scope_id, source_space
+            )));
+        }
+        if !local_conversations.insert(conversation.id)
+            || !all_conversation_ids.insert(conversation.id)
+        {
+            return Err(PortableError::InvalidData(format!(
+                "conversation {} occurs more than once in the MOC",
+                conversation.id
+            )));
+        }
+    }
+    let messages: Vec<Message> =
+        serde_json::from_slice(&fs::read(directory.join("messages.json"))?)?;
+    for message in messages {
+        if !local_conversations.contains(&message.conversation_id) {
+            return Err(PortableError::InvalidData(format!(
+                "message {} references conversation {} outside its Space module",
+                message.id, message.conversation_id
+            )));
+        }
+        if !all_message_ids.insert(message.id) {
+            return Err(PortableError::InvalidData(format!(
+                "message {} occurs more than once in the MOC",
+                message.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn preflight_workspace_tree(directory: &Path) -> Result<(), PortableError> {
+    // ZIP does not preserve an empty directory. A declared Space module with
+    // no files is therefore a valid empty selection after extraction.
+    if !directory.exists() {
+        return Ok(());
+    }
+    if !directory.is_dir() {
+        return Err(PortableError::InvalidData(format!(
+            "declared workspace Space is not a directory: {}",
+            directory.display()
+        )));
+    }
+    for item in WalkDir::new(directory).follow_links(false) {
+        let item = item?;
+        if item.file_type().is_symlink()
+            || (!item.file_type().is_file() && !item.file_type().is_dir())
+        {
+            return Err(PortableError::InvalidData(format!(
+                "workspace payload contains an unsupported entry: {}",
+                item.path().display()
+            )));
+        }
+        if item.file_type().is_file() {
+            fs::read(item.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn preflight_external_character_sources(
+    root: &Path,
+    character_ids: &HashSet<Uuid>,
+) -> Result<(), PortableError> {
+    let directory = root.join("tavern_compat");
+    if !directory.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            return Err(PortableError::InvalidData(
+                "tavern_compat entries must be character directories".to_owned(),
+            ));
+        }
+        let id = Uuid::parse_str(&entry.file_name().to_string_lossy())?;
+        if !character_ids.contains(&id) {
+            return Err(PortableError::InvalidData(format!(
+                "tavern_compat source references unknown character {id}"
+            )));
+        }
+        let metadata_path = entry.path().join("metadata.json");
+        if metadata_path.exists() {
+            let source = read_external_source_asset(&metadata_path)?;
+            crate::character_compat::validate_preserved_source_asset(&source, &entry.path())
+                .map_err(|error| {
+                    PortableError::InvalidData(format!(
+                        "MOC CHARX source cannot be imported: {error}"
+                    ))
+                })?;
+        }
+    }
+    Ok(())
 }
 
 fn merged_momo_config(
@@ -672,19 +1098,20 @@ async fn export_characters(
     core: &MomoCore,
     root: &Path,
     scope_id: Uuid,
-    character_id: Option<Uuid>,
+    character_ids: &[Uuid],
     compatibility: MocCompatibility,
 ) -> Result<(), PortableError> {
     let mut characters = core.store().list_characters_for_scope(scope_id).await?;
-    if let Some(character_id) = character_id {
-        characters.retain(|card| card.id == character_id);
-        if characters.is_empty() {
+    if !character_ids.is_empty() {
+        let selected = character_ids.iter().copied().collect::<HashSet<_>>();
+        characters.retain(|card| selected.contains(&card.id));
+        if characters.len() != selected.len() {
             return Err(PortableError::InvalidData(
-                "character does not exist or belongs to another user".to_owned(),
+                "a selected character does not exist in its declared owner Space".to_owned(),
             ));
         }
     }
-    let root_directory = root.join("characters");
+    let root_directory = root.join("characters/spaces").join(scope_id.to_string());
     fs::create_dir_all(&root_directory)?;
     atomic_write(
         &root_directory.join("index.json"),
@@ -829,7 +1256,7 @@ async fn export_conversations(
     for conversation in &conversations {
         messages.extend(core.store().list_messages(conversation.id).await?);
     }
-    let directory = root.join("conversations");
+    let directory = root.join("conversations/spaces").join(scope_id.to_string());
     fs::create_dir_all(&directory)?;
     atomic_write(
         &directory.join("index.json"),
@@ -844,12 +1271,11 @@ async fn export_conversations(
 
 async fn import_characters(
     core: &MomoCore,
-    root: &Path,
+    directory: &Path,
     scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
-    let directory = root.join("characters");
     if !directory.exists() {
         return Ok(());
     }
@@ -950,7 +1376,6 @@ async fn import_characters(
 async fn import_external_character_sources(
     core: &MomoCore,
     root: &Path,
-    scope_id: Uuid,
 ) -> Result<(), PortableError> {
     let directory = root.join("tavern_compat");
     if !directory.exists() {
@@ -958,7 +1383,7 @@ async fn import_external_character_sources(
     }
     let character_ids = core
         .store()
-        .list_characters_for_scope(scope_id)
+        .list_characters()
         .await?
         .into_iter()
         .map(|character| character.id)
@@ -997,12 +1422,11 @@ async fn import_external_character_sources(
 
 async fn import_conversations(
     core: &MomoCore,
-    root: &Path,
+    directory: &Path,
     scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
-    let directory = root.join("conversations");
     if !directory.exists() {
         return Ok(());
     }
@@ -1081,25 +1505,24 @@ async fn import_conversations(
 
 fn import_memory(
     core: &MomoCore,
-    root: &Path,
+    source: &Path,
     scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
-    let source = root.join("memory");
     if !source.exists() {
         return Ok(());
     }
-    for item in WalkDir::new(&source).follow_links(false) {
+    for item in WalkDir::new(source).follow_links(false) {
         let item = item?;
         if !item.file_type().is_file() {
             continue;
         }
         let relative = item
             .path()
-            .strip_prefix(&source)
+            .strip_prefix(source)
             .map_err(|_| PortableError::InvalidData("invalid memory path".to_owned()))?;
-        let target = core.memory_for_scope(scope_id)?.root().join(relative);
+        let target = core.memory_for_space(scope_id)?.root().join(relative);
         if target.exists() && mode == ConflictMode::KeepExisting {
             report.skipped_conflicts += 1;
             continue;
@@ -1112,16 +1535,15 @@ fn import_memory(
 
 fn import_semantic_graph(
     core: &MomoCore,
-    root: &Path,
+    source: &Path,
     scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
-    let source = root.join("semantic_graph");
     if !source.exists() {
         return Ok(());
     }
-    import_workspace_tree(core, &source, scope_id, mode, report)
+    import_workspace_tree(core, source, scope_id, mode, report)
 }
 
 fn import_workspace_tree(
@@ -1140,7 +1562,7 @@ fn import_workspace_tree(
             .path()
             .strip_prefix(source)
             .map_err(|_| PortableError::InvalidData("invalid workspace path".to_owned()))?;
-        let target = core.memory_for_scope(scope_id)?.root().join(relative);
+        let target = core.memory_for_space(scope_id)?.root().join(relative);
         if target.exists() && mode == ConflictMode::KeepExisting {
             report.skipped_conflicts += 1;
             continue;
@@ -1196,6 +1618,14 @@ fn known_module_definition(id: &str) -> ModuleDefinition {
             .map(|dependency| (*dependency).to_owned())
             .collect(),
         import_order,
+    }
+}
+
+fn space_module_definition(module: &str, space_id: Uuid) -> SpaceModuleDefinition {
+    SpaceModuleDefinition {
+        space_id: space_id.to_string(),
+        module: module.to_owned(),
+        path: format!("{module}/spaces/{space_id}"),
     }
 }
 
@@ -1452,7 +1882,7 @@ fn parse_character_metadata(values: &Table) -> Result<ParsedCharacterMetadata, P
         ));
     }
     Err(PortableError::InvalidData(
-        "native MOC v2 requires MOMO Character Card v2 metadata".to_owned(),
+        "native MOC character assets require MOMO Character Card v2 metadata".to_owned(),
     ))
 }
 
@@ -1509,6 +1939,50 @@ mod tests {
             b"full NSG test prompt",
         )
         .expect("NSG prompt");
+    }
+
+    fn test_export_plan(
+        space_id: Uuid,
+        modules: &[MocModule],
+        character_id: Option<Uuid>,
+        compatibility: MocCompatibility,
+    ) -> MocExportPlan {
+        let selected = modules.iter().copied().collect::<HashSet<_>>();
+        MocExportPlan {
+            include_config: selected.contains(&MocModule::MomoConfig),
+            characters: selected
+                .contains(&MocModule::Characters)
+                .then(|| MocCharacterSelection {
+                    space_id,
+                    character_ids: character_id.into_iter().collect(),
+                })
+                .into_iter()
+                .collect(),
+            conversations: selected
+                .contains(&MocModule::Conversations)
+                .then_some(space_id)
+                .into_iter()
+                .collect(),
+            memory: selected
+                .contains(&MocModule::Memory)
+                .then_some(space_id)
+                .into_iter()
+                .collect(),
+            semantic_graph: selected
+                .contains(&MocModule::SemanticGraph)
+                .then_some(space_id)
+                .into_iter()
+                .collect(),
+            compatibility,
+        }
+    }
+
+    fn test_import_plan(source: Uuid, target: Uuid, conflict_mode: ConflictMode) -> MocImportPlan {
+        MocImportPlan {
+            apply_config: true,
+            space_map: [(source, target)].into_iter().collect(),
+            conflict_mode,
+        }
     }
 
     #[tokio::test]
@@ -1585,19 +2059,19 @@ mod tests {
         let manifest = export_moc(
             &source,
             &output,
-            original_scope,
             &settings,
-            &MocExportPlan {
-                modules: vec![
+            &test_export_plan(
+                original_scope,
+                &[
                     MocModule::MomoConfig,
                     MocModule::Characters,
                     MocModule::Conversations,
                     MocModule::Memory,
                     MocModule::SemanticGraph,
                 ],
-                character_id: None,
-                compatibility: MocCompatibility::None,
-            },
+                None,
+                MocCompatibility::None,
+            ),
         )
         .await
         .expect("export");
@@ -1616,9 +2090,13 @@ mod tests {
             .await
             .expect("destination core");
         let new_scope = new_id();
-        let report = import_moc(&destination, &output, new_scope, ConflictMode::Replace)
-            .await
-            .expect("import");
+        let report = import_moc(
+            &destination,
+            &output,
+            &test_import_plan(original_scope, new_scope, ConflictMode::Replace),
+        )
+        .await
+        .expect("import");
         assert_eq!(report.characters_imported, 1);
         assert_eq!(report.conversations_imported, 1);
         assert_eq!(report.messages_imported, 1);
@@ -1655,13 +2133,13 @@ mod tests {
         export_moc(
             &destination,
             &second_output,
-            new_scope,
             &settings,
-            &MocExportPlan {
-                modules: vec![MocModule::Characters],
-                character_id: None,
-                compatibility: MocCompatibility::None,
-            },
+            &test_export_plan(
+                new_scope,
+                &[MocModule::Characters],
+                None,
+                MocCompatibility::None,
+            ),
         )
         .await
         .expect("re-export");
@@ -1676,6 +2154,8 @@ mod tests {
             inspected
                 .path()
                 .join("characters")
+                .join("spaces")
+                .join(new_scope.to_string())
                 .join(character_id.to_string())
                 .join("character.toml"),
         )
@@ -1687,6 +2167,8 @@ mod tests {
                 inspected
                     .path()
                     .join("characters")
+                    .join("spaces")
+                    .join(new_scope.to_string())
                     .join(character_id.to_string())
                     .join("opening.md")
             )
@@ -1698,24 +2180,28 @@ mod tests {
         export_private_moc(
             &source,
             &private_output,
-            original_scope,
             &settings,
-            &MocExportPlan {
-                modules: vec![MocModule::MomoConfig],
-                character_id: None,
-                compatibility: MocCompatibility::None,
-            },
+            &test_export_plan(
+                original_scope,
+                &[MocModule::MomoConfig],
+                None,
+                MocCompatibility::None,
+            ),
             "private-password",
         )
         .await
         .expect("private export");
         assert!(moc_is_encrypted(&private_output).expect("inspect private"));
+        let config_import = MocImportPlan {
+            apply_config: true,
+            space_map: BTreeMap::new(),
+            conflict_mode: ConflictMode::KeepExisting,
+        };
         assert!(matches!(
             import_moc_with_passphrase(
                 &destination,
                 &private_output,
-                new_scope,
-                ConflictMode::KeepExisting,
+                &config_import,
                 Some("wrong-password")
             )
             .await,
@@ -1726,8 +2212,7 @@ mod tests {
         let private_report = import_moc_with_passphrase(
             &destination,
             &private_output,
-            new_scope,
-            ConflictMode::KeepExisting,
+            &config_import,
             Some("private-password"),
         )
         .await
@@ -1767,13 +2252,8 @@ mod tests {
         let manifest = export_moc_with_host_modules(
             &source,
             &output,
-            new_id(),
             &serde_json::json!({}),
-            &MocExportPlan {
-                modules: vec![],
-                character_id: None,
-                compatibility: MocCompatibility::None,
-            },
+            &test_export_plan(new_id(), &[], None, MocCompatibility::None),
             std::slice::from_ref(&host_module),
         )
         .await
@@ -1785,7 +2265,12 @@ mod tests {
         let destination = MomoCore::initialize(destination_directory.path())
             .await
             .expect("destination core");
-        let report = import_moc(&destination, &output, new_id(), ConflictMode::Replace)
+        let host_import = MocImportPlan {
+            apply_config: false,
+            space_map: BTreeMap::new(),
+            conflict_mode: ConflictMode::Replace,
+        };
+        let report = import_moc(&destination, &output, &host_import)
             .await
             .expect("report unknown module");
         assert_eq!(report.unknown_modules.len(), 1);
@@ -1793,15 +2278,10 @@ mod tests {
         assert_eq!(report.unknown_modules[0].claimed_path, None);
 
         let claims = destination_directory.path().join("claims");
-        let report = import_moc_claiming_unknown_modules(
-            &destination,
-            &output,
-            new_id(),
-            ConflictMode::Replace,
-            &claims,
-        )
-        .await
-        .expect("claim unknown module");
+        let report =
+            import_moc_claiming_unknown_modules(&destination, &output, &host_import, &claims)
+                .await
+                .expect("claim unknown module");
         assert_eq!(
             report.unknown_modules[0].claimed_path.as_deref(),
             Some(claims.join("weather").to_string_lossy().as_ref())
@@ -1819,13 +2299,8 @@ mod tests {
             export_moc_with_host_modules(
                 &source,
                 source_directory.path().join("invalid.moc"),
-                new_id(),
                 &serde_json::json!({}),
-                &MocExportPlan {
-                    modules: vec![],
-                    character_id: None,
-                    compatibility: MocCompatibility::None,
-                },
+                &test_export_plan(new_id(), &[], None, MocCompatibility::None),
                 &[reserved],
             )
             .await,
@@ -1834,12 +2309,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imports_character_card_v2_without_user_file() {
+    async fn imports_character_card_v3_without_user_file() {
         let root = tempfile::tempdir().expect("moc root");
         let character_id = new_id();
+        let scope_id = new_id();
         let character_dir = root
             .path()
             .join("characters")
+            .join("spaces")
+            .join(scope_id.to_string())
             .join(character_id.to_string());
         fs::create_dir_all(&character_dir).expect("character directory");
         atomic_write(
@@ -1859,12 +2337,21 @@ name = "Creator"
         )
         .expect("metadata");
         atomic_write(&character_dir.join("character.md"), b"# Character").expect("character");
+        atomic_write(
+            &character_dir
+                .parent()
+                .expect("character Space")
+                .join("index.json"),
+            &serde_json::to_vec_pretty(&vec![character_id]).expect("index JSON"),
+        )
+        .expect("character index");
 
         let output = root.path().join("optional-user.moc");
-        momo_moc::create(
+        momo_moc::create_from_definitions_and_spaces(
             &output,
             root.path(),
-            &[("characters".to_owned(), PathBuf::from("characters"))],
+            &[known_module_definition("characters")],
+            &[space_module_definition("characters", scope_id)],
         )
         .expect("create moc");
 
@@ -1872,10 +2359,13 @@ name = "Creator"
         let target = MomoCore::initialize(target_directory.path())
             .await
             .expect("target core");
-        let scope_id = new_id();
-        let report = import_moc(&target, &output, scope_id, ConflictMode::Replace)
-            .await
-            .expect("import moc");
+        let report = import_moc(
+            &target,
+            &output,
+            &test_import_plan(scope_id, scope_id, ConflictMode::Replace),
+        )
+        .await
+        .expect("import moc");
 
         assert_eq!(report.characters_imported, 1);
         let characters = target
@@ -1888,6 +2378,119 @@ name = "Creator"
             .find(|character| character.id == character_id)
             .expect("imported character");
         assert_eq!(imported.user_markdown, "");
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_late_invalid_payload_before_committing_earlier_modules() {
+        let root = tempfile::tempdir().expect("MOC root");
+        let space_id = new_id();
+        let character_id = new_id();
+        let character_space = root
+            .path()
+            .join("characters/spaces")
+            .join(space_id.to_string());
+        let character_directory = character_space.join(character_id.to_string());
+        fs::create_dir_all(&character_directory).expect("character directory");
+        atomic_write(
+            &character_directory.join("character.toml"),
+            format!(
+                r#"id = "urn:uuid:{character_id}"
+name = "Preflight"
+version = "2.0.0"
+character_file = "character.md"
+
+[author]
+name = "Tester"
+"#
+            )
+            .as_bytes(),
+        )
+        .expect("character metadata");
+        atomic_write(&character_directory.join("character.md"), b"# Character")
+            .expect("character Markdown");
+        atomic_write(
+            &character_space.join("index.json"),
+            &serde_json::to_vec_pretty(&vec![character_id]).expect("character index"),
+        )
+        .expect("character index");
+
+        let conversation_space = root
+            .path()
+            .join("conversations/spaces")
+            .join(space_id.to_string());
+        fs::create_dir_all(&conversation_space).expect("conversation directory");
+        let conversation_id = new_id();
+        let now = Utc::now();
+        atomic_write(
+            &conversation_space.join("index.json"),
+            &serde_json::to_vec_pretty(&vec![Conversation {
+                id: conversation_id,
+                scope_id: space_id,
+                character_id: Some(character_id),
+                title: "Preflight".to_owned(),
+                created_at: now,
+                updated_at: now,
+            }])
+            .expect("conversation index"),
+        )
+        .expect("conversation index");
+        atomic_write(
+            &conversation_space.join("messages.json"),
+            &serde_json::to_vec_pretty(&vec![Message {
+                id: new_id(),
+                conversation_id: new_id(),
+                role: MessageRole::User,
+                content: "orphan".to_owned(),
+                created_at: now,
+            }])
+            .expect("messages"),
+        )
+        .expect("messages");
+
+        let output = root.path().join("invalid-late-module.moc");
+        momo_moc::create_from_definitions_and_spaces(
+            &output,
+            root.path(),
+            &[
+                known_module_definition("characters"),
+                known_module_definition("conversations"),
+            ],
+            &[
+                space_module_definition("characters", space_id),
+                space_module_definition("conversations", space_id),
+            ],
+        )
+        .expect("create MOC");
+
+        let destination_directory = tempfile::tempdir().expect("destination directory");
+        let destination = MomoCore::initialize(destination_directory.path())
+            .await
+            .expect("destination Core");
+        let error = import_moc(
+            &destination,
+            &output,
+            &test_import_plan(space_id, space_id, ConflictMode::Replace),
+        )
+        .await
+        .expect_err("orphan message must fail preflight");
+        assert!(matches!(error, PortableError::InvalidData(_)));
+        assert!(
+            destination
+                .store()
+                .list_characters()
+                .await
+                .expect("characters")
+                .is_empty(),
+            "a later invalid module must not leave an earlier character committed"
+        );
+        assert!(
+            destination
+                .store()
+                .list_conversations()
+                .await
+                .expect("conversations")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1934,13 +2537,13 @@ name = "Creator"
         export_moc(
             &source,
             &output,
-            scope_id,
             &serde_json::json!({}),
-            &MocExportPlan {
-                modules: vec![MocModule::Conversations],
-                character_id: None,
-                compatibility: MocCompatibility::None,
-            },
+            &test_export_plan(
+                scope_id,
+                &[MocModule::Conversations],
+                None,
+                MocCompatibility::None,
+            ),
         )
         .await
         .expect("conversation-only export");
@@ -1949,9 +2552,14 @@ name = "Creator"
         let destination = MomoCore::initialize(destination_directory.path())
             .await
             .expect("destination core");
-        let report = import_moc(&destination, &output, new_id(), ConflictMode::Replace)
-            .await
-            .expect("conversation-only import");
+        let target_space = new_id();
+        let report = import_moc(
+            &destination,
+            &output,
+            &test_import_plan(scope_id, target_space, ConflictMode::Replace),
+        )
+        .await
+        .expect("conversation-only import");
         assert_eq!(report.conversations_imported, 1);
         assert_eq!(report.messages_imported, 0);
         let imported = destination
@@ -2064,19 +2672,23 @@ name = "Creator"
         export_moc(
             &core,
             &output,
-            scope_id,
             &serde_json::json!({}),
-            &MocExportPlan {
-                modules: vec![MocModule::Characters],
-                character_id: Some(selected_id),
-                compatibility: MocCompatibility::None,
-            },
+            &test_export_plan(
+                scope_id,
+                &[MocModule::Characters],
+                Some(selected_id),
+                MocCompatibility::None,
+            ),
         )
         .await
         .expect("shortcut export");
         let extracted = tempfile::tempdir().expect("extract directory");
         momo_moc::extract(&output, extracted.path(), ExtractionLimits::default()).expect("extract");
-        let card_directories = fs::read_dir(extracted.path().join("characters"))
+        let character_space = extracted
+            .path()
+            .join("characters/spaces")
+            .join(scope_id.to_string());
+        let card_directories = fs::read_dir(&character_space)
             .expect("characters")
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
@@ -2085,7 +2697,8 @@ name = "Creator"
         assert!(
             extracted
                 .path()
-                .join("characters")
+                .join("characters/spaces")
+                .join(scope_id.to_string())
                 .join(selected_id.to_string())
                 .exists()
         );
@@ -2094,13 +2707,13 @@ name = "Creator"
         export_moc(
             &core,
             &compatible_output,
-            scope_id,
             &serde_json::json!({}),
-            &MocExportPlan {
-                modules: vec![MocModule::Characters],
-                character_id: Some(selected_id),
-                compatibility: MocCompatibility::GeneratedCcv2Json,
-            },
+            &test_export_plan(
+                scope_id,
+                &[MocModule::Characters],
+                Some(selected_id),
+                MocCompatibility::GeneratedCcv2Json,
+            ),
         )
         .await
         .expect("generated compatibility export");
@@ -2126,8 +2739,7 @@ name = "Creator"
         let report = import_moc(
             &destination,
             &compatible_output,
-            new_id(),
-            ConflictMode::Replace,
+            &test_import_plan(scope_id, new_id(), ConflictMode::Replace),
         )
         .await
         .expect("generated compatibility does not become provenance");

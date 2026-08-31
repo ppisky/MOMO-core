@@ -1,6 +1,7 @@
 mod capabilities;
 mod character_compat;
 mod chat;
+mod control;
 mod embeddings;
 mod fonts;
 mod local_data;
@@ -12,6 +13,7 @@ mod portable;
 pub use capabilities::*;
 pub use character_compat::*;
 pub use chat::*;
+pub use control::*;
 pub use embeddings::*;
 pub use fonts::*;
 pub use local_data::*;
@@ -53,6 +55,8 @@ static CORE: OnceCell<MomoCore> = OnceCell::const_new();
 static CAPABILITIES: LazyLock<tokio::sync::RwLock<CapabilityRegistry>> =
     LazyLock::new(|| tokio::sync::RwLock::new(CapabilityRegistry::default()));
 static MEMORY_PATCH_REVIEW_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+static CONTROL_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 const MAX_IMPORTED_FONT_BYTES: usize = 64 * 1024 * 1024;
 
@@ -110,7 +114,7 @@ async fn approve_memory_patch_review(
     }
 
     let workspace = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     if let Err(error) = workspace.apply_patch(&existing.patch_yaml) {
         let message = error.to_string();

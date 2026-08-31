@@ -35,7 +35,7 @@ const RESPONSE_STREAM_BUFFER: usize = 64;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CancelResponseRequest {
-    scope_id: String,
+    personal_space_id: String,
 }
 
 pub(super) async fn create_response(
@@ -166,11 +166,11 @@ async fn execute_response_bounded(
 ) -> Result<MomoResponse, ApiError> {
     let started = std::time::Instant::now();
     let route = request.model.clone();
-    let scope_id = request
+    let personal_space_id = request
         .momo
-        .scope_id
+        .personal_space_id
         .clone()
-        .ok_or_else(|| ApiError::bad_request("scope_id is required"))?;
+        .ok_or_else(|| ApiError::bad_request("personal_space_id is required"))?;
     let permit = Arc::clone(&state.response_concurrency)
         .try_acquire_owned()
         .map_err(|_| {
@@ -190,7 +190,7 @@ async fn execute_response_bounded(
     {
         Ok(result) => result,
         Err(_) => {
-            let _ = state.momo_api.cancel(&scope_id, &request_id);
+            let _ = state.momo_api.cancel(&personal_space_id, &request_id);
             Err(ApiError::gateway_timeout(
                 "response orchestration timed out",
             ))
@@ -290,12 +290,14 @@ pub(super) async fn cancel_response(
     Path(request_id): Path<String>,
     Json(request): Json<CancelResponseRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    uuid::Uuid::parse_str(&request.scope_id)
-        .map_err(|_| ApiError::bad_request("scope_id must be a UUID"))?;
-    let cancelled = state.momo_api.cancel(&request.scope_id, &request_id);
+    uuid::Uuid::parse_str(&request.personal_space_id)
+        .map_err(|_| ApiError::bad_request("personal_space_id must be a UUID"))?;
+    let cancelled = state
+        .momo_api
+        .cancel(&request.personal_space_id, &request_id);
     Ok(Json(json!({
         "request_id": request_id,
-        "scope_id": request.scope_id,
+        "personal_space_id": request.personal_space_id,
         "cancelled": cancelled,
     })))
 }

@@ -416,7 +416,7 @@ patches:
   - target_file: "relationships/player_xiaohong.md"
     operations:
       - type: "append"
-        section: "关键变化"
+        section: "Key Changes"
         content: "- During the farewell conversation, Xiaohong verbally rejected the idea of separation but ultimately grabbed the protagonist's clothes and asked them not to leave, revealing a significant emotional dependency."
       - type: "update_frontmatter"
         fields:
@@ -467,7 +467,7 @@ patches:
   - target_file: "relationships/player_xiaohong.md"
     operations:
       - type: "append"
-        section: "关键变化"
+        section: "Key Changes"
         content: "- 主角提出离开时，小红虽然口头讽刺，但最终在沉默中抓住了主角的衣角挽留，明确表现出不希望主角离开的态度。"
       - type: "update_frontmatter"
         fields:
@@ -478,7 +478,7 @@ patches:
 
 `relationships/player_xiaohong.md` 被更新：
 
-- 正文“关键变化”章节追加了新内容。
+- 正文 `Key Changes` 章节追加了新内容。
 - YAML 头部 `weight` 变为 0.95，`touch_at` 更新为 1721350000。
 
 ### 6.6 下一轮读取

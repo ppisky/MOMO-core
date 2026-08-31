@@ -15,7 +15,7 @@ use walkdir::WalkDir;
 
 pub const CONTAINER_ENCODING: &str = "tar+zstandard";
 pub const FORMAT_NAME: &str = "momo-container";
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
 pub const DEFAULT_MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -27,6 +27,8 @@ pub struct Manifest {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub module_definitions: Vec<ModuleDefinition>,
+    #[serde(default)]
+    pub space_modules: Vec<SpaceModuleDefinition>,
     pub modules: Vec<ModuleEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption: Option<EncryptionMetadata>,
@@ -44,6 +46,14 @@ pub struct ModuleDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct SpaceModuleDefinition {
+    pub space_id: String,
+    pub module: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct EncryptionMetadata {
     pub profile: String,
     pub payload_path: String,
@@ -54,6 +64,8 @@ pub struct EncryptionMetadata {
 #[serde(deny_unknown_fields)]
 pub struct ModuleEntry {
     pub module: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
     pub path: String,
     pub size: u64,
     pub sha256: String,
@@ -115,7 +127,22 @@ pub fn create_from_definitions(
     source_root: impl AsRef<Path>,
     modules: &[ModuleDefinition],
 ) -> Result<Manifest, MocError> {
-    create_from_definitions_with_encryption(output, source_root, modules, None)
+    create_from_definitions_and_spaces_with_encryption(output, source_root, modules, &[], None)
+}
+
+pub fn create_from_definitions_and_spaces(
+    output: impl AsRef<Path>,
+    source_root: impl AsRef<Path>,
+    modules: &[ModuleDefinition],
+    space_modules: &[SpaceModuleDefinition],
+) -> Result<Manifest, MocError> {
+    create_from_definitions_and_spaces_with_encryption(
+        output,
+        source_root,
+        modules,
+        space_modules,
+        None,
+    )
 }
 
 pub fn create_with_encryption(
@@ -137,6 +164,22 @@ pub fn create_from_definitions_with_encryption(
     modules: &[ModuleDefinition],
     encryption: Option<EncryptionMetadata>,
 ) -> Result<Manifest, MocError> {
+    create_from_definitions_and_spaces_with_encryption(
+        output,
+        source_root,
+        modules,
+        &[],
+        encryption,
+    )
+}
+
+pub fn create_from_definitions_and_spaces_with_encryption(
+    output: impl AsRef<Path>,
+    source_root: impl AsRef<Path>,
+    modules: &[ModuleDefinition],
+    space_modules: &[SpaceModuleDefinition],
+    encryption: Option<EncryptionMetadata>,
+) -> Result<Manifest, MocError> {
     let output = output.as_ref();
     let source_root = source_root.as_ref().canonicalize()?;
     let mut entries = Vec::new();
@@ -148,7 +191,7 @@ pub fn create_from_definitions_with_encryption(
         let module = &definition.id;
         let relative_source = Path::new(&definition.path);
         validate_relative(relative_source)?;
-        validate_native_v2_module_id(module)?;
+        validate_native_v3_module_id(module)?;
         if !seen_modules.insert(module.clone()) {
             return Err(MocError::InvalidManifest(format!(
                 "duplicate module definition: {module}"
@@ -168,10 +211,26 @@ pub fn create_from_definitions_with_encryption(
                     .path()
                     .strip_prefix(&source_root)
                     .map_err(|_| MocError::SourceOutsideRoot(item.path().to_path_buf()))?;
-                push_entry(module, relative, item.path(), &mut entries, &mut seen)?;
+                let space_id = space_for_path(space_modules, module, relative)?;
+                push_entry(
+                    module,
+                    space_id,
+                    relative,
+                    item.path(),
+                    &mut entries,
+                    &mut seen,
+                )?;
             }
         } else {
-            push_entry(module, relative_source, &source, &mut entries, &mut seen)?;
+            let space_id = space_for_path(space_modules, module, relative_source)?;
+            push_entry(
+                module,
+                space_id,
+                relative_source,
+                &source,
+                &mut entries,
+                &mut seen,
+            )?;
         }
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
@@ -182,10 +241,11 @@ pub fn create_from_definitions_with_encryption(
         format_version: FORMAT_VERSION,
         created_at: Utc::now(),
         module_definitions,
+        space_modules: space_modules.to_vec(),
         modules: entries,
         encryption,
     };
-    validate_v2_manifest(&manifest)?;
+    validate_v3_manifest(&manifest)?;
     write_container(output, &source_root, &manifest)?;
     Ok(manifest)
 }
@@ -215,7 +275,7 @@ pub fn inspect(input: impl AsRef<Path>) -> Result<Manifest, MocError> {
                 supported: FORMAT_VERSION,
             });
         }
-        validate_v2_manifest(&manifest)?;
+        validate_v3_manifest(&manifest)?;
         return Ok(manifest);
     }
     Err(MocError::UnsupportedFormat)
@@ -314,6 +374,7 @@ fn write_container(output: &Path, source_root: &Path, manifest: &Manifest) -> Re
 
 fn push_entry(
     module: &str,
+    space_id: Option<String>,
     relative: &Path,
     source: &Path,
     entries: &mut Vec<ModuleEntry>,
@@ -327,6 +388,7 @@ fn push_entry(
     let bytes = fs::read(source)?;
     entries.push(ModuleEntry {
         module: module.to_owned(),
+        space_id,
         path,
         size: u64::try_from(bytes.len()).map_err(|_| MocError::LimitExceeded)?,
         sha256: hex::encode(Sha256::digest(&bytes)),
@@ -362,7 +424,7 @@ fn verify_entries(
 
 fn validate_manifest(manifest: &Manifest) -> Result<(), MocError> {
     if manifest.format_version == FORMAT_VERSION {
-        validate_v2_manifest(manifest)
+        validate_v3_manifest(manifest)
     } else {
         Err(MocError::UnsupportedFormatVersion {
             found: manifest.format_version,
@@ -371,11 +433,11 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), MocError> {
     }
 }
 
-fn validate_v2_manifest(manifest: &Manifest) -> Result<(), MocError> {
+fn validate_v3_manifest(manifest: &Manifest) -> Result<(), MocError> {
     validate_manifest_paths(manifest)?;
     let mut definitions = HashMap::new();
     for definition in &manifest.module_definitions {
-        validate_native_v2_module_id(&definition.id)?;
+        validate_native_v3_module_id(&definition.id)?;
         validate_manifest_path(&definition.path)?;
         if let Some((path, dependencies, import_order)) = known_module_layout(&definition.id)
             && (definition.path != path
@@ -383,7 +445,7 @@ fn validate_v2_manifest(manifest: &Manifest) -> Result<(), MocError> {
                 || definition.import_order != import_order)
         {
             return Err(MocError::InvalidManifest(format!(
-                "module {} does not use its canonical v2 layout",
+                "module {} does not use its canonical v3 layout",
                 definition.id
             )));
         }
@@ -404,6 +466,43 @@ fn validate_v2_manifest(manifest: &Manifest) -> Result<(), MocError> {
             )));
         }
     }
+    let mut declared_spaces = HashMap::new();
+    let mut target_spaces = HashSet::new();
+    for space in &manifest.space_modules {
+        let space_id = uuid::Uuid::parse_str(&space.space_id).map_err(|_| {
+            MocError::InvalidManifest(format!("space id is not a UUID: {}", space.space_id))
+        })?;
+        if !is_space_owned_module(&space.module) {
+            return Err(MocError::InvalidManifest(format!(
+                "module {} cannot be declared as Space-owned",
+                space.module
+            )));
+        }
+        if !definitions.contains_key(&space.module) {
+            return Err(MocError::InvalidManifest(format!(
+                "Space module {} has no module definition",
+                space.module
+            )));
+        }
+        let expected = format!("{}/spaces/{space_id}", space.module);
+        if space.path != expected {
+            return Err(MocError::InvalidManifest(format!(
+                "Space module {} must use {}",
+                space.module, expected
+            )));
+        }
+        validate_manifest_path(&space.path)?;
+        if declared_spaces
+            .insert((space.module.clone(), space.space_id.clone()), space)
+            .is_some()
+            || !target_spaces.insert(space.path.clone())
+        {
+            return Err(MocError::InvalidManifest(format!(
+                "duplicate Space module declaration: {} {}",
+                space.module, space.space_id
+            )));
+        }
+    }
     for entry in &manifest.modules {
         let definition = definitions.get(&entry.module).ok_or_else(|| {
             MocError::InvalidManifest(format!(
@@ -417,18 +516,86 @@ fn validate_v2_manifest(manifest: &Manifest) -> Result<(), MocError> {
                 entry.path, entry.module
             )));
         }
+        if is_space_owned_module(&entry.module) {
+            let space_id = entry.space_id.as_ref().ok_or_else(|| {
+                MocError::InvalidManifest(format!(
+                    "Space-owned payload {} has no space_id",
+                    entry.path
+                ))
+            })?;
+            let space = declared_spaces
+                .get(&(entry.module.clone(), space_id.clone()))
+                .ok_or_else(|| {
+                    MocError::InvalidManifest(format!(
+                        "payload {} references undeclared Space {}",
+                        entry.path, space_id
+                    ))
+                })?;
+            if entry.path != space.path
+                && !entry
+                    .path
+                    .strip_prefix(&space.path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+            {
+                return Err(MocError::InvalidManifest(format!(
+                    "payload {} is outside declared Space {}",
+                    entry.path, space_id
+                )));
+            }
+        } else if entry.space_id.is_some() {
+            return Err(MocError::InvalidManifest(format!(
+                "non-Space payload {} declares a space_id",
+                entry.path
+            )));
+        }
     }
     Ok(())
 }
 
-fn validate_native_v2_module_id(module: &str) -> Result<(), MocError> {
+fn validate_native_v3_module_id(module: &str) -> Result<(), MocError> {
     validate_module_id(module)?;
     if matches!(module, "character" | "conversation") {
         return Err(MocError::InvalidManifest(format!(
-            "legacy module id {module} is not valid in native v2"
+            "legacy module id {module} is not valid in native v3"
         )));
     }
     Ok(())
+}
+
+fn is_space_owned_module(module: &str) -> bool {
+    matches!(
+        module,
+        "characters" | "conversations" | "memory" | "semantic_graph"
+    )
+}
+
+fn space_for_path(
+    spaces: &[SpaceModuleDefinition],
+    module: &str,
+    path: &Path,
+) -> Result<Option<String>, MocError> {
+    let path = normalized_path(path)?;
+    let matching = spaces
+        .iter()
+        .filter(|space| {
+            space.module == module
+                && (path == space.path
+                    || path
+                        .strip_prefix(&space.path)
+                        .is_some_and(|suffix| suffix.starts_with('/')))
+        })
+        .collect::<Vec<_>>();
+    if matching.len() > 1 {
+        return Err(MocError::InvalidManifest(format!(
+            "payload {path} matches multiple Space declarations"
+        )));
+    }
+    if is_space_owned_module(module) && matching.is_empty() {
+        return Err(MocError::InvalidManifest(format!(
+            "Space-owned payload {path} is not declared"
+        )));
+    }
+    Ok(matching.first().map(|space| space.space_id.clone()))
 }
 
 fn validate_module_id(module: &str) -> Result<(), MocError> {
@@ -636,6 +803,49 @@ mod tests {
     }
 
     #[test]
+    fn creates_verified_space_module_and_rejects_undeclared_space_payload() {
+        let root = tempfile::tempdir().expect("root");
+        let space_id = uuid::Uuid::now_v7();
+        let relative = format!("memory/spaces/{space_id}");
+        fs::create_dir_all(root.path().join(&relative)).expect("Space directory");
+        fs::write(root.path().join(&relative).join("profile.md"), "memory").expect("Space payload");
+        let module = ModuleDefinition {
+            id: "memory".to_owned(),
+            path: "memory".to_owned(),
+            dependencies: vec![],
+            import_order: 40,
+        };
+        let space = SpaceModuleDefinition {
+            space_id: space_id.to_string(),
+            module: "memory".to_owned(),
+            path: relative.clone(),
+        };
+        let output = root.path().join("space.moc");
+        let manifest = create_from_definitions_and_spaces(
+            &output,
+            root.path(),
+            std::slice::from_ref(&module),
+            std::slice::from_ref(&space),
+        )
+        .expect("create Space MOC");
+        assert_eq!(manifest.space_modules, [space]);
+        assert_eq!(
+            manifest.modules[0].space_id.as_deref(),
+            Some(space_id.to_string().as_str())
+        );
+
+        assert!(matches!(
+            create_from_definitions_and_spaces(
+                root.path().join("undeclared.moc"),
+                root.path(),
+                &[module],
+                &[],
+            ),
+            Err(MocError::InvalidManifest(message)) if message.contains("not declared")
+        ));
+    }
+
+    #[test]
     fn rejects_parent_path() {
         assert!(matches!(
             validate_relative(Path::new("../secret")),
@@ -674,6 +884,7 @@ mod tests {
         let declared = b"declared";
         let module = ModuleEntry {
             module: "config".to_owned(),
+            space_id: None,
             path: "config/momo.toml".to_owned(),
             size: declared.len() as u64,
             sha256: hex::encode(Sha256::digest(declared)),
@@ -688,6 +899,7 @@ mod tests {
                 dependencies: Vec::new(),
                 import_order: 10,
             }],
+            space_modules: Vec::new(),
             modules: vec![module.clone(), module],
             encryption: None,
         };
@@ -721,8 +933,10 @@ mod tests {
             format_version: 1,
             created_at: Utc::now(),
             module_definitions: Vec::new(),
+            space_modules: Vec::new(),
             modules: vec![ModuleEntry {
                 module: "character".to_owned(),
+                space_id: None,
                 path: "characters/card/character.md".to_owned(),
                 size: character.len() as u64,
                 sha256: hex::encode(Sha256::digest(character)),
@@ -774,6 +988,7 @@ mod tests {
             format_version: FORMAT_VERSION + 1,
             created_at: Utc::now(),
             module_definitions: Vec::new(),
+            space_modules: Vec::new(),
             modules: Vec::new(),
             encryption: None,
         };

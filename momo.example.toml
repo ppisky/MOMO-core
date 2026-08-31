@@ -13,10 +13,13 @@ embedding = "" # 留空关闭向量请求；填 embedding-main 即启用 /embedd
 vision = "" # 多模态主模型留空；纯文本主模型可填 config.toml 的 vision-fallback。
 
 [runtime]
-character_scope_id = "01900000-0000-7000-8000-000000000201" # 示例角色卡目录/所有权边界 UUID；同一目录内的角色共用。
-character_id = "01900000-0000-7000-8000-000000000202" # 示例具体角色卡 UUID；必须归属于上面的目录。
+character_id = "01900000-0000-7000-8000-000000000202" # 示例角色卡资源 UUID；Core 全局按此 ID 解析。
 memory_enabled = true          # DMW 检索与个人长期记忆。
 semantic_graph_enabled = true  # NSG 检索；关闭后不会调用 embedding。
+personal_memory_weight = 70    # 多 Space 检索时，个人记忆的相对预算权重（1..100）。
+conversation_memory_weight = 30 # 群聊/共享会话 Space 的相对预算权重（1..100）。
+conversation_memory_enabled = true # 群聊时同时读取共享会话 Space；私聊和 CLI 默认只读个人 Space。
+memory_write_target = "personal" # 每轮维护只写一个 Space：personal 或 conversation。
 mo_state_enabled = true
 max_concurrent_chats = 4
 transient_retries = 2

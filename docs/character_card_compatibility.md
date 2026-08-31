@@ -16,7 +16,7 @@ character_card/
 ```
 
 其规范版本是 MOMO 自己的版本号，不表示外部 `chara_card_v2`。当前 Core 将该格式作为
-MOC v2 的 `characters` 模块导入和导出，并在运行时归一化为 `CharacterCard` 领域对象。
+MOC v3 的 `characters` Space 模块导入和导出，并在运行时归一化为 `CharacterCard` 领域对象。
 
 ## 2. 外部规范与实现来源
 
@@ -75,8 +75,8 @@ TOML + Markdown 结构不是同一种线格式。
 
 | 能力 | 当前状态 |
 | --- | --- |
-| MOMO Character Card v2 → MOC v2 | 已实现 |
-| MOC v2 → MOMO Character Card v2 | 已实现 |
+| MOMO Character Card v2 → MOC v3 | 已实现 |
+| MOC v3 → MOMO Character Card v2 | 已实现 |
 | 外部 CCv1/v2 JSON/PNG → MOMO | 已实现 |
 | 外部 CCv3 JSON/PNG/CHARX → MOMO | 已实现；CHARX 原始容器及安全条目独立保存 |
 | MOMO → 外部 CCv2/CCv3 JSON | 已实现；无来源快照时为有损转换 |

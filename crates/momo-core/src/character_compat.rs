@@ -1083,6 +1083,26 @@ pub(crate) fn import_preserved_source_asset(
     metadata_document: &str,
     input_directory: &Path,
 ) -> Result<Option<String>, CharacterCompatError> {
+    let Some((stored, bytes, file_name)) =
+        validate_preserved_source(metadata_document, input_directory)?
+    else {
+        return Ok(None);
+    };
+    save_preserved_source(core, character_id, stored.source_format, &bytes)?;
+    Ok(Some(file_name))
+}
+
+pub(crate) fn validate_preserved_source_asset(
+    metadata_document: &str,
+    input_directory: &Path,
+) -> Result<(), CharacterCompatError> {
+    validate_preserved_source(metadata_document, input_directory).map(|_| ())
+}
+
+fn validate_preserved_source(
+    metadata_document: &str,
+    input_directory: &Path,
+) -> Result<Option<(StoredExternalCharacter, Vec<u8>, String)>, CharacterCompatError> {
     let stored: StoredExternalCharacter = serde_json::from_str(metadata_document)?;
     let Some(expected_source) = stored.source.as_ref() else {
         return Ok(None);
@@ -1118,8 +1138,7 @@ pub(crate) fn import_preserved_source_asset(
             ));
         }
     }
-    save_preserved_source(core, character_id, stored.source_format, &bytes)?;
-    Ok(Some(file_name.to_owned()))
+    Ok(Some((stored, bytes, file_name.to_owned())))
 }
 
 fn export_ccv2(
@@ -1443,11 +1462,16 @@ mod tests {
         crate::export_moc(
             &core,
             &moc,
-            scope_id,
             &json!({}),
             &crate::MocExportPlan {
-                modules: vec![crate::MocModule::Characters],
-                character_id: Some(imported.character.id),
+                include_config: false,
+                characters: vec![crate::MocCharacterSelection {
+                    space_id: scope_id,
+                    character_ids: vec![imported.character.id],
+                }],
+                conversations: vec![],
+                memory: vec![],
+                semantic_graph: vec![],
                 compatibility: crate::MocCompatibility::PreservedSource,
             },
         )
@@ -1460,8 +1484,11 @@ mod tests {
         crate::import_moc(
             &destination,
             &moc,
-            destination_scope,
-            crate::ConflictMode::Replace,
+            &crate::MocImportPlan {
+                apply_config: false,
+                space_map: [(scope_id, destination_scope)].into_iter().collect(),
+                conflict_mode: crate::ConflictMode::Replace,
+            },
         )
         .await
         .expect("MOC import");
@@ -1617,11 +1644,16 @@ mod tests {
         crate::export_moc(
             &core,
             &moc,
-            scope_id,
             &json!({}),
             &crate::MocExportPlan {
-                modules: vec![crate::MocModule::Characters],
-                character_id: Some(imported.character.id),
+                include_config: false,
+                characters: vec![crate::MocCharacterSelection {
+                    space_id: scope_id,
+                    character_ids: vec![imported.character.id],
+                }],
+                conversations: vec![],
+                memory: vec![],
+                semantic_graph: vec![],
                 compatibility: crate::MocCompatibility::PreservedSource,
             },
         )
@@ -1634,8 +1666,11 @@ mod tests {
         crate::import_moc(
             &destination,
             &moc,
-            destination_scope,
-            crate::ConflictMode::Replace,
+            &crate::MocImportPlan {
+                apply_config: false,
+                space_map: [(scope_id, destination_scope)].into_iter().collect(),
+                conflict_mode: crate::ConflictMode::Replace,
+            },
         )
         .await
         .expect("MOC import");

@@ -89,6 +89,17 @@ impl LocalStore {
         rows.iter().map(character_from_row).collect()
     }
 
+    pub async fn character_by_id(
+        &self,
+        character_id: Uuid,
+    ) -> Result<Option<CharacterCard>, StorageError> {
+        let row = sqlx::query("SELECT * FROM character_cards WHERE id=?")
+            .bind(character_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(character_from_row).transpose()
+    }
+
     pub async fn character_for_scope(
         &self,
         scope_id: Uuid,
@@ -434,6 +445,49 @@ impl LocalStore {
                 .bind(request_id)
                 .execute(&mut *transaction)
                 .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn clear_space_memory_state(
+        &self,
+        space_id: Uuid,
+        memory: bool,
+        semantic_graph: bool,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let space_id = space_id.to_string();
+        if memory {
+            sqlx::query("DELETE FROM memory_patch_reviews WHERE scope_id=?")
+                .bind(&space_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        if memory && semantic_graph {
+            sqlx::query("DELETE FROM maintenance_turns WHERE scope_id=?")
+                .bind(&space_id)
+                .execute(&mut *transaction)
+                .await?;
+        } else {
+            if memory {
+                sqlx::query("UPDATE maintenance_turns SET memory_done=1 WHERE scope_id=?")
+                    .bind(&space_id)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            if semantic_graph {
+                sqlx::query("UPDATE maintenance_turns SET nsg_done=1 WHERE scope_id=?")
+                    .bind(&space_id)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            sqlx::query(
+                "DELETE FROM maintenance_turns WHERE scope_id=? AND memory_done=1 AND nsg_done=1",
+            )
+            .bind(&space_id)
+            .execute(&mut *transaction)
+            .await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -887,7 +941,7 @@ impl LocalStore {
         self.memory_patch_review(scope_id, review_id).await
     }
 
-    async fn is_tombstoned(&self, object_type: &str, id: Uuid) -> Result<bool, StorageError> {
+    pub async fn is_tombstoned(&self, object_type: &str, id: Uuid) -> Result<bool, StorageError> {
         Ok(sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM local_tombstones WHERE object_type=? AND object_id=?",
         )

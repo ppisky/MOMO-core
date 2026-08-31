@@ -12,7 +12,7 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 - Character Card v1/v2 JSON 与 PNG 导入
 - Character Card v3 JSON、PNG 与完整 CHARX 容器导入；明确拒绝 APNG
 - 保留来源字段的 Character Card v2/v3 JSON 与 CHARX 导出
-- 严格类型化的 MOC v2 快照导入导出与显式兼容 profile
+- 严格类型化的多 Space MOC v3 导入导出与显式一对一 Space 转换
 - PNG/无损 WebP 的 MOMO LSB 载体；不支持 APNG 或 AVIF
 - Dual-Mem Wiki（DMW）长期记忆
 - Narrative Semantic Graph（NSG）
@@ -32,7 +32,7 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 
 MOMO Character Card v2 是由本仓库定义的独立角色卡格式，规范见
 [`Character_Card_v2.md`](Character_Card_v2.md)。其中的“v2”不表示外部生态的
-`chara_card_v2` JSON/PNG 格式。当前 Core 实现的是 MOMO 格式随 MOC v2 的导入导出；
+`chara_card_v2` JSON/PNG 格式。当前 Core 实现的是 MOMO 格式随 MOC v3 的导入导出；
 同时支持外部 CCv1/v2 JSON、PNG，以及 CCv3 JSON、PNG、CHARX 的导入，并支持
 CCv2/CCv3 JSON 与 CHARX 导出；APNG 明确不支持。CHARX 的资产、`x_meta`、`module.risum` 和未知安全条目
 作为原始容器来源保存，也会随 MOC 往返。
@@ -66,7 +66,7 @@ Core 明确使用两个独立数据库，而不是把全部数据放进同一个
 - `character-packages/<character_id>/source.charx` 保存导入 CHARX 的原始容器，使二进制
   资产和应用扩展能够随 MOC 往返。
 
-DMW 与 NSG 的 YAML/Markdown 源文档仍位于 `memory/scopes/<scope_id>`，是记忆与语义图
+DMW 与 NSG 的 YAML/Markdown 源文档位于 `spaces/<space_id>/memory`，是记忆与语义图
 的可移植事实来源。Turso 中的向量按来源哈希和向量空间校验，是可从源文档重新生成的
 缓存，不进入 MOC。`NsgVectorStore` 只是隔离 Turso 实现细节的内部接口，不代表第三套
 数据库。升级到 0.3.2 时，旧 SQLite `nsg_vectors` 表会被删除，宿主应按需重建向量缓存。
@@ -96,16 +96,14 @@ usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.respons
 [简体中文配置指南](docs/maintenance_prompts.zh-CN.md)或
 [English guide](docs/maintenance_prompts.en.md)。
 
-## Scope 标识
+## Space 标识
 
-`scope_id` 是公开领域模型、API、存储、向量记录、Patch Review 与 MOC 操作使用的
-唯一命名空间标识。Scope 是一个不透明 UUID，其业务含义和访问策略由宿主应用决定。
-Core 将每个记忆 workspace 存储在 `memory/scopes/<scope_id>` 下。服务进程没有默认
-Scope，也不读取 `MOMO_SCOPE_ID`；每个有状态请求必须显式携带相关 UUID。对话、个人记忆
-与角色目录是三个独立边界，完整规则见
-[`docs/identity_scope_1_0.md`](docs/identity_scope_1_0.md)。
-`character_scope_id` 标识角色卡目录及其所有权边界，`character_id` 才标识目录中的一张
-具体角色卡；前者不是同一角色的第二个 UUID。
+一个 Core 实例根目录可以包含许多彼此独立的 Space，它本身不是某个人的 Space。公开
+契约使用带职责的 UUID：`personal_space_id`、`conversation_space_id`、记忆源
+`space_id` 与 `memory_write_space_id`。检索可以按权重读取多个已授权 Space，但一次后台
+维护只能明确写一个 Space。角色卡使用全局唯一 `character_id`；`owner_space_id` 只表示
+管理和导出归属，不存在角色目录 UUID。完整规则见
+[Space 模型](docs/space_model_1_0.md)与[简体中文宿主指南](docs/spaces_and_controls.zh-CN.md)。
 
 ## 验证
 

@@ -1,5 +1,7 @@
 //! Stable wire types for MOMO's high-level response operation.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,6 +16,7 @@ pub const MAX_RESPONSE_TOOLS: usize = 128;
 pub const MAX_RESPONSE_ID_BYTES: usize = 256;
 pub const MAX_RESPONSE_IMAGE_REFERENCE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_RESPONSE_IMAGES: usize = 8;
+pub const MAX_RESPONSE_MEMORY_SPACES: usize = 16;
 pub const MAX_RESPONSE_SSE_EVENT_BYTES: usize = 1024 * 1024;
 pub const MAX_RESPONSE_STREAM_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_GATEWAY_HOPS: u8 = 1;
@@ -539,6 +542,18 @@ pub enum ResponseTool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct MemorySpaceSource {
+    pub space_id: String,
+    pub label: String,
+    pub weight: u8,
+    #[serde(default)]
+    pub memory: bool,
+    #[serde(default)]
+    pub semantic_graph: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MomoResponseExtension {
     #[serde(default = "default_schema")]
     pub schema: String,
@@ -549,19 +564,17 @@ pub struct MomoResponseExtension {
     #[serde(default)]
     pub character_id: Option<String>,
     #[serde(default)]
-    pub scope_id: Option<String>,
+    pub personal_space_id: Option<String>,
     #[serde(default)]
-    pub conversation_scope_id: Option<String>,
+    pub conversation_space_id: Option<String>,
     #[serde(default)]
-    pub character_scope_id: Option<String>,
+    pub memory_sources: Vec<MemorySpaceSource>,
     #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default = "default_true")]
-    pub memory: bool,
-    #[serde(default = "default_true")]
-    pub semantic_graph: bool,
+    pub memory_write_space_id: Option<String>,
     #[serde(default = "default_true")]
     pub mo_state: bool,
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub stream: bool,
 }
@@ -573,12 +586,11 @@ impl Default for MomoResponseExtension {
             request_id: None,
             conversation_id: None,
             character_id: None,
-            scope_id: None,
-            conversation_scope_id: None,
-            character_scope_id: None,
+            personal_space_id: None,
+            conversation_space_id: None,
+            memory_sources: Vec::new(),
+            memory_write_space_id: None,
             title: None,
-            memory: true,
-            semantic_graph: true,
             mo_state: true,
             stream: false,
         }
@@ -684,21 +696,34 @@ impl MomoResponseRequest {
                 validate_uuid(value, field)?;
             }
         }
-        if self.momo.character_id.is_none() {
-            return Err(ResponseContractError::InvalidUuid("character ID"));
-        }
         for (value, field) in [
-            (self.momo.scope_id.as_deref(), "scope ID"),
+            (self.momo.personal_space_id.as_deref(), "personal space ID"),
             (
-                self.momo.conversation_scope_id.as_deref(),
-                "conversation scope ID",
-            ),
-            (
-                self.momo.character_scope_id.as_deref(),
-                "character scope ID",
+                self.momo.conversation_space_id.as_deref(),
+                "conversation space ID",
             ),
         ] {
             validate_required_uuid(value, field)?;
+        }
+        if self.momo.memory_sources.len() > MAX_RESPONSE_MEMORY_SPACES {
+            return Err(ResponseContractError::TooManyMemorySpaces);
+        }
+        let mut source_ids = HashSet::new();
+        for source in &self.momo.memory_sources {
+            validate_uuid(&source.space_id, "memory source space ID")?;
+            validate_id(&source.label, "memory source label")?;
+            if !(1..=100).contains(&source.weight)
+                || (!source.memory && !source.semantic_graph)
+                || !source_ids.insert(source.space_id.as_str())
+            {
+                return Err(ResponseContractError::InvalidMemorySpace);
+            }
+        }
+        if let Some(write_space_id) = self.momo.memory_write_space_id.as_deref() {
+            validate_uuid(write_space_id, "memory write space ID")?;
+            if !source_ids.contains(write_space_id) {
+                return Err(ResponseContractError::InvalidMemoryWriteSpace);
+            }
         }
         Ok(input_text)
     }
@@ -825,6 +850,12 @@ pub enum ResponseContractError {
     InvalidToolName,
     #[error("response request may contain at most {MAX_RESPONSE_TOOLS} tools")]
     TooManyTools,
+    #[error("response request may contain at most {MAX_RESPONSE_MEMORY_SPACES} memory Spaces")]
+    TooManyMemorySpaces,
+    #[error("memory Spaces must be unique, enable DMW or NSG, and have weight 1 through 100")]
+    InvalidMemorySpace,
+    #[error("memory_write_space_id must identify one declared memory source")]
+    InvalidMemoryWriteSpace,
     #[error("{0} exceeds its byte limit")]
     FieldTooLarge(&'static str),
     #[error("response contract could not be encoded: {0}")]
@@ -916,9 +947,8 @@ mod tests {
             "input": "hello",
             "momo": {
                 "schema": MOMO_RESPONSE_SCHEMA,
-                "scope_id": "00000000-0000-4000-8000-000000000011",
-                "conversation_scope_id": "00000000-0000-4000-8000-000000000012",
-                "character_scope_id": "00000000-0000-4000-8000-000000000013",
+                "personal_space_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_space_id": "00000000-0000-4000-8000-000000000012",
                 "character_id": "00000000-0000-4000-8000-000000000014"
             }
         }))
@@ -929,9 +959,8 @@ mod tests {
             "input": [{"type": "input_text", "text": "hello"}],
             "momo": {
                 "schema": MOMO_RESPONSE_SCHEMA,
-                "scope_id": "00000000-0000-4000-8000-000000000011",
-                "conversation_scope_id": "00000000-0000-4000-8000-000000000012",
-                "character_scope_id": "00000000-0000-4000-8000-000000000013",
+                "personal_space_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_space_id": "00000000-0000-4000-8000-000000000012",
                 "character_id": "00000000-0000-4000-8000-000000000014"
             }
         }))
@@ -961,9 +990,8 @@ mod tests {
                 "content": [{"type": "input_text", "text": "hello"}]
             }],
             "momo": {
-                "scope_id": "00000000-0000-4000-8000-000000000011",
-                "conversation_scope_id": "00000000-0000-4000-8000-000000000012",
-                "character_scope_id": "00000000-0000-4000-8000-000000000013",
+                "personal_space_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_space_id": "00000000-0000-4000-8000-000000000012",
                 "character_id": "00000000-0000-4000-8000-000000000014"
             }
         }))
@@ -976,9 +1004,8 @@ mod tests {
                 {"type": "input_image", "image_url": "https://example.test/image.png", "detail": "high"}
             ],
             "momo": {
-                "scope_id": "00000000-0000-4000-8000-000000000011",
-                "conversation_scope_id": "00000000-0000-4000-8000-000000000012",
-                "character_scope_id": "00000000-0000-4000-8000-000000000013",
+                "personal_space_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_space_id": "00000000-0000-4000-8000-000000000012",
                 "character_id": "00000000-0000-4000-8000-000000000014"
             }
         }))

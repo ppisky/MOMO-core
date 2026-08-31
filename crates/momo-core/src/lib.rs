@@ -4,6 +4,7 @@ pub mod api;
 mod capability;
 mod character_compat;
 mod context;
+mod control;
 mod embedding;
 mod gateway;
 mod governance;
@@ -33,6 +34,7 @@ pub use context::{
     ContextBudget, ContextRequest, ContextSections, PreparedContext, estimate_text_tokens,
     prepare_context, prepare_context_with_tokenizer,
 };
+pub use control::{MOMO_CONTROL_SCHEMA, MomoControlAction, MomoControlRequest};
 pub use embedding::{
     EmbeddingBatch, EmbeddingEndpoint, EmbeddingError, EmbeddingInput, EmbeddingNormalization,
     EmbeddingProfile, EmbeddingProvider, EmbeddingPurpose, EmbeddingUsage, EmbeddingVector,
@@ -67,11 +69,12 @@ pub use orchestration::{
     MaintenanceKind, MomoApiError, MomoApiErrorKind, MomoApiService, MomoResponseEventSink,
 };
 pub use portable::{
-    ConflictMode, HostMocModule, ImportReport, MocCompatibility, MocExportPlan, MocModule,
-    MocProtection, PortableError, UnknownMocModule, export_moc, export_moc_with_host_modules,
-    export_momo_config, export_private_moc, export_private_moc_with_host_modules, import_moc,
-    import_moc_claiming_unknown_modules, import_moc_with_passphrase,
-    import_moc_with_passphrase_and_claims, import_momo_config, moc_is_encrypted,
+    ConflictMode, HostMocModule, ImportReport, MocCharacterSelection, MocCompatibility,
+    MocExportPlan, MocImportPlan, MocModule, MocProtection, PortableError, UnknownMocModule,
+    export_moc, export_moc_with_host_modules, export_momo_config, export_private_moc,
+    export_private_moc_with_host_modules, import_moc, import_moc_claiming_unknown_modules,
+    import_moc_with_passphrase, import_moc_with_passphrase_and_claims, import_momo_config,
+    moc_is_encrypted,
 };
 pub use response::{
     MAX_GATEWAY_HOPS, MAX_RESPONSE_ID_BYTES, MAX_RESPONSE_IMAGE_REFERENCE_BYTES,
@@ -109,9 +112,8 @@ impl MomoCore {
         std::fs::create_dir_all(data_dir).map_err(momo_memory::MemoryError::from)?;
         let store = LocalStore::open(data_dir.join("momo.sqlite3")).await?;
         let vector_store = TursoVectorStore::open(data_dir.join("nsg-vectors.db")).await?;
-        migrate_scope_directory(data_dir)?;
-        std::fs::create_dir_all(data_dir.join("memory/scopes"))
-            .map_err(momo_memory::MemoryError::from)?;
+        migrate_space_directories(data_dir)?;
+        std::fs::create_dir_all(data_dir.join("spaces")).map_err(momo_memory::MemoryError::from)?;
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
             store,
@@ -134,32 +136,73 @@ impl MomoCore {
         &self.vector_store
     }
 
-    pub fn memory_for_scope(
+    pub fn memory_for_space(
         &self,
-        scope_id: uuid::Uuid,
+        space_id: uuid::Uuid,
     ) -> Result<MemoryWorkspace, momo_memory::MemoryError> {
         MemoryWorkspace::initialize(
             self.data_dir
-                .join("memory/scopes")
-                .join(scope_id.to_string()),
+                .join("spaces")
+                .join(space_id.to_string())
+                .join("memory"),
         )
     }
 }
 
-fn migrate_scope_directory(data_dir: &Path) -> Result<(), CoreError> {
+fn migrate_space_directories(data_dir: &Path) -> Result<(), CoreError> {
     let legacy = data_dir.join("memory/users");
-    if !legacy.exists() {
-        return Ok(());
-    }
     let scopes = data_dir.join("memory/scopes");
-    if scopes.exists() {
+    if legacy.exists() && scopes.exists() {
         return Err(momo_memory::MemoryError::Io(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "both memory/users and memory/scopes exist; merge them before starting Core",
         ))
         .into());
     }
-    std::fs::rename(legacy, scopes).map_err(momo_memory::MemoryError::from)?;
+    if legacy.exists() {
+        std::fs::rename(&legacy, &scopes).map_err(momo_memory::MemoryError::from)?;
+    }
+    let spaces = data_dir.join("spaces");
+    std::fs::create_dir_all(&spaces).map_err(momo_memory::MemoryError::from)?;
+    if scopes.exists() {
+        for entry in std::fs::read_dir(&scopes).map_err(momo_memory::MemoryError::from)? {
+            let entry = entry.map_err(momo_memory::MemoryError::from)?;
+            if !entry
+                .file_type()
+                .map_err(momo_memory::MemoryError::from)?
+                .is_dir()
+                || uuid::Uuid::parse_str(&entry.file_name().to_string_lossy()).is_err()
+            {
+                return Err(momo_memory::MemoryError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "memory/scopes may contain only UUID Space directories",
+                ))
+                .into());
+            }
+            let target = spaces.join(entry.file_name()).join("memory");
+            if target.exists() {
+                return Err(momo_memory::MemoryError::Io(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "both legacy and Space memory exist for {}",
+                        entry.file_name().to_string_lossy()
+                    ),
+                ))
+                .into());
+            }
+            std::fs::create_dir_all(target.parent().expect("Space memory parent"))
+                .map_err(momo_memory::MemoryError::from)?;
+            std::fs::rename(entry.path(), target).map_err(momo_memory::MemoryError::from)?;
+        }
+        std::fs::remove_dir(&scopes).map_err(momo_memory::MemoryError::from)?;
+        let memory = data_dir.join("memory");
+        if std::fs::read_dir(&memory)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false)
+        {
+            std::fs::remove_dir(memory).map_err(momo_memory::MemoryError::from)?;
+        }
+    }
     Ok(())
 }
 
@@ -176,12 +219,12 @@ mod tests {
         assert!(core.data_dir().join("momo.sqlite3").exists());
         assert!(core.data_dir().join("nsg-vectors.db").exists());
         let scope_id = momo_domain::new_id();
-        core.memory_for_scope(scope_id).expect("memory");
+        core.memory_for_space(scope_id).expect("memory");
         assert!(
             core.data_dir()
-                .join("memory/scopes")
+                .join("spaces")
                 .join(scope_id.to_string())
-                .join("current/scene.md")
+                .join("memory/current/scene.md")
                 .exists()
         );
     }
@@ -189,7 +232,11 @@ mod tests {
     #[tokio::test]
     async fn converts_the_legacy_memory_directory_once() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let legacy = directory.path().join("memory/users/example");
+        let space_id = momo_domain::new_id();
+        let legacy = directory
+            .path()
+            .join("memory/users")
+            .join(space_id.to_string());
         std::fs::create_dir_all(&legacy).expect("legacy directory");
         std::fs::write(legacy.join("marker"), "ok").expect("legacy marker");
 
@@ -201,7 +248,9 @@ mod tests {
         assert!(
             directory
                 .path()
-                .join("memory/scopes/example/marker")
+                .join("spaces")
+                .join(space_id.to_string())
+                .join("memory/marker")
                 .exists()
         );
     }

@@ -132,7 +132,7 @@ pub async fn rebuild_nsg_vector_index_json(
         .vector_space_id()
         .map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let documents = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?

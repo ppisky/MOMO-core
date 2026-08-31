@@ -6,7 +6,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 /// Current in-repository domain schema generation.
-pub const SCHEMA_GENERATION: u32 = 2;
+pub const SCHEMA_GENERATION: u32 = 3;
 
 /// Generates a time-ordered UUIDv7 suitable for persisted MOMO entities.
 #[must_use]
@@ -27,6 +27,7 @@ pub struct User {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CharacterCard {
     pub id: Uuid,
+    #[serde(rename = "owner_space_id")]
     pub scope_id: Uuid,
     pub name: String,
     pub version: String,
@@ -77,6 +78,7 @@ impl TryFrom<&str> for MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Conversation {
     pub id: Uuid,
+    #[serde(rename = "space_id")]
     pub scope_id: Uuid,
     pub character_id: Option<Uuid>,
     pub title: String,

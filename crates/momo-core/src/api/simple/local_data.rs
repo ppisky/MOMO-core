@@ -181,6 +181,17 @@ pub async fn local_characters_json(scope_id: String) -> Result<String, String> {
     serde_json::to_string(&characters).map_err(|error| error.to_string())
 }
 
+pub async fn local_character_json(character_id: String) -> Result<String, String> {
+    let character_id = uuid::Uuid::parse_str(&character_id).map_err(|error| error.to_string())?;
+    let character = core()?
+        .store()
+        .character_by_id(character_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "character does not exist".to_owned())?;
+    serde_json::to_string(&character).map_err(|error| error.to_string())
+}
+
 pub async fn local_conversations_json(scope_id: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let conversations = core()?
@@ -376,7 +387,6 @@ pub async fn stage_character_delete(scope_id: String, id: String) -> Result<(), 
 pub async fn stage_conversation_json(
     id: Option<String>,
     scope_id: String,
-    character_scope_id: String,
     title: String,
     character_id: String,
 ) -> Result<String, String> {
@@ -386,18 +396,16 @@ pub async fn stage_conversation_json(
         .map_err(|error| error.to_string())?
         .unwrap_or_else(momo_domain::new_id);
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
-    let character_scope_id =
-        uuid::Uuid::parse_str(&character_scope_id).map_err(|error| error.to_string())?;
     let character_id = uuid::Uuid::parse_str(&character_id).map_err(|error| error.to_string())?;
     let core = core()?;
     if core
         .store()
-        .character_for_scope(character_scope_id, character_id)
+        .character_by_id(character_id)
         .await
         .map_err(|error| error.to_string())?
         .is_none()
     {
-        return Err("character does not belong to character scope".to_owned());
+        return Err("character does not exist".to_owned());
     }
     let now = chrono::Utc::now();
     let conversation = momo_domain::Conversation {

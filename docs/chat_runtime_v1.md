@@ -12,8 +12,8 @@ not the client-facing runtime contract.
 
 ```text
 validate request and request ID
-  -> validate personal, conversation, and character-catalogue scopes
-  -> replay a completed operation or lock a new attempt within the personal scope
+  -> validate the personal Space, conversation Space, and global character ID
+  -> replay a completed operation or lock a new attempt within the personal Space
   -> govern request overrides
   -> pass original images to a multimodal conversation route, or optionally
      describe them through logical route `vision` for a text-only model
@@ -26,7 +26,7 @@ validate request and request ID
 ```
 
 When a maintenance threshold is reached, Core retrieves relevant existing DMW
-and NSG material from the same personal Scope and sends that read-only context,
+and NSG material from the explicit memory Spaces and sends that read-only context,
 the pending turns, and the current timestamp to the selected maintenance route.
 Context retrieval must succeed before a model may propose a patch; Core never
 falls back to transcript-only blind writes.
@@ -57,15 +57,14 @@ to 64 events, individual events and the total stream have explicit byte limits,
 and UTF-8/SSE decoding does not assume network chunk boundaries.
 
 Cancellation is addressed by request ID. Completed responses replay from local
-storage; both operations are namespaced by the request's personal `scope_id`.
+storage; both operations are namespaced by the request's `personal_space_id`.
 Reusing a request ID with a different normalized request inside that scope
 returns a conflict. A conversation ID is accepted only when it belongs to the
-explicit `conversation_scope_id`, and its messages are read through the same
+explicit `conversation_space_id`, and its messages are read through the same
 scoped lookup. Partial assistant text is not committed as a completed assistant
-message. See [`identity_scope_1_0.md`](identity_scope_1_0.md) for the complete
+message. See [`space_model_1_0.md`](space_model_1_0.md) for the complete
 identity boundary.
 
-The exact historical fixtures remain under `contracts/0.5`. The frozen 1.0
-fixtures, including multimodal input, live under `contracts/1.0`; publishing
-still waits for the credentialed provider smoke test. See
+Only the frozen 1.0 fixtures, including multimodal input, live under
+`contracts/1.0`; publishing still waits for the credentialed provider smoke test. See
 [`roadmap_1_0_0.md`](roadmap_1_0_0.md).

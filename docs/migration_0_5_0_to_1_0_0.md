@@ -1,6 +1,6 @@
 # Draft migration: MOMO Core 0.5.0 to 1.0.0
 
-**Status:** local release-candidate guidance; 1.0.0 is not published or tagged
+**Status:** destructive upgrade notes; no compatibility layer is provided
 
 ## Rust embedding API
 
@@ -69,24 +69,27 @@ writing the user message. Pending pre-migration text-only operations remain
 readable; new or retried operations populate the field. No raw image bytes are
 added to SQLite by this migration.
 
-## Explicit request scopes
+## Spaces replace the withdrawn request scopes
 
 `momo-server` no longer compiles, reads, or silently selects a product-wide
 default scope UUID. `MOMO_SCOPE_ID` and mobot's former `core.scope_id` are
 removed rather than made mandatory: a process-level value still mixes users.
 
 Every stateful request supplies the UUID that owns the affected resource. A
-native response supplies a personal `scope_id`, a `conversation_scope_id`, and
-a `character_scope_id`; Core verifies referenced IDs inside those namespaces.
-Response idempotency and cancellation are keyed by personal scope plus request
-ID. See [`identity_scope_1_0.md`](identity_scope_1_0.md).
+native response supplies `personal_space_id`, `conversation_space_id`, zero or
+more weighted `memory_sources`, and at most one `memory_write_space_id`.
+Characters are resolved globally by `character_id`; there is no character
+catalogue UUID.
+Response idempotency and cancellation are keyed by personal Space plus request
+ID. See [`space_model_1_0.md`](space_model_1_0.md).
 
-Existing installations may retain the historical UUID only as the explicit
-owner of data that truly belongs together—for example, an existing character
-catalogue. It must not remain the personal scope for every external user.
+The withdrawn scope UUID is not reinterpreted as a character directory or
+silently reused. A host may deliberately convert data into explicit Spaces
+through an offline tool or MOC v3 `space_map`; otherwise the old data is
+discarded.
 
 mobot's historical `discord_sessions.json` stored only a platform session key
-and a `conversation_id`, so it cannot prove which conversation scope owns the
+and a `conversation_id`, so it cannot prove which conversation Space owns the
 referenced conversation. It is not a supported 1.0 migration source. The new
 host rejects that schema and creates a fresh versioned session store after the
 obsolete file is discarded. There is no ID-only compatibility decoder or
@@ -94,7 +97,7 @@ ownership guessing path.
 
 ## Host-owned MOC modules
 
-The MOC v2 container still validates every declared module, including unknown
+The MOC v3 container validates every declared module and Space module, including unknown
 safe module IDs. A host can now explicitly claim validated unknown payloads to
 a selected directory during import, and explicitly contribute extension-module
 directories during export. Core returns module metadata and claimed paths but
@@ -113,11 +116,10 @@ compatibility prompt.
 `[prompts]` itself is optional: omission selects the standard relative files
 `prompts/dmw_distiller.md` and `prompts/nsg_governor.md`.
 
-## Wire compatibility during the release candidate
+## Wire compatibility
 
-The historical `contracts/0.5` fixtures remain unchanged. New Core and mobot
-tests share byte-identical `contracts/1.0` fixtures, including a structured
-multimodal request, and the native request schema is now
+Core and mobot keep only byte-identical `contracts/1.0` fixtures, including a
+structured multimodal request, and the native request schema is
 `momo.responses/1.0`. Core package metadata is set to `1.0.0`; mobot is an
 independent `0.1.0` host that requires Core `>=1.0.0, <2.0.0`. Local tags may
 exist, but neither repository has been pushed or published as a GitHub release.

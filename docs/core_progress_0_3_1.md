@@ -1,10 +1,13 @@
 # MOMO Core 0.3.1 Status
 
-**Status:** public implementation baseline  
+**Status:** historical pre-release record; superseded by Core 1.0 Spaces
 **Updated:** 2026-08-16
 
 MOMO Core 0.3.1 standardizes scope identity and reduces parameter density at
 the public orchestration boundary.
+
+> This document is not a current contract. Core 1.0 does not expose this
+> scope-shaped API; see [`space_model_1_0.md`](space_model_1_0.md).
 
 ## 0.3.1 changes
 

@@ -1,3 +1,10 @@
+# Historical MOMO Container v2 draft
+
+> **Superseded before publication:** v2 applied one `scope_id` to unrelated
+> character, conversation, memory and semantic-graph modules. The Space-aware
+> format is defined by [`MOMO_Container_v3.md`](MOMO_Container_v3.md). Core 1.0
+> does not read or emit v2.
+
 # MOMO-STD-0004: MOMO Container Specification v2.0.0
 
 ```text

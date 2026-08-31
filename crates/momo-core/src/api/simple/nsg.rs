@@ -5,7 +5,7 @@ use super::*;
 pub async fn list_nsg_embedding_documents_json(scope_id: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let nsg = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?;
@@ -28,7 +28,7 @@ pub async fn save_nsg_vectors_json(
         return Err("too many semantic-graph vectors in one batch".to_owned());
     }
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let nsg = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?;
@@ -62,7 +62,7 @@ pub async fn nsg_vector_status_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let nsg = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?;
@@ -93,7 +93,7 @@ pub async fn nsg_vector_status_json(
 pub async fn run_memory_maintenance_json(scope_id: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let report = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?
         .run_maintenance()
         .map_err(|error| error.to_string())?;
@@ -107,7 +107,7 @@ pub async fn apply_nsg_patch_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let nsg = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?;
@@ -123,7 +123,7 @@ pub async fn apply_nsg_patch_json(
 pub async fn list_nsg_pending_candidates_json(scope_id: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let nsg = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?;
@@ -140,7 +140,7 @@ pub async fn approve_nsg_pending_candidate_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?
@@ -155,7 +155,7 @@ pub async fn reject_nsg_pending_candidate_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?
@@ -170,7 +170,7 @@ pub async fn list_nsg_nodes_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let nsg = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?;
@@ -189,7 +189,7 @@ pub async fn write_nsg_node_json(
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let node = serde_json::from_str(&node_json).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let nsg = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?;
@@ -204,7 +204,7 @@ pub async fn archive_nsg_node_json(
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let nsg = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?;
@@ -216,7 +216,7 @@ pub async fn archive_nsg_node_json(
 pub async fn delete_nsg_node_json(scope_id: String, target_file: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
-        .memory_for_scope(scope_id)
+        .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let nsg = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
         .map_err(|error| error.to_string())?;

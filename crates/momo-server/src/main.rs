@@ -67,15 +67,14 @@ struct HealthResponse {
 
 #[derive(Deserialize)]
 struct CreateConversationRequest {
-    scope_id: String,
-    character_scope_id: String,
+    space_id: String,
     title: String,
     character_id: String,
 }
 
 #[derive(Deserialize)]
 struct CreateMessageRequest {
-    scope_id: String,
+    space_id: String,
     conversation_id: String,
     role: String,
     content: String,
@@ -83,7 +82,7 @@ struct CreateMessageRequest {
 
 #[derive(Deserialize)]
 struct CreateCharacterRequest {
-    scope_id: String,
+    owner_space_id: String,
     name: String,
     #[serde(default)]
     author_name: String,
@@ -97,7 +96,7 @@ struct CreateCharacterRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportExternalCharacterRequest {
-    scope_id: String,
+    owner_space_id: String,
     input_path: String,
     format: momo_core::ExternalCharacterImportFormat,
 }
@@ -105,7 +104,7 @@ struct ImportExternalCharacterRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExportExternalCharacterRequest {
-    scope_id: String,
+    owner_space_id: String,
     output_path: String,
     format: momo_core::ExternalCharacterExportFormat,
 }
@@ -113,7 +112,7 @@ struct ExportExternalCharacterRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExportPreservedCharacterSourceRequest {
-    scope_id: String,
+    owner_space_id: String,
     output_path: String,
 }
 
@@ -125,24 +124,21 @@ struct ResolveCapabilityRequest {
 }
 
 #[derive(Deserialize, Serialize)]
-struct RetrieveMemoryScope {
-    scope_id: String,
+struct RetrieveMemorySpace {
+    space_id: String,
     label: String,
-    #[serde(default = "default_scope_weight")]
-    weight: usize,
+    weight: u8,
+    memory: bool,
+    semantic_graph: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetrieveScopedMemoryRequest {
-    scopes: Vec<RetrieveMemoryScope>,
+    spaces: Vec<RetrieveMemorySpace>,
     query: String,
     #[serde(default = "default_memory_tokens")]
     max_tokens: usize,
-    #[serde(default = "default_true")]
-    include_memory: bool,
-    #[serde(default = "default_true")]
-    include_semantic_graph: bool,
     vector_space_id: Option<String>,
     query_vector: Option<Vec<f64>>,
     #[serde(default)]
@@ -152,7 +148,7 @@ struct RetrieveScopedMemoryRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompileMoStateRequest {
-    scope_id: String,
+    space_id: String,
     #[serde(default)]
     retrieved_memory: Vec<Value>,
     #[serde(default)]
@@ -183,20 +179,20 @@ struct PrepareContextRequest {
 
 #[derive(Deserialize)]
 struct UpdateMemoryDocumentRequest {
-    scope_id: String,
+    space_id: String,
     markdown: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApplyMemoryPatchRequest {
-    scope_id: String,
+    space_id: String,
     patch_yaml: String,
 }
 
 #[derive(Deserialize)]
 struct SubmitMemoryPatchReviewRequest {
-    scope_id: String,
+    space_id: String,
     conversation_id: String,
     patch_yaml: String,
     review_mode: String,
@@ -204,13 +200,13 @@ struct SubmitMemoryPatchReviewRequest {
 
 #[derive(Deserialize)]
 struct IncludeResolvedQuery {
-    scope_id: String,
+    space_id: String,
     include_resolved: Option<bool>,
 }
 
 #[derive(Deserialize)]
 struct WriteNsgNodeRequest {
-    scope_id: String,
+    space_id: String,
     target_file: String,
     node: Value,
 }
@@ -218,7 +214,7 @@ struct WriteNsgNodeRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApplyNsgPatchRequest {
-    scope_id: String,
+    space_id: String,
     patch_yaml: String,
     #[serde(default)]
     manual_authority: bool,
@@ -226,26 +222,26 @@ struct ApplyNsgPatchRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ScopeRequest {
-    scope_id: String,
+struct SpaceRequest {
+    space_id: String,
 }
 
 #[derive(Deserialize)]
 struct NsgTargetRequest {
-    scope_id: String,
+    space_id: String,
     target_file: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ScopedNsgTargetRequest {
-    scope_id: String,
+struct SpaceNsgTargetRequest {
+    space_id: String,
     target_file: String,
 }
 
 #[derive(Deserialize)]
 struct NsgVectorStatusQuery {
-    scope_id: String,
+    space_id: String,
     vector_space_id: Option<String>,
 }
 
@@ -266,15 +262,10 @@ struct MomoConfigImportRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MocExportRequest {
-    scope_id: String,
     output_path: String,
     #[serde(default)]
     settings: Value,
-    modules: Vec<momo_core::MocModule>,
-    #[serde(default)]
-    compatibility: momo_core::MocCompatibility,
-    #[serde(default)]
-    character_id: Option<uuid::Uuid>,
+    plan: momo_core::MocExportPlan,
     #[serde(default)]
     protection: momo_core::MocProtection,
     #[serde(default)]
@@ -284,10 +275,8 @@ struct MocExportRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MocImportRequest {
-    scope_id: String,
     input_path: String,
-    #[serde(default = "default_conflict_mode")]
-    conflict_mode: momo_core::ConflictMode,
+    plan: momo_core::MocImportPlan,
     #[serde(default)]
     protection: momo_core::MocProtection,
     claim_unknown_to: Option<String>,
@@ -444,7 +433,9 @@ fn api_routes() -> Router<AppState> {
         )
         .route(
             "/characters/:id",
-            put(update_character).delete(delete_character),
+            get(get_character)
+                .put(update_character)
+                .delete(delete_character),
         )
         .route(
             "/conversations",
@@ -459,6 +450,7 @@ fn api_routes() -> Router<AppState> {
         .route("/messages/:id", put(update_message).delete(delete_message))
         .route("/momo/responses", post(create_response))
         .route("/momo/responses/:request_id/cancel", post(cancel_response))
+        .route("/momo/control", post(execute_control))
         .route("/metrics", get(metrics))
         .route("/embeddings/generate", post(generate_embeddings))
         .route("/capabilities/resolve", post(resolve_capability))
@@ -531,6 +523,12 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+async fn execute_control(
+    Json(request): Json<momo_core::MomoControlRequest>,
+) -> Result<Json<Value>, ApiError> {
+    json_result(simple::execute_control_json(to_json_string(&request)?).await)
+}
+
 async fn metrics(State(state): State<AppState>) -> Json<Value> {
     let routes = state.metrics.lock().await.clone();
     Json(json!({
@@ -548,14 +546,14 @@ async fn update_route_metrics(
     update(metrics.entry(route.to_owned()).or_default());
 }
 
-async fn list_characters(Query(query): Query<ScopeRequest>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::local_characters_json(validate_scope_id(query.scope_id)?).await)
+async fn list_characters(Query(query): Query<SpaceRequest>) -> Result<Json<Value>, ApiError> {
+    json_result(simple::local_characters_json(validate_space_id(query.space_id)?).await)
 }
 
 async fn create_character(
     Json(request): Json<CreateCharacterRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.owner_space_id)?;
     json_result(
         simple::stage_character_json(
             scope_id,
@@ -569,10 +567,14 @@ async fn create_character(
     )
 }
 
+async fn get_character(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    scoped_json_result(simple::local_character_json(id).await)
+}
+
 async fn import_external_character(
     Json(request): Json<ImportExternalCharacterRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.owner_space_id)?;
     json_result(
         simple::import_external_character_json(
             json!({
@@ -590,7 +592,7 @@ async fn export_external_character(
     Path(id): Path<String>,
     Json(request): Json<ExportExternalCharacterRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.owner_space_id)?;
     scoped_json_result(
         simple::export_external_character_json(
             json!({
@@ -609,7 +611,7 @@ async fn export_preserved_character_source(
     Path(id): Path<String>,
     Json(request): Json<ExportPreservedCharacterSourceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.owner_space_id)?;
     scoped_json_result(
         simple::export_preserved_character_source_json(
             json!({
@@ -639,32 +641,24 @@ async fn update_character(
 
 async fn delete_character(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<OkResponse>, ApiError> {
-    simple::stage_character_delete(validate_scope_id(query.scope_id)?, id)
+    simple::stage_character_delete(validate_space_id(query.space_id)?, id)
         .await
         .map_err(scoped_api_error)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
-async fn list_conversations(Query(query): Query<ScopeRequest>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::local_conversations_json(validate_scope_id(query.scope_id)?).await)
+async fn list_conversations(Query(query): Query<SpaceRequest>) -> Result<Json<Value>, ApiError> {
+    json_result(simple::local_conversations_json(validate_space_id(query.space_id)?).await)
 }
 
 async fn create_conversation(
     Json(request): Json<CreateConversationRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
-    let character_scope_id = validate_scope_id(request.character_scope_id)?;
+    let scope_id = validate_space_id(request.space_id)?;
     scoped_json_result(
-        simple::stage_conversation_json(
-            None,
-            scope_id,
-            character_scope_id,
-            request.title,
-            request.character_id,
-        )
-        .await,
+        simple::stage_conversation_json(None, scope_id, request.title, request.character_id).await,
     )
 }
 
@@ -684,9 +678,9 @@ async fn update_conversation(
 
 async fn delete_conversation(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<OkResponse>, ApiError> {
-    simple::stage_conversation_delete(validate_scope_id(query.scope_id)?, id)
+    simple::stage_conversation_delete(validate_space_id(query.space_id)?, id)
         .await
         .map_err(scoped_api_error)?;
     Ok(Json(OkResponse { ok: true }))
@@ -694,9 +688,9 @@ async fn delete_conversation(
 
 async fn list_messages(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    scoped_json_result(simple::local_messages_json(validate_scope_id(query.scope_id)?, id).await)
+    scoped_json_result(simple::local_messages_json(validate_space_id(query.space_id)?, id).await)
 }
 
 async fn create_message(
@@ -704,7 +698,7 @@ async fn create_message(
 ) -> Result<Json<Value>, ApiError> {
     scoped_json_result(
         simple::stage_message_json(
-            validate_scope_id(request.scope_id)?,
+            validate_space_id(request.space_id)?,
             request.conversation_id,
             request.role,
             request.content,
@@ -715,13 +709,13 @@ async fn create_message(
 
 async fn update_message(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
     Json(message): Json<Message>,
 ) -> Result<Json<Value>, ApiError> {
     ensure_resource_id(&id, message.id)?;
     scoped_json_result(
         simple::stage_message_update_json(
-            validate_scope_id(query.scope_id)?,
+            validate_space_id(query.space_id)?,
             to_json_string(&message)?,
         )
         .await,
@@ -730,9 +724,9 @@ async fn update_message(
 
 async fn delete_message(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<OkResponse>, ApiError> {
-    simple::stage_message_delete(validate_scope_id(query.scope_id)?, id)
+    simple::stage_message_delete(validate_space_id(query.space_id)?, id)
         .await
         .map_err(scoped_api_error)?;
     Ok(Json(OkResponse { ok: true }))
@@ -771,7 +765,7 @@ async fn resolve_capability(
 async fn compile_mo_state(
     Json(request): Json<CompileMoStateRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.space_id)?;
     json_result(
         simple::compile_mo_state_json(
             scope_id,
@@ -788,11 +782,9 @@ async fn retrieve_scoped_memory(
 ) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::retrieve_scoped_memory_json(to_json_string(&json!({
-            "scopes": request.scopes,
+            "spaces": request.spaces,
             "query": request.query,
             "max_tokens": request.max_tokens,
-            "include_memory": request.include_memory,
-            "include_semantic_graph": request.include_semantic_graph,
             "vector_space_id": request.vector_space_id,
             "query_vector": request.query_vector,
             "embedding": request.embedding,
@@ -802,20 +794,20 @@ async fn retrieve_scoped_memory(
 }
 
 async fn run_memory_maintenance(
-    Json(request): Json<ScopeRequest>,
+    Json(request): Json<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::run_memory_maintenance_json(validate_scope_id(request.scope_id)?).await)
+    json_result(simple::run_memory_maintenance_json(validate_space_id(request.space_id)?).await)
 }
 
-async fn list_memory_documents(Query(query): Query<ScopeRequest>) -> Result<Json<Value>, ApiError> {
-    json_result(simple::list_memory_documents_json(validate_scope_id(query.scope_id)?).await)
+async fn list_memory_documents(Query(query): Query<SpaceRequest>) -> Result<Json<Value>, ApiError> {
+    json_result(simple::list_memory_documents_json(validate_space_id(query.space_id)?).await)
 }
 
 async fn read_memory_document(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::read_memory_document_json(validate_scope_id(query.scope_id)?, id).await)
+    json_result(simple::read_memory_document_json(validate_space_id(query.space_id)?, id).await)
 }
 
 async fn update_memory_document(
@@ -824,7 +816,7 @@ async fn update_memory_document(
 ) -> Result<Json<Value>, ApiError> {
     ok_json(
         simple::update_memory_document_json(
-            validate_scope_id(request.scope_id)?,
+            validate_space_id(request.space_id)?,
             id,
             request.markdown,
         )
@@ -834,29 +826,29 @@ async fn update_memory_document(
 
 async fn archive_memory_document(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::archive_memory_document_json(validate_scope_id(query.scope_id)?, id).await)
+    ok_json(simple::archive_memory_document_json(validate_space_id(query.space_id)?, id).await)
 }
 
 async fn restore_memory_document(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::restore_memory_document_json(validate_scope_id(query.scope_id)?, id).await)
+    ok_json(simple::restore_memory_document_json(validate_space_id(query.space_id)?, id).await)
 }
 
 async fn delete_memory_document(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    ok_json(simple::delete_memory_document_json(validate_scope_id(query.scope_id)?, id).await)
+    ok_json(simple::delete_memory_document_json(validate_space_id(query.space_id)?, id).await)
 }
 
 async fn apply_memory_patch(
     Json(request): Json<ApplyMemoryPatchRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.space_id)?;
     ok_json(simple::apply_memory_patch_json(scope_id, request.patch_yaml).await)
 }
 
@@ -865,7 +857,7 @@ async fn submit_memory_patch_review(
 ) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::submit_memory_patch_review_json(
-            validate_scope_id(request.scope_id)?,
+            validate_space_id(request.space_id)?,
             request.conversation_id,
             request.patch_yaml,
             request.review_mode,
@@ -879,7 +871,7 @@ async fn list_memory_patch_reviews(
 ) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::list_memory_patch_reviews_json(
-            validate_scope_id(query.scope_id)?,
+            validate_space_id(query.space_id)?,
             query.include_resolved.unwrap_or(false),
         )
         .await,
@@ -888,31 +880,31 @@ async fn list_memory_patch_reviews(
 
 async fn approve_memory_patch_review(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(
-        simple::approve_memory_patch_review_json(validate_scope_id(query.scope_id)?, id).await,
+        simple::approve_memory_patch_review_json(validate_space_id(query.space_id)?, id).await,
     )
 }
 
 async fn reject_memory_patch_review(
     Path(id): Path<String>,
-    Query(query): Query<ScopeRequest>,
+    Query(query): Query<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(
-        simple::reject_memory_patch_review_json(validate_scope_id(query.scope_id)?, id).await,
+        simple::reject_memory_patch_review_json(validate_space_id(query.space_id)?, id).await,
     )
 }
 
-async fn list_nsg_nodes(Json(request): Json<ScopeRequest>) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+async fn list_nsg_nodes(Json(request): Json<SpaceRequest>) -> Result<Json<Value>, ApiError> {
+    let scope_id = validate_space_id(request.space_id)?;
     json_result(simple::list_nsg_nodes_json(scope_id, false).await)
 }
 
 async fn write_nsg_node(Json(request): Json<WriteNsgNodeRequest>) -> Result<Json<Value>, ApiError> {
     ok_json(
         simple::write_nsg_node_json(
-            validate_scope_id(request.scope_id)?,
+            validate_space_id(request.space_id)?,
             request.target_file,
             to_json_string(&request.node)?,
         )
@@ -922,14 +914,14 @@ async fn write_nsg_node(Json(request): Json<WriteNsgNodeRequest>) -> Result<Json
 
 async fn archive_nsg_node(Json(request): Json<NsgTargetRequest>) -> Result<Json<Value>, ApiError> {
     ok_json(
-        simple::archive_nsg_node_json(validate_scope_id(request.scope_id)?, request.target_file)
+        simple::archive_nsg_node_json(validate_space_id(request.space_id)?, request.target_file)
             .await,
     )
 }
 
 async fn delete_nsg_node(Json(request): Json<NsgTargetRequest>) -> Result<Json<Value>, ApiError> {
     ok_json(
-        simple::delete_nsg_node_json(validate_scope_id(request.scope_id)?, request.target_file)
+        simple::delete_nsg_node_json(validate_space_id(request.space_id)?, request.target_file)
             .await,
     )
 }
@@ -937,30 +929,30 @@ async fn delete_nsg_node(Json(request): Json<NsgTargetRequest>) -> Result<Json<V
 async fn apply_nsg_patch(
     Json(request): Json<ApplyNsgPatchRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.space_id)?;
     ok_json(
         simple::apply_nsg_patch_json(scope_id, request.patch_yaml, request.manual_authority).await,
     )
 }
 
 async fn list_nsg_pending_candidates(
-    Json(request): Json<ScopeRequest>,
+    Json(request): Json<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.space_id)?;
     json_result(simple::list_nsg_pending_candidates_json(scope_id).await)
 }
 
 async fn approve_nsg_pending_candidate(
-    Json(request): Json<ScopedNsgTargetRequest>,
+    Json(request): Json<SpaceNsgTargetRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.space_id)?;
     ok_json(simple::approve_nsg_pending_candidate_json(scope_id, request.target_file).await)
 }
 
 async fn reject_nsg_pending_candidate(
-    Json(request): Json<ScopedNsgTargetRequest>,
+    Json(request): Json<SpaceNsgTargetRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope_id = validate_scope_id(request.scope_id)?;
+    let scope_id = validate_space_id(request.space_id)?;
     ok_json(simple::reject_nsg_pending_candidate_json(scope_id, request.target_file).await)
 }
 
@@ -969,7 +961,7 @@ async fn nsg_vector_status(
 ) -> Result<Json<Value>, ApiError> {
     json_result(
         simple::nsg_vector_status_json(
-            validate_scope_id(query.scope_id)?,
+            validate_space_id(query.space_id)?,
             query.vector_space_id.unwrap_or_default(),
         )
         .await,
@@ -979,12 +971,12 @@ async fn nsg_vector_status(
 async fn rebuild_nsg_vector_index(Json(mut request): Json<Value>) -> Result<Json<Value>, ApiError> {
     let scope_id = request
         .as_object_mut()
-        .and_then(|object| object.remove("scope_id"))
+        .and_then(|object| object.remove("space_id"))
         .and_then(|value| value.as_str().map(str::to_owned))
-        .ok_or_else(|| ApiError::bad_request("scope_id is required"))?;
+        .ok_or_else(|| ApiError::bad_request("space_id is required"))?;
     json_result(
         simple::rebuild_nsg_vector_index_json(
-            validate_scope_id(scope_id)?,
+            validate_space_id(scope_id)?,
             to_json_string(&request)?,
         )
         .await,
@@ -1010,11 +1002,8 @@ async fn export_moc(Json(request): Json<MocExportRequest>) -> Result<Json<Value>
     json_result(
         simple::export_moc_json(to_json_string(&json!({
             "output_path": request.output_path,
-            "scope_id": validate_scope_id(request.scope_id)?,
             "settings": request.settings,
-            "modules": request.modules,
-            "compatibility": request.compatibility,
-            "character_id": request.character_id,
+            "plan": request.plan,
             "protection": request.protection,
             "host_modules": request.host_modules,
         }))?)
@@ -1026,8 +1015,7 @@ async fn import_moc(Json(request): Json<MocImportRequest>) -> Result<Json<Value>
     json_result(
         simple::import_moc_json(
             request.input_path,
-            validate_scope_id(request.scope_id)?,
-            request.conflict_mode,
+            request.plan,
             request.protection,
             request.claim_unknown_to,
         )
@@ -1123,22 +1111,14 @@ fn to_json_string<T: Serialize>(value: &T) -> Result<String, ApiError> {
     serde_json::to_string(value).map_err(|error| ApiError::bad_request(error.to_string()))
 }
 
-fn validate_scope_id(scope_id: String) -> Result<String, ApiError> {
-    uuid::Uuid::parse_str(&scope_id)
-        .map_err(|_| ApiError::bad_request("memory scope id must be a UUID"))?;
-    Ok(scope_id)
-}
-
-const fn default_true() -> bool {
-    true
+fn validate_space_id(space_id: String) -> Result<String, ApiError> {
+    uuid::Uuid::parse_str(&space_id)
+        .map_err(|_| ApiError::bad_request("Space id must be a UUID"))?;
+    Ok(space_id)
 }
 
 fn default_memory_tokens() -> usize {
     2_000
-}
-
-const fn default_scope_weight() -> usize {
-    1
 }
 
 fn default_context_window() -> usize {
@@ -1147,10 +1127,6 @@ fn default_context_window() -> usize {
 
 fn default_reserve_output_tokens() -> usize {
     1_024
-}
-
-const fn default_conflict_mode() -> momo_core::ConflictMode {
-    momo_core::ConflictMode::KeepExisting
 }
 
 fn to_io_error(message: String) -> std::io::Error {
@@ -1326,9 +1302,9 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scopes": [
-                                {"scope_id": "00000000-0000-4000-8000-000000000011", "label": "personal", "weight": 3},
-                                {"scope_id": "00000000-0000-4000-8000-000000000012", "label": "channel", "weight": 2}
+                            "spaces": [
+                                {"space_id": "00000000-0000-4000-8000-000000000011", "label": "personal", "weight": 60, "memory": true, "semantic_graph": true},
+                                {"space_id": "00000000-0000-4000-8000-000000000012", "label": "channel", "weight": 40, "memory": true, "semantic_graph": true}
                             ],
                             "query": "hello",
                             "max_tokens": 1024
@@ -1350,7 +1326,7 @@ mod tests {
             .as_array()
             .expect("scoped memory array")
             .iter()
-            .filter_map(|item| item["memory_scope"]["label"].as_str())
+            .filter_map(|item| item["memory_space"]["label"].as_str())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(labels, ["channel", "personal"].into_iter().collect());
 
@@ -1363,7 +1339,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": "00000000-0000-4000-8000-000000000011"
+                            "space_id": "00000000-0000-4000-8000-000000000011"
                         })
                         .to_string(),
                     ))
@@ -1435,7 +1411,7 @@ mod tests {
                     .uri("/v1/characters/import-external")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        json!({"scope_id": TEST_SCOPE_ID, "input_path": external_path, "format": "ccv2_json"}).to_string(),
+                        json!({"owner_space_id": TEST_SCOPE_ID, "input_path": external_path, "format": "ccv2_json"}).to_string(),
                     ))
                     .expect("external import request"),
             )
@@ -1463,7 +1439,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": TEST_SCOPE_ID,
+                            "owner_space_id": TEST_SCOPE_ID,
                             "output_path": exported_path,
                             "format": "ccv2_json"
                         })
@@ -1484,11 +1460,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(format!("/v1/characters?scope_id={TEST_SCOPE_ID}"))
+                    .uri(format!("/v1/characters?space_id={TEST_SCOPE_ID}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": TEST_SCOPE_ID,
+                            "owner_space_id": TEST_SCOPE_ID,
                             "name": "HTTP test character",
                             "author_name": "momo-server test",
                             "description": "round trip",
@@ -1523,8 +1499,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": TEST_SCOPE_ID,
-                            "character_scope_id": TEST_SCOPE_ID,
+                            "space_id": TEST_SCOPE_ID,
                             "title": "core contract",
                             "character_id": character_id,
                         })
@@ -1555,7 +1530,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": TEST_SCOPE_ID,
+                            "space_id": TEST_SCOPE_ID,
                             "conversation_id": conversation_id,
                             "role": "user",
                             "content": "hello from client",
@@ -1577,7 +1552,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": TEST_SCOPE_ID,
+                            "space_id": TEST_SCOPE_ID,
                             "target_file": "lore/vector-test.nsg",
                             "node": {
                                 "id": "vector_test",
@@ -1717,7 +1692,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": TEST_SCOPE_ID,
+                            "space_id": TEST_SCOPE_ID,
                             "embedding": embedding,
                             "mode": "full",
                             "batch_size": 1
@@ -1752,15 +1727,15 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scopes": [{
-                                "scope_id": TEST_SCOPE_ID,
+                            "spaces": [{
+                                "space_id": TEST_SCOPE_ID,
                                 "label": "default",
-                                "weight": 1
+                                "weight": 100,
+                                "memory": false,
+                                "semantic_graph": true
                             }],
                             "query": "unrelated query text",
                             "max_tokens": 1024,
-                            "include_memory": false,
-                            "include_semantic_graph": true,
                             "embedding": embedding
                         })
                         .to_string(),
@@ -1787,7 +1762,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/conversations/{conversation_id}/messages?scope_id={TEST_SCOPE_ID}"
+                        "/v1/conversations/{conversation_id}/messages?space_id={TEST_SCOPE_ID}"
                     ))
                     .body(Body::empty())
                     .expect("message list request"),
@@ -1812,7 +1787,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": "00000000-0000-4000-8000-000000000011",
+                            "space_id": "00000000-0000-4000-8000-000000000011",
                             "retrieved_memory": [],
                             "retrieved_nsg": [],
                             "max_context_tokens": 8192,
@@ -1860,7 +1835,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": "00000000-0000-4000-8000-000000000011",
+                            "space_id": "00000000-0000-4000-8000-000000000011",
                         })
                         .to_string(),
                     ))
@@ -1887,7 +1862,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/v1/characters?scope_id={TEST_SCOPE_ID}"))
+                    .uri(format!("/v1/characters?space_id={TEST_SCOPE_ID}"))
                     .body(Body::empty())
                     .expect("list request"),
             )
@@ -1934,9 +1909,14 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": TEST_SCOPE_ID,
                             "output_path": output,
-                            "modules": [],
+                            "plan": {
+                                "include_config": false,
+                                "characters": [],
+                                "conversations": [],
+                                "memory": [],
+                                "semantic_graph": []
+                            },
                             "host_modules": [{
                                 "id": "weather",
                                 "input_path": extension,
@@ -1960,9 +1940,12 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": TEST_SCOPE_ID,
                             "input_path": output,
-                            "conflict_mode": "replace",
+                            "plan": {
+                                "apply_config": false,
+                                "space_map": {},
+                                "conflict_mode": "replace"
+                            },
                             "claim_unknown_to": claims
                         })
                         .to_string(),
@@ -2011,7 +1994,6 @@ mod tests {
             &simple::stage_conversation_json(
                 None,
                 OWNER_SCOPE.to_owned(),
-                OWNER_SCOPE.to_owned(),
                 "private conversation".to_owned(),
                 character_id.clone(),
             )
@@ -2049,7 +2031,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/conversations/{conversation_id}/messages?scope_id={OWNER_SCOPE}"
+                        "/v1/conversations/{conversation_id}/messages?space_id={OWNER_SCOPE}"
                     ))
                     .body(Body::empty())
                     .expect("owner read"),
@@ -2063,7 +2045,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/conversations/{conversation_id}/messages?scope_id={OTHER_SCOPE}"
+                        "/v1/conversations/{conversation_id}/messages?space_id={OTHER_SCOPE}"
                     ))
                     .body(Body::empty())
                     .expect("cross-scope read"),
@@ -2081,7 +2063,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": OTHER_SCOPE,
+                            "space_id": OTHER_SCOPE,
                             "conversation_id": conversation_id,
                             "role": "user",
                             "content": "must not be written"
@@ -2095,9 +2077,9 @@ mod tests {
         assert_eq!(cross_scope_write.status(), StatusCode::NOT_FOUND);
 
         let mut foreign_character = character.clone();
-        foreign_character["scope_id"] = json!(OTHER_SCOPE);
+        foreign_character["owner_space_id"] = json!(OTHER_SCOPE);
         let mut foreign_conversation = conversation.clone();
-        foreign_conversation["scope_id"] = json!(OTHER_SCOPE);
+        foreign_conversation["space_id"] = json!(OTHER_SCOPE);
         let export_path = TEST_DATA_DIR.path().join("cross-scope-export.json");
         let cross_scope_resource_requests = vec![
             (
@@ -2108,7 +2090,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "scope_id": OTHER_SCOPE,
+                            "owner_space_id": OTHER_SCOPE,
                             "output_path": export_path,
                             "format": "ccv2_json"
                         })
@@ -2130,7 +2112,7 @@ mod tests {
                 Request::builder()
                     .method(Method::DELETE)
                     .uri(format!(
-                        "/v1/characters/{character_id}?scope_id={OTHER_SCOPE}"
+                        "/v1/characters/{character_id}?space_id={OTHER_SCOPE}"
                     ))
                     .body(Body::empty())
                     .expect("cross-scope character delete"),
@@ -2149,7 +2131,7 @@ mod tests {
                 Request::builder()
                     .method(Method::DELETE)
                     .uri(format!(
-                        "/v1/conversations/{conversation_id}?scope_id={OTHER_SCOPE}"
+                        "/v1/conversations/{conversation_id}?space_id={OTHER_SCOPE}"
                     ))
                     .body(Body::empty())
                     .expect("cross-scope conversation delete"),
@@ -2158,7 +2140,7 @@ mod tests {
                 "message update",
                 Request::builder()
                     .method(Method::PUT)
-                    .uri(format!("/v1/messages/{message_id}?scope_id={OTHER_SCOPE}"))
+                    .uri(format!("/v1/messages/{message_id}?space_id={OTHER_SCOPE}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(message.to_string()))
                     .expect("cross-scope message update"),
@@ -2167,7 +2149,7 @@ mod tests {
                 "message delete",
                 Request::builder()
                     .method(Method::DELETE)
-                    .uri(format!("/v1/messages/{message_id}?scope_id={OTHER_SCOPE}"))
+                    .uri(format!("/v1/messages/{message_id}?space_id={OTHER_SCOPE}"))
                     .body(Body::empty())
                     .expect("cross-scope message delete"),
             ),
@@ -2193,13 +2175,11 @@ mod tests {
                             "input": "must not see owner history",
                             "momo": {
                                 "request_id": "cross-scope-response",
-                                "scope_id": OTHER_SCOPE,
-                                "conversation_scope_id": OTHER_SCOPE,
-                                "character_scope_id": OWNER_SCOPE,
+                                "personal_space_id": OTHER_SCOPE,
+                                "conversation_space_id": OTHER_SCOPE,
                                 "character_id": character_id,
                                 "conversation_id": conversation_id,
-                                "memory": false,
-                                "semantic_graph": false,
+                                "memory_sources": [],
                                 "mo_state": false
                             }
                         })
@@ -2333,12 +2313,10 @@ mod tests {
                             "momo": {
                                 "schema": "momo.responses/1.0",
                                 "request_id": format!("stream-{}", simple::new_request_id()),
-                                "scope_id": TEST_SCOPE_ID,
-                                "conversation_scope_id": TEST_SCOPE_ID,
-                                "character_scope_id": TEST_SCOPE_ID,
+                                "personal_space_id": TEST_SCOPE_ID,
+                                "conversation_space_id": TEST_SCOPE_ID,
                                 "character_id": character_id,
-                                "memory": false,
-                                "semantic_graph": false,
+                                "memory_sources": [],
                                 "mo_state": false
                             }
                         })
@@ -2522,9 +2500,16 @@ mod tests {
         let mut request_body: Value =
             serde_json::from_str(include_str!("../../../contracts/1.0/response_request.json"))
                 .expect("1.0 response fixture");
-        request_body["momo"]["scope_id"] = json!(TEST_SCOPE_ID);
-        request_body["momo"]["conversation_scope_id"] = json!(TEST_SCOPE_ID);
-        request_body["momo"]["character_scope_id"] = json!(TEST_SCOPE_ID);
+        request_body["momo"]["personal_space_id"] = json!(TEST_SCOPE_ID);
+        request_body["momo"]["conversation_space_id"] = json!(TEST_SCOPE_ID);
+        request_body["momo"]["memory_sources"] = json!([{
+            "space_id": TEST_SCOPE_ID,
+            "label": "personal",
+            "weight": 100,
+            "memory": true,
+            "semantic_graph": true
+        }]);
+        request_body["momo"]["memory_write_space_id"] = json!(TEST_SCOPE_ID);
         request_body["momo"]["character_id"] = json!(character_id);
         let request_body = request_body.to_string();
         let invoke = || {
@@ -2719,11 +2704,9 @@ mod tests {
                             "momo": {
                                 "request_id": "direct-multimodal-contract-1",
                                 "character_id": character_id,
-                                "scope_id": TEST_SCOPE_ID,
-                                "conversation_scope_id": TEST_SCOPE_ID,
-                                "character_scope_id": TEST_SCOPE_ID,
-                                "memory": false,
-                                "semantic_graph": false,
+                                "personal_space_id": TEST_SCOPE_ID,
+                                "conversation_space_id": TEST_SCOPE_ID,
+                                "memory_sources": [],
                                 "mo_state": false
                             }
                         })
@@ -2853,5 +2836,161 @@ mod tests {
             .expect("pending JSON");
             assert_eq!(pending, json!([]));
         }
+    }
+
+    #[tokio::test]
+    async fn structured_controls_switch_clear_and_delete_without_a_model() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let initialized_dir = initialize_test_core().await;
+        let test_space_id = uuid::Uuid::now_v7().to_string();
+        let first: Value = serde_json::from_str(
+            &simple::stage_character_json(
+                test_space_id.clone(),
+                "control".to_owned(),
+                "First".to_owned(),
+                String::new(),
+                "First prompt".to_owned(),
+                String::new(),
+            )
+            .await
+            .expect("first character"),
+        )
+        .expect("first character JSON");
+        let second: Value = serde_json::from_str(
+            &simple::stage_character_json(
+                test_space_id.clone(),
+                "control".to_owned(),
+                "Second".to_owned(),
+                String::new(),
+                "Second prompt".to_owned(),
+                String::new(),
+            )
+            .await
+            .expect("second character"),
+        )
+        .expect("second character JSON");
+        let conversation: Value = serde_json::from_str(
+            &simple::stage_conversation_json(
+                None,
+                test_space_id.clone(),
+                "controlled".to_owned(),
+                first["id"].as_str().expect("first id").to_owned(),
+            )
+            .await
+            .expect("conversation"),
+        )
+        .expect("conversation JSON");
+        let conversation_id = conversation["id"].as_str().expect("conversation id");
+        let state = AppState {
+            data_dir: initialized_dir.clone(),
+            momo_api: test_momo_api("http://127.0.0.1:9/v1".to_owned()),
+            response_concurrency: Arc::new(Semaphore::new(1)),
+            response_timeout: std::time::Duration::from_secs(1),
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let app = build_app(state);
+        let control = |request_id: &str, action: Value| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/momo/control")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "schema": "momo.control/1.0",
+                        "request_id": request_id,
+                        "actor_space_id": test_space_id,
+                        "action": action,
+                    })
+                    .to_string(),
+                ))
+                .expect("control request")
+        };
+
+        let response = app
+            .clone()
+            .oneshot(control(
+                "switch-character",
+                json!({
+                    "type": "switch_character",
+                    "conversation_space_id": test_space_id,
+                    "conversation_id": conversation_id,
+                    "character_id": second["id"],
+                }),
+            ))
+            .await
+            .expect("switch response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let conversations: Value = serde_json::from_str(
+            &simple::local_conversations_json(test_space_id.clone())
+                .await
+                .expect("conversations"),
+        )
+        .expect("conversations JSON");
+        assert_eq!(conversations[0]["character_id"], second["id"]);
+
+        let memory_root = PathBuf::from(&initialized_dir)
+            .join("spaces")
+            .join(&test_space_id)
+            .join("memory");
+        std::fs::create_dir_all(memory_root.join("current")).expect("DMW directory");
+        std::fs::create_dir_all(memory_root.join("lore")).expect("NSG directory");
+        std::fs::write(memory_root.join("current/scene.md"), "scene").expect("DMW file");
+        std::fs::write(memory_root.join("lore/world.nsg"), "world").expect("NSG file");
+        let response = app
+            .clone()
+            .oneshot(control(
+                "clear-dmw",
+                json!({
+                    "type": "clear_memory",
+                    "target_space_id": test_space_id,
+                    "memory": true,
+                    "semantic_graph": false,
+                }),
+            ))
+            .await
+            .expect("clear response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(
+            std::fs::read_to_string(memory_root.join("current/scene.md"))
+                .expect("recreated empty scene"),
+            "scene"
+        );
+        assert!(memory_root.join("lore/world.nsg").exists());
+
+        let response = app
+            .clone()
+            .oneshot(control(
+                "clear-nsg",
+                json!({
+                    "type": "clear_memory",
+                    "target_space_id": test_space_id,
+                    "memory": false,
+                    "semantic_graph": true,
+                }),
+            ))
+            .await
+            .expect("clear NSG response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!memory_root.join("lore/world.nsg").exists());
+
+        let response = app
+            .oneshot(control(
+                "delete-conversation",
+                json!({
+                    "type": "delete_conversation",
+                    "conversation_space_id": test_space_id,
+                    "conversation_id": conversation_id,
+                }),
+            ))
+            .await
+            .expect("delete response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let conversations: Value = serde_json::from_str(
+            &simple::local_conversations_json(test_space_id)
+                .await
+                .expect("conversations after delete"),
+        )
+        .expect("conversations JSON");
+        assert_eq!(conversations.as_array().map(Vec::len), Some(0));
     }
 }
