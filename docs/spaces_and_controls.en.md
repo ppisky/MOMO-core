@@ -1,5 +1,7 @@
 # MOMO Spaces, Conversations, and Controls
 
+[简体中文](spaces_and_controls.zh-CN.md)
+
 This guide explains the four objects that a Core 1.0 host must keep separate.
 
 ## Four independent objects
@@ -50,7 +52,7 @@ exposed HTTP host still owns authentication and its Space access table.
 ```json
 {
   "schema": "momo.control/1.0",
-  "request_id": "<uuid>",
+  "request_id": "<unique-request-id>",
   "actor_space_id": "<personal-space>",
   "action": {
     "type": "clear_memory",
@@ -65,6 +67,12 @@ exposed HTTP host still owns authentication and its Space access table.
 `conversation_space_id` and `conversation_id`; Core verifies their ownership.
 The same protocol clears either a personal or group Space by changing the
 explicit target UUID.
+
+Completed controls are persistently replayable by `actor_space_id` plus
+`request_id`. Reusing that identity with different action content returns HTTP
+409. Direct CRUD deletion routes belong to the trusted local administration
+profile and are not substitutes for this end-user control protocol; see the
+[HTTP boundary](http_api_1_0.md).
 
 mobot exposes separate commands rather than overloading one reset operation:
 
@@ -81,7 +89,9 @@ cannot acquire deletion authority.
 
 ## Weights and the write target
 
-The aligned example config puts the policy in `[runtime]`:
+These are host conversation-policy choices. The host resolves them into each
+`momo.responses/1.0` request's `memory_sources` and
+`memory_write_space_id`. A host may represent its own policy as:
 
 ```toml
 personal_memory_weight = 70
@@ -95,6 +105,11 @@ thresholds or authorization percentages. Each may be any value from 1 through
 100. Disabling conversation memory stops reading that Space but does not delete
 it. `memory_write_target` is either `personal` or `conversation`; Core does not
 silently fall back to another Space when the selected target is unavailable.
+
+These names are not executable MOMO Core `momo.toml` fields. Portable
+round-tripping preserves them if another host owns them, but Core does not use
+them to construct a request. See [`runtime_config_0_1.md`](runtime_config_0_1.md)
+for the fields executed by this repository.
 
 ## MOC import and export
 

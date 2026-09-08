@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 impl LocalStore {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
@@ -22,6 +23,14 @@ impl LocalStore {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
+        // Control actions are idempotent state transitions, but they span
+        // SQLite and file-backed memory. A process can therefore stop after
+        // claiming an action and before recording its response. Only
+        // completed responses are durable replay records; an unfinished claim
+        // is released when the single owner of this database starts again.
+        sqlx::query("DELETE FROM control_operations WHERE response_json IS NULL")
+            .execute(&pool)
+            .await?;
         Ok(Self { pool })
     }
 
@@ -256,6 +265,75 @@ impl LocalStore {
         .transpose()
     }
 
+    pub async fn control_operation(
+        &self,
+        operation_key: &str,
+    ) -> Result<Option<ControlOperation>, StorageError> {
+        let row = sqlx::query(
+            "SELECT operation_key, request_fingerprint, response_json \
+             FROM control_operations WHERE operation_key=?",
+        )
+        .bind(operation_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(ControlOperation {
+                operation_key: row.try_get("operation_key")?,
+                request_fingerprint: row.try_get("request_fingerprint")?,
+                response_json: row.try_get("response_json")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Claims a control request. `false` means another attempt already owns
+    /// the same operation key; callers must inspect and replay that record.
+    pub async fn begin_control_operation(
+        &self,
+        operation_key: &str,
+        request_fingerprint: &str,
+    ) -> Result<bool, StorageError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "INSERT INTO control_operations \
+             (operation_key, request_fingerprint, created_at, updated_at) \
+             VALUES (?, ?, ?, ?) ON CONFLICT(operation_key) DO NOTHING",
+        )
+        .bind(operation_key)
+        .bind(request_fingerprint)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn complete_control_operation(
+        &self,
+        operation_key: &str,
+        response_json: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE control_operations SET response_json=?, updated_at=? WHERE operation_key=?",
+        )
+        .bind(response_json)
+        .bind(Utc::now().to_rfc3339())
+        .bind(operation_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn abandon_control_operation(&self, operation_key: &str) -> Result<(), StorageError> {
+        sqlx::query(
+            "DELETE FROM control_operations WHERE operation_key=? AND response_json IS NULL",
+        )
+        .bind(operation_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn begin_response_operation(
         &self,
         request_id: &str,
@@ -365,13 +443,402 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Atomically commits every durable effect of a completed model response.
+    ///
+    /// A process exit can therefore leave either the pre-completion state or
+    /// the complete assistant message, maintenance turn, and replay record;
+    /// it cannot expose only a subset of those effects.
+    pub async fn commit_response_completion(
+        &self,
+        completion: ResponseCompletion<'_>,
+    ) -> Result<bool, StorageError> {
+        let ResponseCompletion {
+            request_id,
+            conversation_scope_id,
+            assistant_message,
+            maintenance_turn,
+            memory_enabled,
+            nsg_enabled,
+            mo_state_operation_id,
+            response_json,
+        } = completion;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT conversation_id, response_json FROM response_operations WHERE request_id=?",
+        )
+        .bind(request_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let conversation_id: String = row.try_get("conversation_id")?;
+        if row.try_get::<Option<String>, _>("response_json")?.is_some() {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let owned: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id=? AND scope_id=?")
+                .bind(&conversation_id)
+                .bind(conversation_scope_id.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if owned != 1 {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "response conversation does not belong to conversation scope".to_owned(),
+            )));
+        }
+        if let Some(message) = assistant_message {
+            if message.conversation_id.to_string() != conversation_id
+                || message.role != MessageRole::Assistant
+            {
+                return Err(StorageError::Database(sqlx::Error::Protocol(
+                    "response completion contains an invalid assistant message".to_owned(),
+                )));
+            }
+            if insert_message_immutable(&mut transaction, message).await? {
+                sqlx::query("UPDATE conversations SET updated_at=? WHERE id=?")
+                    .bind(message.created_at.to_rfc3339())
+                    .bind(&conversation_id)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+        }
+        if let Some(turn) = maintenance_turn {
+            if turn.request_id != request_id {
+                return Err(StorageError::Database(sqlx::Error::Protocol(
+                    "maintenance turn does not match response operation".to_owned(),
+                )));
+            }
+            sqlx::query(
+                "INSERT INTO maintenance_turns \
+                 (request_id, scope_id, user_content, assistant_content, memory_done, nsg_done, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING",
+            )
+            .bind(&turn.request_id)
+            .bind(&turn.scope_id)
+            .bind(&turn.user_content)
+            .bind(&turn.assistant_content)
+            .bind(i64::from(!memory_enabled))
+            .bind(i64::from(!nsg_enabled))
+            .bind(Utc::now().to_rfc3339())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let changed = sqlx::query(
+            "UPDATE response_operations SET response_json=?, updated_at=? \
+             WHERE request_id=? AND response_json IS NULL",
+        )
+        .bind(response_json)
+        .bind(Utc::now().to_rfc3339())
+        .bind(request_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "response completion record changed concurrently".to_owned(),
+            )));
+        }
+        if let Some(operation_id) = mo_state_operation_id {
+            let changed = sqlx::query(
+                "UPDATE mo_state_operations SET phase='completed', error=NULL, updated_at=? \
+                 WHERE operation_id=? AND phase IN ('projected', 'completed')",
+            )
+            .bind(Utc::now().to_rfc3339())
+            .bind(operation_id)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+            if changed != 1 {
+                return Err(StorageError::Database(sqlx::Error::Protocol(
+                    "response completion does not have a projected MO State operation".to_owned(),
+                )));
+            }
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    /// Observes authoritative DMW/NSG source identities and stages exactly one
+    /// per-request MO State operation. Retrying an existing operation returns
+    /// its original base revisions and projected snapshot.
+    pub async fn observe_mo_state_operation(
+        &self,
+        observation: &MoStateObservation,
+    ) -> Result<MoStateOperation, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        if let Some(row) = sqlx::query(
+            "SELECT operation_id, space_id, event_type, event_fingerprint, phase, \
+             base_dmw_revision, base_nsg_revision, base_scene_revision, snapshot_json, error \
+             FROM mo_state_operations WHERE operation_id=?",
+        )
+        .bind(&observation.operation_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            let operation = mo_state_operation_from_row(&row)?;
+            if operation.space_id != observation.space_id
+                || operation.event_type != observation.event_type
+                || operation.event_fingerprint != observation.event_fingerprint
+            {
+                return Err(StorageError::MoStateOperationConflict(
+                    "operation ID was reused with different state-event content".to_owned(),
+                ));
+            }
+            transaction.rollback().await?;
+            return Ok(operation);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO mo_state_spaces \
+             (space_id, profile, created_at, updated_at) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(space_id) DO NOTHING",
+        )
+        .bind(&observation.space_id)
+        .bind(&observation.profile)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await?;
+        let row = sqlx::query(
+            "SELECT dmw_revision, nsg_revision, scene_revision, dmw_fingerprint, \
+             nsg_fingerprint, scene_fingerprint FROM mo_state_spaces WHERE space_id=?",
+        )
+        .bind(&observation.space_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let dmw_revision = next_revision(
+            row.try_get("dmw_revision")?,
+            row.try_get("dmw_fingerprint")?,
+            &observation.dmw_fingerprint,
+        );
+        let nsg_revision = next_revision(
+            row.try_get("nsg_revision")?,
+            row.try_get("nsg_fingerprint")?,
+            &observation.nsg_fingerprint,
+        );
+        let scene_revision = next_revision(
+            row.try_get("scene_revision")?,
+            row.try_get("scene_fingerprint")?,
+            &observation.scene_fingerprint,
+        );
+        sqlx::query(
+            "UPDATE mo_state_spaces SET profile=?, dmw_revision=?, nsg_revision=?, \
+             scene_revision=?, dmw_fingerprint=?, nsg_fingerprint=?, scene_fingerprint=?, \
+             scene_json=?, updated_at=? WHERE space_id=?",
+        )
+        .bind(&observation.profile)
+        .bind(dmw_revision)
+        .bind(nsg_revision)
+        .bind(scene_revision)
+        .bind(&observation.dmw_fingerprint)
+        .bind(&observation.nsg_fingerprint)
+        .bind(&observation.scene_fingerprint)
+        .bind(&observation.scene_json)
+        .bind(&now)
+        .bind(&observation.space_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO mo_state_operations \
+             (operation_id, space_id, event_type, event_fingerprint, phase, \
+              base_dmw_revision, base_nsg_revision, base_scene_revision, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'applying', ?, ?, ?, ?, ?)",
+        )
+        .bind(&observation.operation_id)
+        .bind(&observation.space_id)
+        .bind(&observation.event_type)
+        .bind(&observation.event_fingerprint)
+        .bind(dmw_revision)
+        .bind(nsg_revision)
+        .bind(scene_revision)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(MoStateOperation {
+            operation_id: observation.operation_id.clone(),
+            space_id: observation.space_id.clone(),
+            event_type: observation.event_type.clone(),
+            event_fingerprint: observation.event_fingerprint.clone(),
+            phase: "applying".to_owned(),
+            base_dmw_revision: to_revision(dmw_revision)?,
+            base_nsg_revision: to_revision(nsg_revision)?,
+            base_scene_revision: to_revision(scene_revision)?,
+            snapshot_json: None,
+            error: None,
+        })
+    }
+
+    /// Publishes one immutable projection for an operation. A retry returns the
+    /// previously published value and never advances the snapshot revision.
+    pub async fn publish_mo_state_snapshot(
+        &self,
+        operation_id: &str,
+        state_result_json: &str,
+        degraded: bool,
+        error: Option<&str>,
+    ) -> Result<MoStateSnapshot, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let operation_row = sqlx::query(
+            "SELECT operation_id, space_id, event_type, event_fingerprint, phase, \
+             base_dmw_revision, base_nsg_revision, base_scene_revision, snapshot_json, error \
+             FROM mo_state_operations WHERE operation_id=?",
+        )
+        .bind(operation_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let operation = mo_state_operation_from_row(&operation_row)?;
+        if let Some(snapshot) = operation.snapshot_json {
+            transaction.rollback().await?;
+            return serde_json::from_str(&snapshot).map_err(Into::into);
+        }
+        let state_result: serde_json::Value = serde_json::from_str(state_result_json)?;
+        let space_row = sqlx::query(
+            "SELECT profile, dmw_revision, nsg_revision, scene_revision, snapshot_revision, \
+             dmw_fingerprint, nsg_fingerprint, scene_fingerprint, scene_json \
+             FROM mo_state_spaces WHERE space_id=?",
+        )
+        .bind(&operation.space_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let snapshot_revision: i64 = space_row
+            .try_get::<i64, _>("snapshot_revision")?
+            .checked_add(1)
+            .ok_or_else(|| {
+                StorageError::MoStateOperationConflict("snapshot revision overflow".to_owned())
+            })?;
+        let created_at = Utc::now();
+        let scene_json: String = space_row.try_get("scene_json")?;
+        let mut identity = Sha256::new();
+        identity.update(operation_id.as_bytes());
+        identity.update(snapshot_revision.to_le_bytes());
+        let snapshot = MoStateSnapshot {
+            snapshot_id: format!("mos_{}", hex::encode(identity.finalize())),
+            space_id: operation.space_id.clone(),
+            profile: space_row.try_get("profile")?,
+            dmw_revision: to_revision(space_row.try_get("dmw_revision")?)?,
+            nsg_revision: to_revision(space_row.try_get("nsg_revision")?)?,
+            scene_revision: to_revision(space_row.try_get("scene_revision")?)?,
+            snapshot_revision: to_revision(snapshot_revision)?,
+            dmw_fingerprint: space_row.try_get("dmw_fingerprint")?,
+            nsg_fingerprint: space_row.try_get("nsg_fingerprint")?,
+            scene_fingerprint: space_row.try_get("scene_fingerprint")?,
+            scene: serde_json::from_str(&scene_json)?,
+            state_context: state_result
+                .get("context")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            state_audit: state_result.get("audit").cloned().unwrap_or_default(),
+            degraded,
+            created_at,
+        };
+        let snapshot_json = serde_json::to_string(&snapshot)?;
+        let now = created_at.to_rfc3339();
+        let changed = sqlx::query(
+            "UPDATE mo_state_operations SET phase='projected', snapshot_json=?, error=?, updated_at=? \
+             WHERE operation_id=? AND snapshot_json IS NULL AND phase IN ('applying', 'failed')",
+        )
+        .bind(&snapshot_json)
+        .bind(error)
+        .bind(&now)
+        .bind(operation_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(StorageError::MoStateOperationConflict(
+                "operation cannot publish a second state snapshot".to_owned(),
+            ));
+        }
+        sqlx::query(
+            "UPDATE mo_state_spaces SET snapshot_revision=?, current_snapshot_json=?, \
+             degraded=?, last_error=?, updated_at=? WHERE space_id=?",
+        )
+        .bind(snapshot_revision)
+        .bind(&snapshot_json)
+        .bind(i64::from(degraded))
+        .bind(error)
+        .bind(&now)
+        .bind(&operation.space_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(snapshot)
+    }
+
+    pub async fn fail_mo_state_operation(
+        &self,
+        operation_id: &str,
+        error: &str,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let space_id: Option<String> =
+            sqlx::query_scalar("SELECT space_id FROM mo_state_operations WHERE operation_id=?")
+                .bind(operation_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if let Some(space_id) = space_id {
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                "UPDATE mo_state_operations SET phase='failed', error=?, updated_at=? \
+                 WHERE operation_id=? AND phase != 'completed'",
+            )
+            .bind(error)
+            .bind(&now)
+            .bind(operation_id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE mo_state_spaces SET degraded=1, last_error=?, updated_at=? WHERE space_id=?",
+            )
+            .bind(error)
+            .bind(&now)
+            .bind(space_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn mo_state_runtime_status(
+        &self,
+        space_id: &str,
+    ) -> Result<Option<MoStateRuntimeStatus>, StorageError> {
+        let row = sqlx::query(
+            "SELECT space_id, profile, dmw_revision, nsg_revision, scene_revision, \
+             snapshot_revision, degraded, last_error, current_snapshot_json \
+             FROM mo_state_spaces WHERE space_id=?",
+        )
+        .bind(space_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let snapshot: Option<String> = row.try_get("current_snapshot_json")?;
+            Ok(MoStateRuntimeStatus {
+                space_id: row.try_get("space_id")?,
+                profile: row.try_get("profile")?,
+                dmw_revision: to_revision(row.try_get("dmw_revision")?)?,
+                nsg_revision: to_revision(row.try_get("nsg_revision")?)?,
+                scene_revision: to_revision(row.try_get("scene_revision")?)?,
+                snapshot_revision: to_revision(row.try_get("snapshot_revision")?)?,
+                degraded: row.try_get::<i64, _>("degraded")? != 0,
+                last_error: row.try_get("last_error")?,
+                current_snapshot: snapshot.as_deref().map(serde_json::from_str).transpose()?,
+            })
+        })
+        .transpose()
+    }
+
     pub async fn append_maintenance_turn(
         &self,
         turn: &MaintenanceTurn,
         memory_enabled: bool,
         nsg_enabled: bool,
     ) -> Result<(), StorageError> {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO maintenance_turns \
              (request_id, scope_id, user_content, assistant_content, memory_done, nsg_done, created_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING",
@@ -385,6 +852,23 @@ impl LocalStore {
         .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            let existing = sqlx::query(
+                "SELECT scope_id, user_content, assistant_content FROM maintenance_turns \
+                 WHERE request_id=?",
+            )
+            .bind(&turn.request_id)
+            .fetch_one(&self.pool)
+            .await?;
+            let same = existing.try_get::<String, _>("scope_id")? == turn.scope_id
+                && existing.try_get::<String, _>("user_content")? == turn.user_content
+                && existing.try_get::<String, _>("assistant_content")? == turn.assistant_content;
+            if !same {
+                return Err(StorageError::MaintenanceTurnConflict(
+                    turn.request_id.clone(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -450,6 +934,115 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Persists a generated patch before any file mutation. If a previous
+    /// attempt crashed, the original patch is returned and must be reused.
+    pub async fn maintenance_batch_patch(
+        &self,
+        batch_key: &str,
+    ) -> Result<Option<String>, StorageError> {
+        sqlx::query_scalar("SELECT patch_yaml FROM maintenance_batches WHERE batch_key=?")
+            .bind(batch_key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Removes a staged patch without acknowledging its source turns. This is
+    /// used only when validation proves that a persisted model response can
+    /// never be applied; the pending turns remain available for regeneration.
+    pub async fn discard_maintenance_batch(&self, batch_key: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM maintenance_batches WHERE batch_key=?")
+            .bind(batch_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn stage_maintenance_batch(
+        &self,
+        batch: &MaintenanceBatch,
+    ) -> Result<String, StorageError> {
+        let request_ids_json = serde_json::to_string(&batch.request_ids)
+            .map_err(|error| StorageError::Database(sqlx::Error::Protocol(error.to_string())))?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO maintenance_batches \
+             (batch_key, scope_id, kind, request_ids_json, patch_yaml, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_key) DO NOTHING",
+        )
+        .bind(&batch.batch_key)
+        .bind(&batch.scope_id)
+        .bind(&batch.kind)
+        .bind(&request_ids_json)
+        .bind(&batch.patch_yaml)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        let row = sqlx::query(
+            "SELECT scope_id, kind, request_ids_json, patch_yaml \
+             FROM maintenance_batches WHERE batch_key=?",
+        )
+        .bind(&batch.batch_key)
+        .fetch_one(&self.pool)
+        .await?;
+        let stored_scope: String = row.try_get("scope_id")?;
+        let stored_kind: String = row.try_get("kind")?;
+        let stored_ids: String = row.try_get("request_ids_json")?;
+        if stored_scope != batch.scope_id
+            || stored_kind != batch.kind
+            || stored_ids != request_ids_json
+        {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "maintenance batch key was reused with different inputs".to_owned(),
+            )));
+        }
+        row.try_get("patch_yaml").map_err(Into::into)
+    }
+
+    /// Atomically acknowledges the source turns and removes the durable patch.
+    pub async fn complete_maintenance_batch(
+        &self,
+        batch_key: &str,
+        request_ids: &[String],
+        kind: MaintenanceKind,
+    ) -> Result<(), StorageError> {
+        if request_ids.is_empty() {
+            return Ok(());
+        }
+        let mut transaction = self.pool.begin().await?;
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM maintenance_batches WHERE batch_key=?")
+                .bind(batch_key)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if exists != 1 {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "maintenance batch does not exist".to_owned(),
+            )));
+        }
+        let query = match kind {
+            MaintenanceKind::Memory => {
+                "UPDATE maintenance_turns SET memory_done=1 WHERE request_id=?"
+            }
+            MaintenanceKind::SemanticGraph => {
+                "UPDATE maintenance_turns SET nsg_done=1 WHERE request_id=?"
+            }
+        };
+        for request_id in request_ids {
+            sqlx::query(query)
+                .bind(request_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        sqlx::query("DELETE FROM maintenance_batches WHERE batch_key=?")
+            .bind(batch_key)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn clear_space_memory_state(
         &self,
         space_id: Uuid,
@@ -464,8 +1057,22 @@ impl LocalStore {
                 .execute(&mut *transaction)
                 .await?;
         }
+        if memory || semantic_graph {
+            sqlx::query("DELETE FROM mo_state_operations WHERE space_id=?")
+                .bind(&space_id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM mo_state_spaces WHERE space_id=?")
+                .bind(&space_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
         if memory && semantic_graph {
             sqlx::query("DELETE FROM maintenance_turns WHERE scope_id=?")
+                .bind(&space_id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM maintenance_batches WHERE scope_id=?")
                 .bind(&space_id)
                 .execute(&mut *transaction)
                 .await?;
@@ -475,12 +1082,22 @@ impl LocalStore {
                     .bind(&space_id)
                     .execute(&mut *transaction)
                     .await?;
+                sqlx::query("DELETE FROM maintenance_batches WHERE scope_id=? AND kind='memory'")
+                    .bind(&space_id)
+                    .execute(&mut *transaction)
+                    .await?;
             }
             if semantic_graph {
                 sqlx::query("UPDATE maintenance_turns SET nsg_done=1 WHERE scope_id=?")
                     .bind(&space_id)
                     .execute(&mut *transaction)
                     .await?;
+                sqlx::query(
+                    "DELETE FROM maintenance_batches WHERE scope_id=? AND kind='semantic_graph'",
+                )
+                .bind(&space_id)
+                .execute(&mut *transaction)
+                .await?;
             }
             sqlx::query(
                 "DELETE FROM maintenance_turns WHERE scope_id=? AND memory_done=1 AND nsg_done=1",
@@ -1051,4 +1668,35 @@ impl LocalStore {
         transaction.commit().await?;
         Ok(())
     }
+}
+
+fn next_revision(current: i64, previous_fingerprint: String, fingerprint: &str) -> i64 {
+    if previous_fingerprint == fingerprint {
+        current
+    } else {
+        current.saturating_add(1)
+    }
+}
+
+fn to_revision(value: i64) -> Result<u64, StorageError> {
+    u64::try_from(value).map_err(|_| {
+        StorageError::MoStateOperationConflict("persisted revision is negative".to_owned())
+    })
+}
+
+fn mo_state_operation_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<MoStateOperation, StorageError> {
+    Ok(MoStateOperation {
+        operation_id: row.try_get("operation_id")?,
+        space_id: row.try_get("space_id")?,
+        event_type: row.try_get("event_type")?,
+        event_fingerprint: row.try_get("event_fingerprint")?,
+        phase: row.try_get("phase")?,
+        base_dmw_revision: to_revision(row.try_get("base_dmw_revision")?)?,
+        base_nsg_revision: to_revision(row.try_get("base_nsg_revision")?)?,
+        base_scene_revision: to_revision(row.try_get("base_scene_revision")?)?,
+        snapshot_json: row.try_get("snapshot_json")?,
+        error: row.try_get("error")?,
+    })
 }

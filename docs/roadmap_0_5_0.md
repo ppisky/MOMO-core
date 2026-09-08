@@ -72,8 +72,8 @@ into Discord, CLI, or a model-provider implementation.
   APNG, MOC migration, ambiguous config, and native/OpenAI route claims.
 
 The remaining pre-release checks require real provider and Discord credentials;
-they are deployment smoke tests, not missing product implementations. See
-[`review_0_5_0.zh-CN.md`](review_0_5_0.zh-CN.md).
+they are deployment smoke tests, not missing product implementations. See the
+[English review](review_0_5_0.en.md) or [简体中文 review](review_0_5_0.zh-CN.md).
 
 ## 1.0 gate
 

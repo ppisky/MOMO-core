@@ -1,7 +1,12 @@
 /target
+__pycache__/
+*.pyc
+/benchmarks/data/
+/benchmarks/results/
 /.tools/
 /dist/
 /.codex-tmp/
+/.momo-data/
 /.claude/
 
 # Local runtime data and secrets

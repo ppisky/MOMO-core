@@ -1,5 +1,5 @@
 Internal Request for Comments: DMW-RFC-0014             August 08, 2026
-Category: Implementation Guide                         Status: Draft
+Category: Implementation Guide                         Status: Implemented 1.0 Contract
 Updates: DMW-RFC-0010, DMW-RFC-0013
 
 DMW-RFC-0014: MO State v1.0 — Five-Dimensional State Compiler
@@ -26,7 +26,7 @@ MO State 的产品承诺是：**打开即进入环外体验**。这里的“环�
 4. 定义 `[STATE_CONTEXT]` 的注入位置、Token 预算与格式；
 5. 定义降级路径、审计日志与风险控制。
 
-本文档为 Draft，不视为最终冻结规范。
+本文档与 MOMO Core 1.0 的确定性状态编译器保持一致，属于当前实现契约。
 
 ---
 
@@ -183,6 +183,10 @@ conflict_priority:
       condition: { ... }
       directives:
         - "{directive_text}"
+      conflicts_with:            # 可选；引用与本规则互斥的 rule id
+        - "{other_rule_id}"
+      conflict_resolution:       # 可选；本规则作为低优先级方时的兼容表述
+        - "{compatible_directive_text}"
 ```
 
 规则：
@@ -190,6 +194,10 @@ conflict_priority:
 - `id` MUST 在有效状态契约内唯一。
 - `condition` 的结构因维度而异，见 §4 各维度定义。
 - `directives` MUST 为非空字符串数组。
+- `conflicts_with` 若存在，MUST 为有效 rule id 数组；场景自动提取规则可引用
+  `scene_environment`、`nsg_constraint` 或 `nsg_consequence`。
+- `conflict_resolution` 若存在，MUST 为非空字符串数组，且仅在同时声明
+  `conflicts_with` 时有效。
 - 同一维度内，规则按数组顺序评估。
 - `match_mode: "first"`（默认）：首个命中规则生效，后续规则跳过。
 - `match_mode: "accumulate"`：所有命中规则的 `directives` 合并输出。
@@ -441,7 +449,8 @@ MFM 按有效状态契约中 `dimensions` 的声明顺序逐维度执行规则�
 
 ### 5.4 Step 5：维度间冲突仲裁
 
-当多个维度的 `directives` 存在语义冲突时，MFM MUST 按 `conflict_priority` 从高到低保留高优先级维度的指令。
+当多个维度命中的规则通过 `conflicts_with` 明确声明冲突时，MFM MUST 按
+`conflict_priority` 从高到低保留高优先级维度的指令。
 
 默认优先级：
 
@@ -451,12 +460,14 @@ scene_constraint > physiological_state > epistemic_state > relational_stance > e
 
 冲突判定规则：
 
-- 若两个维度的指令包含明确的动作矛盾（如"大声呼喊" vs "禁止核心发力"），高优先级维度的指令保留，低优先级维度的矛盾指令 MUST 被降级为兼容表述。
-- 降级表述由有效状态契约中的 `conflict_resolution` 字段预定义（可选）。若未预定义，MFM MUST 直接丢弃低优先级矛盾指令。
+- 两条命中规则中任一方的 `conflicts_with` 引用了另一方的 `id`，两者即构成冲突；引用关系按对称关系处理。
+- MFM MUST NOT 使用 LLM 或非确定性语义相似度推断未声明的自然语言冲突。
+- 高优先级维度的指令保留；低优先级规则若提供 `conflict_resolution`，MFM MUST 以该兼容表述替换原指令，否则 MUST 丢弃原指令。
+- 每个被降级或丢弃的规则使 `conflicts_resolved` 增加 `1`，同一规则含多条 directive 时不得重复计数。
 
 **维度内冲突：**
 
-若同一维度内 `match_mode: "accumulate"` 导致多条规则命中且指令矛盾：
+若同一维度内 `match_mode: "accumulate"` 导致多个通过 `conflicts_with` 声明互斥的规则命中：
 
 - MFM MUST 按规则数组顺序保留先出现的指令；
 - 后出现的矛盾指令 MUST 被丢弃；

@@ -73,4 +73,13 @@ mod tests {
         };
         assert!(request.validate().is_err());
     }
+
+    #[test]
+    fn parses_the_frozen_control_request() {
+        let request: MomoControlRequest =
+            serde_json::from_str(include_str!("../../../contracts/1.0/control_request.json"))
+                .expect("control fixture");
+        request.validate().expect("valid control fixture");
+        assert_eq!(request.schema, MOMO_CONTROL_SCHEMA);
+    }
 }

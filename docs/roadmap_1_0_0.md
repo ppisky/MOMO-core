@@ -1,7 +1,15 @@
 # MOMO Core 1.0.0 release contract
 
-**Status:** approved for a local `v1.0.0` tag; GitHub publication is prohibited pending owner testing
-**Updated:** 2026-08-31
+**Status:** `v1.0.0-rc.1` authorized for GitHub prerelease publication; the
+existing local `v1.0.0` tag remains a historical candidate and must not be
+moved or published
+
+**Updated:** 2026-09-08
+
+The checks and artifact hashes below describe the existing tagged candidate,
+not later work made after that tag. Current contract precedence is
+defined by [`spec_index.md`](spec_index.md), and the supported transport
+surface is defined by [`http_api_1_0.md`](http_api_1_0.md).
 
 MOMO 1.0 is a stability release, not a version-number-only release. Core owns
 native orchestration and portable policy, while provider and application
@@ -48,21 +56,18 @@ not compatibility surfaces.
 - [ ] Owner-run credentialed Core -> gateway -> provider smoke tests with both a
   remote HTTPS image and a bounded data URL.
 
-The local host currently has no value for the configured provider credential
-environment variables, so this external deployment check cannot be performed
-by the release build process. It does not block the authorized local tag; it
-does block GitHub publication until the owner has tested the candidate. Local
-direct-multimodal, fallback, persistence, replay, and cross-protocol tests are
-green.
+The `v1.0.0-rc.1` prerelease is authorized with this item still open. It remains
+a stable `v1.0.0` gate. Local direct-multimodal, fallback, persistence, replay,
+and cross-protocol tests are green.
 
 ## Gate 3: portable data and fail-closed validation
 
 - [x] Treat the workspace crates as implementation modules rather than
   independently published crates.io SemVer APIs; every package is marked
-  `publish = false`. The native HTTP/MOC contracts remain the product stability
-  surface.
+  `publish = false`. The versioned HTTP wire and documented portable formats
+  remain the product stability surface.
 - [x] Keep byte-identical Core/mobot `contracts/1.0` golden fixtures.
-- [x] Publish [draft migration notes](migration_0_5_0_to_1_0_0.md) for the
+- [x] Publish [migration notes](migration_0_5_0_to_1_0_0.md) for the
   `MomoApiService::execute` ownership change, multimodal gateway-message
   content type, and SQLite migration.
 - [x] Verify formatting, strict Clippy, all-feature tests, rustdoc, fixture
@@ -99,6 +104,8 @@ green.
 - [x] Commit and move the annotated local `v1.0.0` tag to the verified commit.
   Do not push the commit/tag and do not create a GitHub Release.
 - [x] Receive owner authorization for local-only commit/tag creation.
+- [x] Receive owner authorization to publish the post-tag corrections as the
+  `v1.0.0-rc.1` GitHub prerelease without moving the historical `v1.0.0` tag.
 
 ## Explicitly outside 1.0
 
@@ -106,7 +113,7 @@ Audio, video, realtime media, automatic provider failover, arbitrary vendor
 extension conversion, MOC v1 migration, incremental MOC, APNG LSB carriers,
 and lossy image carriers are not part of the 1.0 gate.
 
-## Verified local artifacts
+## Previously verified tagged artifacts
 
 - `target/release/momo-server.exe`
   SHA-256: `A67125947B96A8A0557B57736197482C31A8B118A3B829F8F47D100B6200B7E0`

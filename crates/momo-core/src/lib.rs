@@ -14,8 +14,14 @@ mod portable;
 mod response;
 mod vision;
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io::{Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use fs2::FileExt;
 use momo_memory::MemoryWorkspace;
 use momo_storage::{LocalStore, StorageError, TursoVectorStore};
 use thiserror::Error;
@@ -31,8 +37,8 @@ pub use character_compat::{
     export_preserved_character_source, import_external_character, validate_external_charx,
 };
 pub use context::{
-    ContextBudget, ContextRequest, ContextSections, PreparedContext, estimate_text_tokens,
-    prepare_context, prepare_context_with_tokenizer,
+    ContextBudget, ContextRequest, ContextSectionAudit, ContextSections, PreparedContext,
+    estimate_text_tokens, prepare_context, prepare_context_with_tokenizer,
 };
 pub use control::{MOMO_CONTROL_SCHEMA, MomoControlAction, MomoControlRequest};
 pub use embedding::{
@@ -48,14 +54,16 @@ pub use gateway::{
 };
 pub use governance::{
     GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION, MaintenancePromptConfig,
-    MomoConfig, MomoRuntimeConfig, OverrideMode, RequestOverridePolicy, RequestedOverrides,
-    VisionDescriptionConfig, validate_momo_document,
+    MoStateInjectionMode, MoStateProfile, MoStateRuntimeConfig, MomoConfig, MomoRuntimeConfig,
+    OverrideMode, RequestOverridePolicy, RequestedOverrides, VisionDescriptionConfig,
+    validate_momo_document,
 };
 pub use lsb::{
     LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,
     LsbImageFormat, LsbPayload, LsbPayloadType, MAX_LSB_IMAGE_BYTES, MAX_LSB_IMAGE_PIXELS,
-    MAX_LSB_PAYLOAD_BYTES, embed_lsb_carrier, embed_lsb_image, embed_lsb_png, embed_lsb_webp,
-    extract_lsb_carrier, extract_lsb_image, extract_lsb_png, extract_lsb_webp, lsb_capacity,
+    MAX_LSB_PAYLOAD_BYTES, MOMO_LSB_CHARACTER_SCHEMA, embed_lsb_carrier, embed_lsb_image,
+    embed_lsb_png, embed_lsb_webp, extract_lsb_carrier, extract_lsb_image, extract_lsb_png,
+    extract_lsb_webp, lsb_capacity,
 };
 pub use momo_config;
 pub use momo_crypto;
@@ -93,6 +101,12 @@ pub use vision::{
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error("data directory {path} is already owned by another MOMO Core process: {source}")]
+    InstanceLock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("local storage initialization failed: {0}")]
     Storage(#[from] StorageError),
     #[error("memory initialization failed: {0}")]
@@ -102,6 +116,7 @@ pub enum CoreError {
 #[derive(Debug, Clone)]
 pub struct MomoCore {
     data_dir: PathBuf,
+    _instance_lock: Arc<File>,
     store: LocalStore,
     vector_store: TursoVectorStore,
 }
@@ -110,12 +125,14 @@ impl MomoCore {
     pub async fn initialize(data_dir: impl AsRef<Path>) -> Result<Self, CoreError> {
         let data_dir = data_dir.as_ref();
         std::fs::create_dir_all(data_dir).map_err(momo_memory::MemoryError::from)?;
+        let instance_lock = acquire_instance_lock(data_dir)?;
         let store = LocalStore::open(data_dir.join("momo.sqlite3")).await?;
         let vector_store = TursoVectorStore::open(data_dir.join("nsg-vectors.db")).await?;
         migrate_space_directories(data_dir)?;
         std::fs::create_dir_all(data_dir.join("spaces")).map_err(momo_memory::MemoryError::from)?;
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
+            _instance_lock: Arc::new(instance_lock),
             store,
             vector_store,
         })
@@ -147,6 +164,31 @@ impl MomoCore {
                 .join("memory"),
         )
     }
+}
+
+fn acquire_instance_lock(data_dir: &Path) -> Result<File, CoreError> {
+    let path = data_dir.join(".momo.lock");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|source| CoreError::InstanceLock {
+            path: path.clone(),
+            source,
+        })?;
+    file.try_lock_exclusive()
+        .map_err(|source| CoreError::InstanceLock {
+            path: path.clone(),
+            source,
+        })?;
+    file.set_len(0)
+        .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
+        .and_then(|()| writeln!(file, "pid={}", std::process::id()))
+        .and_then(|()| file.sync_data())
+        .map_err(|source| CoreError::InstanceLock { path, source })?;
+    Ok(file)
 }
 
 fn migrate_space_directories(data_dir: &Path) -> Result<(), CoreError> {
@@ -253,5 +295,21 @@ mod tests {
                 .join("memory/marker")
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn data_directory_has_one_live_owner() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let first = MomoCore::initialize(directory.path())
+            .await
+            .expect("first owner");
+        let error = MomoCore::initialize(directory.path())
+            .await
+            .expect_err("second owner must be rejected");
+        assert!(matches!(error, CoreError::InstanceLock { .. }));
+        drop(first);
+        MomoCore::initialize(directory.path())
+            .await
+            .expect("lock is released when owner drops");
     }
 }

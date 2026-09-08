@@ -3,7 +3,7 @@
 ```text
 Standard: MOMO-STD-0005                              August 30, 2026
 Category: Specification
-Status: Pre-release implementation contract (v3.0.0)
+Status: Implemented MOMO Core 1.0 contract (v3.0.0)
 ```
 
 ## 1. Purpose

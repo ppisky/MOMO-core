@@ -27,6 +27,8 @@ struct ChatStreamJsonRequest {
 #[serde(deny_unknown_fields)]
 struct PrepareContextJsonRequest {
     #[serde(default)]
+    runtime_instructions: String,
+    #[serde(default)]
     character_markdown: String,
     #[serde(default)]
     user_markdown: String,
@@ -88,6 +90,7 @@ pub fn prepare_context_json(request_json: String) -> Result<String, String> {
         serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
     let prepared = prepare_context(ContextRequest {
         sections: ContextSections {
+            runtime_instructions: &request.runtime_instructions,
             character: &request.character_markdown,
             user: &request.user_markdown,
             memory: &request.memory_markdown,

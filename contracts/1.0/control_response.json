@@ -1,0 +1,12 @@
+{
+  "schema": "momo.control/1.0",
+  "request_id": "contract-control-1001",
+  "actor_space_id": "01900000-0000-7000-8000-000000000101",
+  "result": {
+    "type": "clear_memory",
+    "target_space_id": "01900000-0000-7000-8000-000000000101",
+    "memory": true,
+    "semantic_graph": false,
+    "removed_files": 3
+  }
+}

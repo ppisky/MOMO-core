@@ -265,7 +265,7 @@ pub(super) fn model_api_error(error: String) -> ApiError {
     ApiError::bad_gateway(error)
 }
 
-fn momo_api_error(error: MomoApiError) -> ApiError {
+pub(super) fn momo_api_error(error: MomoApiError) -> ApiError {
     match error.kind {
         MomoApiErrorKind::BadRequest => ApiError::bad_request(error.message),
         MomoApiErrorKind::Conflict => ApiError::conflict(error.message),

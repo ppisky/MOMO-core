@@ -1,6 +1,7 @@
 //! Dual-Mem Wiki workspace, deterministic retrieval, and YAML patch execution.
 
 pub mod nsg;
+pub mod scene;
 pub mod state;
 
 mod filesystem;
@@ -21,6 +22,7 @@ use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
 pub use momo_domain::SCHEMA_GENERATION;
+pub use scene::{MoStateSourceFingerprint, SceneSnapshot, SceneStatus};
 pub use state::{MoStateAudit, MoStateContext};
 
 use filesystem::*;
@@ -65,6 +67,7 @@ const MAX_EXPANSION_TOTAL: usize = 15;
 const HUB_THRESHOLD: usize = 15;
 const DIRECT_RESERVE_RATIO_NUMERATOR: usize = 60;
 const EXPANSION_MAX_RATIO_NUMERATOR: usize = 35;
+const CROSS_LANGUAGE_FALLBACK_LIMIT: usize = 2;
 const HIT_REFRESH_LIMIT: usize = 5;
 
 #[derive(Debug, Error)]
@@ -222,6 +225,10 @@ struct IndexEntry {
     aliases: Vec<String>,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    body_identifiers: Vec<String>,
+    #[serde(default)]
+    body_terms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -288,7 +295,7 @@ impl AccessConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievedMemory {
     pub id: String,
     pub path: PathBuf,
@@ -298,6 +305,21 @@ pub struct RetrievedMemory {
     pub injection_scope: Option<String>,
     pub injection_conversation_id: Option<String>,
     pub injection_character_id: Option<String>,
+    /// Metadata required by the read-only MO State compiler. Keeping it in the
+    /// retrieval result prevents state compilation from re-reading memory
+    /// files and accidentally observing a different filesystem snapshot.
+    #[serde(default)]
+    pub state_signal: Option<RetrievedStateSignal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RetrievedStateSignal {
+    pub kind: String,
+    pub weight: f64,
+    pub touch_at: i64,
+    pub tags: Vec<String>,
+    pub relations: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -496,6 +518,8 @@ fn update_index_entry(
             kind: metadata.kind.clone(),
             aliases,
             tags: metadata.tags.clone(),
+            body_identifiers: retrieval::body_identifiers(&document.body),
+            body_terms: retrieval::body_terms(&document.body),
         },
     );
     Ok(())

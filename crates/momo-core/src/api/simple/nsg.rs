@@ -92,6 +92,7 @@ pub async fn nsg_vector_status_json(
 
 pub async fn run_memory_maintenance_json(scope_id: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let report = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?
@@ -106,6 +107,7 @@ pub async fn apply_nsg_patch_json(
     manual_authority: bool,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let memory = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
@@ -139,6 +141,7 @@ pub async fn approve_nsg_pending_candidate_json(
     pending_path: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let memory = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
@@ -154,6 +157,7 @@ pub async fn reject_nsg_pending_candidate_json(
     pending_path: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let memory = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
@@ -187,6 +191,7 @@ pub async fn write_nsg_node_json(
     node_json: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let node = serde_json::from_str(&node_json).map_err(|error| error.to_string())?;
     let memory = core()?
         .memory_for_space(scope_id)
@@ -203,6 +208,7 @@ pub async fn archive_nsg_node_json(
     target_file: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let memory = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
@@ -215,6 +221,7 @@ pub async fn archive_nsg_node_json(
 
 pub async fn delete_nsg_node_json(scope_id: String, target_file: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let memory = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;

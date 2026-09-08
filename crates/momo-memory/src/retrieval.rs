@@ -4,32 +4,134 @@ use super::*;
 pub(super) struct QueryHit {
     pub(super) candidate: bool,
     pub(super) substantive: bool,
+    pub(super) matched_terms: usize,
 }
 
 pub(super) fn query_hit(entry: &IndexEntry, id: &str, normalized_query: &str) -> QueryHit {
     let mut candidate = false;
-    let mut substantive_terms = 0_usize;
-    for term in entry.aliases.iter().chain(entry.tags.iter()) {
+    let mut matched_terms = HashSet::new();
+    let query_terms = searchable_terms(normalized_query);
+    // Aliases are human-readable phrases, so matching their individual words
+    // supports queries such as "silver astrolabe" against a longer title.
+    for term in &entry.aliases {
         let term = normalize(term);
-        if term.is_empty() || !normalized_query.contains(&term) {
+        if term.is_empty() {
             continue;
         }
-        candidate = true;
-        if !is_generic_term(&term) {
-            substantive_terms += 1;
+        if normalized_query.contains(&term) {
+            candidate = true;
+            for token in searchable_terms(&term) {
+                if !is_generic_term(&token) {
+                    matched_terms.insert(token);
+                }
+            }
+            continue;
+        }
+        for token in searchable_terms(&term) {
+            if query_terms.contains(&token) && !is_generic_term(&token) {
+                candidate = true;
+                matched_terms.insert(token);
+            }
+        }
+    }
+    // Tags and IDs are structured identifiers. Splitting `unique_00049` and
+    // matching its shared `unique` prefix would select every `unique_*` item.
+    for term in &entry.tags {
+        let term = normalize(term);
+        if !term.is_empty() && normalized_query.contains(&term) {
+            candidate = true;
+            for token in searchable_terms(&term) {
+                if !is_generic_term(&token) {
+                    matched_terms.insert(token);
+                }
+            }
+        }
+    }
+    for identifier in &entry.body_identifiers {
+        if query_terms.contains(identifier) {
+            candidate = true;
+            matched_terms.insert(identifier.clone());
+        }
+    }
+    // Generated memories do not always have useful aliases or tags. Index
+    // meaningful body terms as a deterministic fallback so a document that
+    // actually contains the queried entities remains reachable. Exact token
+    // membership avoids the structured-prefix fan-out fixed above.
+    for term in &entry.body_terms {
+        if query_terms.contains(term) {
+            candidate = true;
+            matched_terms.insert(term.clone());
         }
     }
     let id_term = normalize(id);
     if !id_term.is_empty() && normalized_query.contains(&id_term) {
         candidate = true;
         if !is_generic_term(&id_term) {
-            substantive_terms += 1;
+            matched_terms.insert(id_term);
         }
     }
     QueryHit {
         candidate,
-        substantive: substantive_terms > 0,
+        substantive: !matched_terms.is_empty(),
+        matched_terms: matched_terms.len(),
     }
+}
+
+fn searchable_terms(value: &str) -> HashSet<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .flat_map(segment_terms)
+        .collect()
+}
+
+fn segment_terms(segment: &str) -> Vec<String> {
+    let mut runs = Vec::<String>::new();
+    for character in segment.chars() {
+        let starts_new_run = runs.last().is_some_and(|run| {
+            run.chars()
+                .next()
+                .is_some_and(|first| first.is_ascii() != character.is_ascii())
+        });
+        if starts_new_run || runs.is_empty() {
+            runs.push(String::new());
+        }
+        runs.last_mut().expect("run exists").push(character);
+    }
+    runs.into_iter()
+        .flat_map(|run| {
+            let characters = run.chars().collect::<Vec<_>>();
+            if characters.len() > 2 && characters.iter().all(|character| !character.is_ascii()) {
+                characters
+                    .windows(2)
+                    .map(|pair| pair.iter().collect())
+                    .collect()
+            } else {
+                vec![run]
+            }
+        })
+        .collect()
+}
+
+pub(super) fn body_identifiers(body: &str) -> Vec<String> {
+    let mut identifiers = searchable_terms(&normalize(body))
+        .into_iter()
+        .filter(|term| {
+            term.chars().any(|c| c.is_ascii_alphabetic())
+                && term.chars().any(|c| c.is_ascii_digit())
+        })
+        .collect::<Vec<_>>();
+    identifiers.sort();
+    identifiers
+}
+
+pub(super) fn body_terms(body: &str) -> Vec<String> {
+    let mut terms = searchable_terms(&normalize(body))
+        .into_iter()
+        .filter(|term| !is_generic_term(term))
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms
 }
 
 pub(super) fn is_generic_term(term: &str) -> bool {
@@ -53,6 +155,26 @@ pub(super) fn is_generic_term(term: &str) -> bool {
                 | "城市"
                 | "魔法"
         )
+}
+
+pub(super) fn uses_non_ascii_words(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character.is_alphanumeric() && !character.is_ascii())
+}
+
+pub(super) fn is_cross_language_fallback(query: &str, body: &str) -> bool {
+    let query_non_ascii = uses_non_ascii_words(query);
+    let body_non_ascii = uses_non_ascii_words(body);
+    let query_ascii_words = query
+        .chars()
+        .any(|character| character.is_ascii_alphabetic());
+    let body_ascii_words = body
+        .chars()
+        .any(|character| character.is_ascii_alphabetic());
+
+    (query_non_ascii && body_ascii_words && !body_non_ascii)
+        || (body_non_ascii && query_ascii_words && !query_non_ascii)
 }
 
 pub(super) fn explicit_memory_references(text: &str) -> HashSet<String> {

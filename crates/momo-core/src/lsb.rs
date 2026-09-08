@@ -13,6 +13,7 @@ use thiserror::Error;
 
 pub const LSB_CARRIER_MAGIC: &[u8; 8] = b"MOMOLSB1";
 pub const LSB_CARRIER_VERSION: u8 = 1;
+pub const MOMO_LSB_CHARACTER_SCHEMA: &str = "momo.character/1.0";
 pub const LSB_HEADER_BYTES: usize = 24;
 pub const MAX_LSB_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_LSB_IMAGE_BYTES: usize = 128 * 1024 * 1024;
@@ -589,7 +590,7 @@ mod tests {
             .to_rgba8();
         let mut tailed = original.clone();
         tailed.extend_from_slice(b"UNRELATED-TRAILING-ARCHIVE");
-        let payload = br#"{"schema":"momo.character/0.5","name":"MOMO"}"#;
+        let payload = br#"{"schema":"momo.character/1.0","name":"MOMO"}"#;
         let carrier = embed_lsb_png(&tailed, LsbPayloadType::CharacterData, payload, true)
             .expect("embed PNG");
         assert!(!carrier.ends_with(b"UNRELATED-TRAILING-ARCHIVE"));

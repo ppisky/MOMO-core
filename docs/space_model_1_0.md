@@ -2,7 +2,7 @@
 
 **Status:** normative pre-release contract  
 **Compatibility:** replaces the unpublished Scope-shaped 1.0 request contract  
-**Updated:** 2026-08-30
+**Updated:** 2026-09-05
 
 ## 1. Instance root is not a Space
 
@@ -90,8 +90,9 @@ The response access scope contains zero or more memory sources:
 }
 ```
 
-Weights are integers from 1 through 100. They affect deterministic ranking and
-budget allocation; they do not grant access. Duplicate Space IDs, unknown
+Weights are integers from 1 through 100. They divide the retrieval token budget
+between Spaces; ranking remains deterministic inside each Space. They do not
+grant access. Duplicate Space IDs, unknown
 fields, zero weights, and weights above 100 are rejected. The host MUST
 authorize every listed Space before calling Core.
 
@@ -126,6 +127,17 @@ Every destructive Core control carries a unique request ID, an actor Space, an
 explicit target Space, and the exact target resource or modules. Core validates
 UUID syntax, ownership, action bounds and idempotent replay. It fails closed on
 an ownership mismatch. End-user authorization remains a host responsibility.
+
+Control operation identity is `actor_space_id` plus `request_id`. Once an
+operation completes, an identical retry returns the stored response without
+executing the action again. Reusing the same identity with different action
+content is an idempotency conflict. A concurrent retry while the first attempt
+is still running is also rejected as a conflict and may be retried later.
+
+An interrupted, incomplete claim is released when the sole owner of the Core
+data directory initializes again. Retrying the same action is safe because the
+defined controls converge on an explicit target state. Completed response
+records remain durable and replay byte-for-byte.
 
 ## 6. Group behaviour
 

@@ -3,6 +3,7 @@
 use super::*;
 
 const MAX_MEMORY_SPACES: usize = 16;
+const HYBRID_DMW_BUDGET_PERCENT: usize = 60;
 
 /// A client-defined memory namespace participating in one retrieval. Core does
 /// not attach platform semantics to the namespace; labels are returned only so
@@ -167,6 +168,37 @@ fn weighted_space_budgets(sources: &[MemorySpaceSource], max_tokens: usize) -> V
     budgets
 }
 
+fn dmw_retrieval_budget(
+    max_tokens: usize,
+    include_memory: bool,
+    include_semantic_graph: bool,
+) -> usize {
+    match (include_memory, include_semantic_graph) {
+        // DMW and NSG often hold complementary facts. Keep enough room for a
+        // complete graph node instead of allowing current DMW documents to
+        // consume nearly the whole retrieval budget before NSG runs.
+        (true, true) => max_tokens.saturating_mul(HYBRID_DMW_BUDGET_PERCENT) / 100,
+        (true, false) => max_tokens,
+        (false, _) => 0,
+    }
+}
+
+fn effective_dmw_retrieval_budget(
+    max_tokens: usize,
+    include_memory: bool,
+    include_semantic_graph: bool,
+    nsg_tokens: usize,
+) -> usize {
+    if include_memory && include_semantic_graph {
+        // Reserve NSG room before it runs, then return every unused token to
+        // DMW. An empty graph result must not strand forty percent of the
+        // context window and evict a directly related memory document.
+        max_tokens.saturating_sub(nsg_tokens)
+    } else {
+        dmw_retrieval_budget(max_tokens, include_memory, include_semantic_graph)
+    }
+}
+
 pub async fn retrieve_memory_json(
     scope_id: String,
     query: String,
@@ -212,33 +244,36 @@ async fn retrieve_memory(plan: RetrievalPlan) -> Result<String, String> {
     } else {
         Vec::new()
     };
-    let memory_budget = match (plan.include_memory, plan.include_semantic_graph) {
-        (true, true) => plan.max_tokens.saturating_mul(3) / 4,
-        (true, false) => plan.max_tokens,
-        (false, _) => 0,
-    };
-    let memories = if plan.include_memory {
-        workspace
-            .retrieve(
-                &plan.query,
-                memory_budget,
-                &momo_memory::ConservativeTokenCounter,
-            )
-            .map_err(|error| error.to_string())?
-    } else {
-        Vec::new()
-    };
-    let memory_tokens = memories
-        .iter()
-        .map(|item| item.estimated_tokens)
-        .sum::<usize>();
+    let reserved_memory_budget = dmw_retrieval_budget(
+        plan.max_tokens,
+        plan.include_memory,
+        plan.include_semantic_graph,
+    );
     let nsg = if plan.include_semantic_graph {
         momo_memory::nsg::NsgWorkspace::initialize(workspace.root())
             .map_err(|error| error.to_string())?
             .retrieve(
                 &plan.query,
                 &vector_ranked_ids,
-                plan.max_tokens.saturating_sub(memory_tokens),
+                plan.max_tokens.saturating_sub(reserved_memory_budget),
+                &momo_memory::ConservativeTokenCounter,
+            )
+            .map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
+    let nsg_tokens = nsg.iter().map(|item| item.estimated_tokens).sum::<usize>();
+    let memory_budget = effective_dmw_retrieval_budget(
+        plan.max_tokens,
+        plan.include_memory,
+        plan.include_semantic_graph,
+        nsg_tokens,
+    );
+    let memories = if plan.include_memory {
+        workspace
+            .retrieve(
+                &plan.query,
+                memory_budget,
                 &momo_memory::ConservativeTokenCounter,
             )
             .map_err(|error| error.to_string())?
@@ -302,11 +337,26 @@ pub async fn apply_memory_patch_json(
     patch_yaml: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let workspace = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     workspace
         .apply_patch(&patch_yaml)
+        .map_err(|error| error.to_string())?;
+    Ok("ok".to_owned())
+}
+
+pub async fn validate_memory_patch_json(
+    scope_id: String,
+    patch_yaml: String,
+) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
+    core()?
+        .memory_for_space(scope_id)
+        .map_err(|error| error.to_string())?
+        .validate_patch(&patch_yaml)
         .map_err(|error| error.to_string())?;
     Ok("ok".to_owned())
 }
@@ -463,6 +513,7 @@ pub async fn update_memory_document_json(
     markdown: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let workspace = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
@@ -480,6 +531,7 @@ pub async fn archive_memory_document_json(
     document_id: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let workspace = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
@@ -506,6 +558,7 @@ pub async fn restore_memory_document_json(
     document_id: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let workspace = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
@@ -520,6 +573,7 @@ pub async fn delete_memory_document_json(
     document_id: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let workspace = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
@@ -561,5 +615,34 @@ mod space_tests {
             source("01900000-0000-7000-8000-000000000101", "room", 1),
         ];
         assert!(validate_memory_spaces(&sources).is_err());
+    }
+
+    #[test]
+    fn hybrid_retrieval_reserves_forty_percent_for_nsg() {
+        let max_tokens = 961;
+        let memory_budget = dmw_retrieval_budget(max_tokens, true, true);
+        assert_eq!(memory_budget, 576);
+        assert_eq!(max_tokens - memory_budget, 385);
+    }
+
+    #[test]
+    fn hybrid_retrieval_returns_unused_nsg_budget_to_dmw() {
+        let max_tokens = 961;
+        assert_eq!(
+            effective_dmw_retrieval_budget(max_tokens, true, true, 0),
+            961
+        );
+        assert_eq!(
+            effective_dmw_retrieval_budget(max_tokens, true, true, 233),
+            728
+        );
+        assert_eq!(
+            effective_dmw_retrieval_budget(max_tokens, true, false, 0),
+            961
+        );
+        assert_eq!(
+            effective_dmw_retrieval_budget(max_tokens, false, true, 233),
+            0
+        );
     }
 }

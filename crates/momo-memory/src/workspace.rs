@@ -1,5 +1,15 @@
 use super::*;
 
+fn retrieved_state_signal(document: &MemoryDocument) -> RetrievedStateSignal {
+    RetrievedStateSignal {
+        kind: document.metadata.kind.clone(),
+        weight: document.metadata.weight.unwrap_or_default(),
+        touch_at: document.metadata.touch_at,
+        tags: document.metadata.tags.clone(),
+        relations: document.metadata.relations.clone(),
+    }
+}
+
 impl MemoryWorkspace {
     pub fn initialize(root: impl AsRef<Path>) -> Result<Self, MemoryError> {
         fs::create_dir_all(root.as_ref())?;
@@ -28,8 +38,16 @@ impl MemoryWorkspace {
         ] {
             let path = root.join("current").join(name);
             if regular_file_exists(&path)? {
+                if name == "scene.md" {
+                    upgrade_empty_legacy_scene(&path)?;
+                }
                 continue;
             }
+            let body = if name == "scene.md" {
+                initial_scene_body(title)
+            } else {
+                format!("# {title}\n\n")
+            };
             let document = MemoryDocument {
                 metadata: Metadata {
                     id: id.to_owned(),
@@ -47,7 +65,7 @@ impl MemoryWorkspace {
                     aliases: Vec::new(),
                     status: "active".to_owned(),
                 },
-                body: format!("# {title}\n\n"),
+                body,
             };
             atomic_write(&path, &document.encode()?)?;
         }
@@ -238,6 +256,7 @@ impl MemoryWorkspace {
                 injection_scope: document.metadata.injection_scope.clone(),
                 injection_conversation_id: document.metadata.injection_conversation_id.clone(),
                 injection_character_id: document.metadata.injection_character_id.clone(),
+                state_signal: Some(retrieved_state_signal(&document)),
             });
         }
         if hot_over_budget {
@@ -250,6 +269,7 @@ impl MemoryWorkspace {
 
         let normalized_query = normalize(query);
         let mut direct_pool = Vec::new();
+        let mut relevance = HashMap::new();
         let mut by_id = HashMap::new();
 
         for (id, entry) in &index.entries {
@@ -268,6 +288,7 @@ impl MemoryWorkspace {
                     )));
                 }
                 if document.metadata.status == "active" {
+                    relevance.insert(id.clone(), (hot_reference_hit, query_hit.matched_terms));
                     if query_hit.substantive || hot_reference_hit {
                         touch_ids.insert(id.clone());
                     }
@@ -275,7 +296,12 @@ impl MemoryWorkspace {
                 }
             }
         }
-        direct_pool.sort_by(compare_documents);
+        let compare_direct = |left: &(String, MemoryDocument), right: &(String, MemoryDocument)| {
+            relevance[&right.1.metadata.id]
+                .cmp(&relevance[&left.1.metadata.id])
+                .then_with(|| compare_documents(left, right))
+        };
+        direct_pool.sort_by(compare_direct);
         let related_ids = direct_pool
             .iter()
             .take(EXPANSION_SOURCE_LIMIT)
@@ -320,8 +346,36 @@ impl MemoryWorkspace {
                 }
             }
         }
-        direct_pool.sort_by(compare_documents);
+        direct_pool.sort_by(compare_direct);
         expansion_pool.sort_by(compare_documents);
+        // A distiller may preserve a fact while rendering it in a different
+        // language from a later query. With no embedding configured, exact
+        // lexical retrieval then has no possible hit. Only when there are no
+        // direct matches, admit a small number of high-value active documents
+        // whose script differs from the query. This keeps ordinary same-
+        // language negative queries exact and bounds unrelated context.
+        let mut cross_language_fallback = Vec::new();
+        if direct_pool.is_empty() {
+            for (id, entry) in &index.entries {
+                if !access.can_read(&entry.kind) {
+                    continue;
+                }
+                let document = self.read_unchecked(Path::new(&entry.path))?;
+                if document.metadata.id != *id {
+                    return Err(MemoryError::InvalidIndex(format!(
+                        "entry {id} points to document {}",
+                        document.metadata.id
+                    )));
+                }
+                if document.metadata.status == "active"
+                    && is_cross_language_fallback(&normalized_query, &document.body)
+                {
+                    cross_language_fallback.push((entry.path.clone(), document));
+                }
+            }
+            cross_language_fallback.sort_by(compare_documents);
+            cross_language_fallback.truncate(CROSS_LANGUAGE_FALLBACK_LIMIT);
+        }
 
         let remaining_memory_budget = max_tokens.saturating_sub(used);
         let direct_budget =
@@ -332,18 +386,20 @@ impl MemoryWorkspace {
         let mut expansion_used = 0_usize;
 
         for (path, document) in &direct_pool {
-            let tokens = counter.count(&document.body);
-            if used.saturating_add(tokens) > max_tokens
-                || (!expansion_pool.is_empty()
-                    && direct_used.saturating_add(tokens) > direct_budget
-                    && direct_used > 0)
-            {
+            let remaining = max_tokens.saturating_sub(used);
+            let allowed = if !expansion_pool.is_empty() && direct_used > 0 {
+                remaining.min(direct_budget.saturating_sub(direct_used))
+            } else {
+                remaining
+            };
+            let body = markdown_prefix_within_budget(&document.body, allowed, counter);
+            if body.is_empty() {
                 continue;
             }
+            let tokens = counter.count(&body);
             used += tokens;
             direct_used += tokens;
             let id = document.metadata.id.clone();
-            let body = document.body.clone();
             let source_character_ids = document
                 .metadata
                 .relations
@@ -360,6 +416,7 @@ impl MemoryWorkspace {
                 injection_scope: document.metadata.injection_scope.clone(),
                 injection_conversation_id: document.metadata.injection_conversation_id.clone(),
                 injection_character_id: document.metadata.injection_character_id.clone(),
+                state_signal: Some(retrieved_state_signal(document)),
             });
         }
         for (path, document) in &expansion_pool {
@@ -387,6 +444,32 @@ impl MemoryWorkspace {
                 injection_scope: document.metadata.injection_scope.clone(),
                 injection_conversation_id: document.metadata.injection_conversation_id.clone(),
                 injection_character_id: document.metadata.injection_character_id.clone(),
+                state_signal: Some(retrieved_state_signal(document)),
+            });
+        }
+        for (path, document) in &cross_language_fallback {
+            let tokens = counter.count(&document.body);
+            if used.saturating_add(tokens) > max_tokens {
+                continue;
+            }
+            used += tokens;
+            let id = document.metadata.id.clone();
+            loaded_ids.push(id.clone());
+            result.push(RetrievedMemory {
+                id,
+                path: PathBuf::from(path.clone()),
+                body: document.body.clone(),
+                estimated_tokens: tokens,
+                source_character_ids: document
+                    .metadata
+                    .relations
+                    .get("characters")
+                    .cloned()
+                    .unwrap_or_default(),
+                injection_scope: document.metadata.injection_scope.clone(),
+                injection_conversation_id: document.metadata.injection_conversation_id.clone(),
+                injection_character_id: document.metadata.injection_character_id.clone(),
+                state_signal: Some(retrieved_state_signal(document)),
             });
         }
         let loaded_long_term = result
@@ -926,14 +1009,9 @@ impl MemoryWorkspace {
                 .iter()
                 .filter(|operation| matches!(operation, PatchOperation::Create { .. }))
                 .count();
+            let mut replayed_create = false;
             let mut document = if creates == 1 && item.operations.len() == 1 {
-                if regular_file_exists(&path)? {
-                    return Err(MemoryError::InvalidPatch(format!(
-                        "create target exists: {}",
-                        item.target_file
-                    )));
-                }
-                match item.operations.into_iter().next() {
+                let mut proposed = match item.operations.into_iter().next() {
                     Some(PatchOperation::Create {
                         frontmatter,
                         content,
@@ -942,6 +1020,20 @@ impl MemoryWorkspace {
                         body: content,
                     },
                     _ => unreachable!(),
+                };
+                if regular_file_exists(&path)? {
+                    let existing = self.read_unchecked(&relative)?;
+                    proposed.metadata.touch_at = existing.metadata.touch_at;
+                    if proposed != existing {
+                        return Err(MemoryError::InvalidPatch(format!(
+                            "create target exists with different content: {}",
+                            item.target_file
+                        )));
+                    }
+                    replayed_create = true;
+                    existing
+                } else {
+                    proposed
                 }
             } else {
                 if creates != 0 || item.operations.is_empty() {
@@ -959,7 +1051,9 @@ impl MemoryWorkspace {
                 }
                 document
             };
-            document.metadata.touch_at = now;
+            if !replayed_create {
+                document.metadata.touch_at = now;
+            }
             validate_document_location(&relative, &document.metadata)?;
             if creates == 1
                 && (document.metadata.status != "active" || document.metadata.kind == "current")
@@ -968,7 +1062,8 @@ impl MemoryWorkspace {
                     "created memories must be active long-term memories".to_owned(),
                 ));
             }
-            if creates == 1 && index.entries.contains_key(&document.metadata.id) {
+            if creates == 1 && !replayed_create && index.entries.contains_key(&document.metadata.id)
+            {
                 return Err(MemoryError::InvalidPatch(format!(
                     "duplicate memory id: {}",
                     document.metadata.id
@@ -1151,6 +1246,8 @@ impl MemoryWorkspace {
                 kind: document.metadata.kind.clone(),
                 aliases,
                 tags: document.metadata.tags.clone(),
+                body_identifiers: retrieval::body_identifiers(&document.body),
+                body_terms: retrieval::body_terms(&document.body),
             };
             if entries.insert(id.clone(), entry).is_some() {
                 return Err(MemoryError::InvalidIndex(format!(
@@ -1195,4 +1292,33 @@ impl MemoryWorkspace {
         }
         Ok(paths)
     }
+}
+
+fn initial_scene_body(title: &str) -> String {
+    format!(
+        "# {title}\n\n## Scene ID\nscene_initial\n\n## Status\ninactive\n\n## Location\n\n## Timeframe\n\n## Participants\n\n## Focus\n\n## Open Threads\n\n## Constraints\n\n## Source References\n\n"
+    )
+}
+
+fn upgrade_empty_legacy_scene(path: &Path) -> Result<(), MemoryError> {
+    let encoded = fs::read_to_string(path)?;
+    let mut document = MemoryDocument::parse(&encoded)?;
+    let has_structured_sections = document.body.lines().any(|line| line.starts_with("## "));
+    let has_content = document
+        .body
+        .lines()
+        .map(str::trim)
+        .any(|line| !line.is_empty() && !line.starts_with('#'));
+    if has_structured_sections || has_content {
+        return Ok(());
+    }
+
+    let title = document
+        .body
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# "))
+        .filter(|title| !title.is_empty())
+        .unwrap_or("当前场景");
+    document.body = initial_scene_body(title);
+    atomic_write(path, &document.encode()?)
 }

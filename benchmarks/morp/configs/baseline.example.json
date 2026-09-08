@@ -1,0 +1,1 @@
+{"backend":"openai","base_url":"https://provider.example/v1","api_key_env":"MORP_CANDIDATE_API_KEY","model":"REPLACE_WITH_MODEL_ID","revision":"REPLACE_WITH_MODEL_REVISION","temperature":0,"max_output_tokens":512,"timeout_seconds":60}

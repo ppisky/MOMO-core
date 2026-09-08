@@ -1,6 +1,6 @@
 # MOMO LSB Carrier v1
 
-**状态：** 0.5.0 profile
+**状态：** MOMO Core 1.0 已实现 profile
 
 MOMO LSB Carrier v1 是 MOMO 自有的角色图片载体扩展，不属于 Character Card、CHARX、
 PNG 或 WebP 标准。它把一个载荷写入同一张图片解码后像素的 RGB 通道最低有效位；
@@ -31,9 +31,36 @@ alpha 通道不参与编码，也不在文件尾追加第二个文件或隐藏�
 每张载体只含一个 payload；MOC payload 是完整 `.moc` 字节，图片尾部不追加 metadata
 或第二份兼容数据。
 
+### Type 1 角色载荷
+
+Type 1 的解压后字节必须是 UTF-8 JSON，结构固定为：
+
+```json
+{
+  "schema": "momo.character/1.0",
+  "character": {
+    "id": "<character-uuid>",
+    "owner_space_id": "<owner-space-uuid>",
+    "name": "...",
+    "version": "...",
+    "author_name": "...",
+    "author_url": null,
+    "character_markdown": "...",
+    "user_markdown": "...",
+    "opening_markdown": null,
+    "created_at": "<RFC3339>",
+    "updated_at": "<RFC3339>"
+  }
+}
+```
+
+`schema` 必须显式存在并精确等于 `momo.character/1.0`。未知顶层字段不属于该版本。
+`owner_space_id` 是管理与导出归属，不改变全局 `character.id`。Type 1 不携带 CHARX
+资产或来源扩展；需要完整来源往返时应使用 Type 2 MOC 或 Type 3 CHARX。
+
 ## 可移植性边界
 
-0.5 的文件接口支持静态 PNG 与无损 WebP，并拒绝 APNG、animated WebP、JPEG 和 AVIF。
+1.0 的文件接口支持静态 PNG 与无损 WebP，并拒绝 APNG、animated WebP、JPEG 和 AVIF。
 载体只依赖解码后的像素样本，因此删除无关尾部、删除元数据、重排 PNG chunk，或换成
 能逐样本保真的无损容器后仍可解码。任何缩放、裁剪、滤镜、颜色空间量化、有损重压缩
 或像素清洗都可能破坏载体。LSB 不冒充外部角色卡格式，也不替代文件型交换格式。

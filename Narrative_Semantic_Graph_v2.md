@@ -1,7 +1,7 @@
 # NSG-STD-0013：Narrative Semantic Graph v2 Specification
 
 Standard: NSG-STD-0013                                 August 04, 2026
-Category: Specification                                Status: Implementation Baseline
+Category: Specification                                Status: Implemented Normative Contract
 
 ## 摘要 (Abstract)
 

@@ -1,4 +1,4 @@
-# Draft migration: MOMO Core 0.5.0 to 1.0.0
+# Migration guide: MOMO Core 0.5.0 to 1.0.0
 
 **Status:** destructive upgrade notes; no compatibility layer is provided
 
@@ -68,6 +68,12 @@ Migration `0017_response_resolved_input.sql` adds nullable
 writing the user message. Pending pre-migration text-only operations remain
 readable; new or retried operations populate the field. No raw image bytes are
 added to SQLite by this migration.
+
+Migration `0018_control_operations.sql` adds durable request fingerprints and
+completed responses for `momo.control/1.0`. Completed controls replay without
+repeating side effects; an incomplete claim left by an interrupted sole
+process is released at the next initialization so the idempotent action can be
+retried.
 
 ## Spaces replace the withdrawn request scopes
 

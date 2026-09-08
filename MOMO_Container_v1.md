@@ -1,5 +1,5 @@
 > **Historical and unsupported:** this records an abandoned pre-release design.
-> MOMO 0.5 neither reads nor migrates it; use `MOMO_Container_v2.md`.
+> MOMO Core 1.0 neither reads nor migrates it; use `MOMO_Container_v3.md`.
 
 **Internal Request for Comments: MOMO-RFC-0003**            July 20, 2026
 **Category: Design Direction**

@@ -11,15 +11,15 @@ use http_error::sanitize_error_message;
 use response_api::model_api_error;
 use response_api::{cancel_response, create_response};
 
-#[cfg(test)]
 use axum::http::StatusCode;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
     routing::{get, post, put},
 };
 use momo_core::{
-    MAX_RESPONSE_REQUEST_BYTES, MomoApiService, MomoConfig,
+    MAX_RESPONSE_ID_BYTES, MAX_RESPONSE_INPUT_BYTES, MAX_RESPONSE_REQUEST_BYTES, MomoApiService,
+    MomoConfig,
     api::simple,
     momo_domain::{CharacterCard, Conversation, Message},
 };
@@ -66,6 +66,7 @@ struct HealthResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateConversationRequest {
     space_id: String,
     title: String,
@@ -73,6 +74,7 @@ struct CreateConversationRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateMessageRequest {
     space_id: String,
     conversation_id: String,
@@ -81,13 +83,11 @@ struct CreateMessageRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateCharacterRequest {
     owner_space_id: String,
     name: String,
-    #[serde(default)]
     author_name: String,
-    #[serde(default)]
-    description: String,
     character_markdown: String,
     #[serde(default)]
     user_markdown: String,
@@ -124,6 +124,7 @@ struct ResolveCapabilityRequest {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RetrieveMemorySpace {
     space_id: String,
     label: String,
@@ -158,7 +159,10 @@ struct CompileMoStateRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PrepareContextRequest {
+    #[serde(default)]
+    runtime_instructions: String,
     #[serde(default)]
     character_markdown: String,
     #[serde(default)]
@@ -178,6 +182,7 @@ struct PrepareContextRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateMemoryDocumentRequest {
     space_id: String,
     markdown: String,
@@ -191,6 +196,7 @@ struct ApplyMemoryPatchRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SubmitMemoryPatchReviewRequest {
     space_id: String,
     conversation_id: String,
@@ -199,12 +205,14 @@ struct SubmitMemoryPatchReviewRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IncludeResolvedQuery {
     space_id: String,
     include_resolved: Option<bool>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WriteNsgNodeRequest {
     space_id: String,
     target_file: String,
@@ -227,6 +235,18 @@ struct SpaceRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordMaintenanceTurnRequest {
+    request_id: String,
+    space_id: String,
+    user_content: String,
+    assistant_content: String,
+    memory_enabled: bool,
+    nsg_enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NsgTargetRequest {
     space_id: String,
     target_file: String,
@@ -240,6 +260,7 @@ struct SpaceNsgTargetRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NsgVectorStatusQuery {
     space_id: String,
     vector_space_id: Option<String>,
@@ -283,6 +304,7 @@ struct MocImportRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MocEncryptedQuery {
     input_path: String,
 }
@@ -352,6 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics: Arc::new(Mutex::new(HashMap::new())),
     };
 
+    let momo_api = Arc::clone(&state.momo_api);
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -361,6 +384,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    momo_api.wait_for_maintenance().await;
     Ok(())
 }
 
@@ -456,8 +480,14 @@ fn api_routes() -> Router<AppState> {
         .route("/capabilities/resolve", post(resolve_capability))
         .route("/context/prepare", post(prepare_context))
         .route("/mo-state/compile", post(compile_mo_state))
+        .route("/mo-state/runtime", get(get_mo_state_runtime))
         .route("/memory/retrieve-scoped", post(retrieve_scoped_memory))
         .route("/memory/maintenance", post(run_memory_maintenance))
+        .route(
+            "/momo/maintenance/turns",
+            post(record_momo_maintenance_turn),
+        )
+        .route("/momo/maintenance/drain", post(drain_momo_maintenance))
         .route("/memory/documents", get(list_memory_documents))
         .route(
             "/memory/documents/:id",
@@ -524,9 +554,24 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn execute_control(
-    Json(request): Json<momo_core::MomoControlRequest>,
+    payload: Result<Json<momo_core::MomoControlRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::execute_control_json(to_json_string(&request)?).await)
+    let Json(request) = payload.map_err(|rejection| {
+        let status = rejection.status();
+        let code = if status == StatusCode::PAYLOAD_TOO_LARGE {
+            "request_too_large"
+        } else {
+            "invalid_json"
+        };
+        ApiError::new(status, code, rejection.body_text(), false)
+    })?;
+    request.validate().map_err(ApiError::bad_request)?;
+    let value = simple::execute_control_json(to_json_string(&request)?)
+        .await
+        .map_err(control_api_error)?;
+    serde_json::from_str(&value)
+        .map(Json)
+        .map_err(|error| ApiError::internal(error.to_string()))
 }
 
 async fn metrics(State(state): State<AppState>) -> Json<Value> {
@@ -559,7 +604,6 @@ async fn create_character(
             scope_id,
             request.author_name,
             request.name,
-            request.description,
             request.character_markdown,
             request.user_markdown,
         )
@@ -745,6 +789,7 @@ async fn prepare_context(
     Json(request): Json<PrepareContextRequest>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(simple::prepare_context_json(to_json_string(&json!({
+        "runtime_instructions": request.runtime_instructions,
         "character_markdown": request.character_markdown,
         "user_markdown": request.user_markdown,
         "memory_markdown": request.memory_markdown,
@@ -777,6 +822,12 @@ async fn compile_mo_state(
     )
 }
 
+async fn get_mo_state_runtime(
+    Query(request): Query<SpaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    json_result(simple::mo_state_runtime_status_json(validate_space_id(request.space_id)?).await)
+}
+
 async fn retrieve_scoped_memory(
     Json(request): Json<RetrieveScopedMemoryRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -797,6 +848,109 @@ async fn run_memory_maintenance(
     Json(request): Json<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     json_result(simple::run_memory_maintenance_json(validate_space_id(request.space_id)?).await)
+}
+
+/// Records an already-completed turn for trusted local imports and benchmark
+/// replay. It never invokes the conversation model; a later drain runs the
+/// same DMW/NSG maintenance path as a native response.
+async fn record_momo_maintenance_turn(
+    Json(request): Json<RecordMaintenanceTurnRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let space_id = validate_space_id(request.space_id)?;
+    if request.request_id.trim().is_empty() || request.request_id.len() > MAX_RESPONSE_ID_BYTES {
+        return Err(ApiError::bad_request("invalid maintenance turn request_id"));
+    }
+    if request.user_content.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "maintenance turn user_content must not be empty",
+        ));
+    }
+    if request.user_content.len() > MAX_RESPONSE_INPUT_BYTES
+        || request.assistant_content.len() > MAX_RESPONSE_INPUT_BYTES
+    {
+        return Err(ApiError::bad_request(
+            "maintenance turn content exceeds the local replay limit",
+        ));
+    }
+    simple::append_maintenance_turn_json(
+        json!({
+            "request_id": request.request_id,
+            "scope_id": space_id,
+            "user_content": request.user_content,
+            "assistant_content": request.assistant_content,
+        })
+        .to_string(),
+        request.memory_enabled,
+        request.nsg_enabled,
+    )
+    .await
+    .map_err(|error| {
+        if error.starts_with("maintenance turn conflict:") {
+            ApiError::conflict("maintenance turn request_id was reused with different content")
+        } else {
+            ApiError::internal(error)
+        }
+    })?;
+    Ok(Json(json!({"recorded": true})))
+}
+
+/// Local management barrier for reproducible evaluations. Flush even a partial
+/// batch before probing a new conversation; failures must not look like success.
+async fn drain_momo_maintenance(
+    State(state): State<AppState>,
+    Json(request): Json<SpaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let space_id = validate_space_id(request.space_id)?;
+    tokio::time::timeout(state.response_timeout, drain_momo_space(&state, &space_id))
+        .await
+        .map_err(|_| ApiError::gateway_timeout("maintenance drain timed out"))??;
+    Ok(Json(json!({"completed": true, "space_id": space_id})))
+}
+
+async fn drain_momo_space(state: &AppState, space_id: &str) -> Result<(), ApiError> {
+    // Commit each independently acknowledged maintenance lane before starting
+    // the next. If the model gateway fails on NSG, a later drain resumes only
+    // NSG instead of cancelling an otherwise successful DMW batch.
+    drain_momo_kind(state, space_id, momo_core::MaintenanceKind::Memory).await?;
+    drain_momo_kind(state, space_id, momo_core::MaintenanceKind::SemanticGraph).await?;
+    Ok(())
+}
+
+async fn drain_momo_kind(
+    state: &AppState,
+    space_id: &str,
+    kind: momo_core::MaintenanceKind,
+) -> Result<(), ApiError> {
+    let storage_kind = match kind {
+        momo_core::MaintenanceKind::Memory => "memory",
+        momo_core::MaintenanceKind::SemanticGraph => "semantic_graph",
+    };
+    let batch_limit = state.momo_api.maintenance_batch_limit(kind);
+    for batch in 0..=64 {
+        let pending = simple::pending_maintenance_turns_json(
+            space_id.to_owned(),
+            storage_kind.to_owned(),
+            batch_limit,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        let pending: Vec<Value> = serde_json::from_str(&pending)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if pending.is_empty() {
+            break;
+        }
+        if batch == 64 {
+            return Err(ApiError::conflict(
+                "maintenance drain limit reached; stop concurrent writes and retry",
+            ));
+        }
+        state
+            .momo_api
+            .maintain(space_id, kind, pending.len())
+            .await
+            .map_err(response_api::momo_api_error)?;
+    }
+    Ok(())
 }
 
 async fn list_memory_documents(Query(query): Query<SpaceRequest>) -> Result<Json<Value>, ApiError> {
@@ -1064,6 +1218,16 @@ fn scoped_api_error(error: String) -> ApiError {
     }
 }
 
+fn control_api_error(error: String) -> ApiError {
+    if error.contains("reused with different content") || error.contains("already in progress") {
+        ApiError::conflict(error)
+    } else if error.contains("does not belong to") || error.contains("does not exist") {
+        ApiError::not_found(error)
+    } else {
+        ApiError::internal(error)
+    }
+}
+
 fn embedding_api_error(error: simple::GenerateEmbeddingsError) -> ApiError {
     match error {
         simple::GenerateEmbeddingsError::InvalidRequest(error) => {
@@ -1162,6 +1326,49 @@ mod tests {
             reqwest::Client::new(),
             Arc::new(MomoConfig::default()),
         ))
+    }
+
+    async fn read_test_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.expect("read test request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        String::from_utf8(request).expect("UTF-8 test request")
+    }
+
+    async fn write_test_json_response(socket: &mut tokio::net::TcpStream, body: Value) {
+        let body = body.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write test response");
     }
 
     #[test]
@@ -1467,7 +1674,6 @@ mod tests {
                             "owner_space_id": TEST_SCOPE_ID,
                             "name": "HTTP test character",
                             "author_name": "momo-server test",
-                            "description": "round trip",
                             "character_markdown": "Stay in character.",
                             "user_markdown": ""
                         })
@@ -1981,7 +2187,6 @@ mod tests {
                 OWNER_SCOPE.to_owned(),
                 "scope-test".to_owned(),
                 "Scoped character".to_owned(),
-                String::new(),
                 "Stay scoped.".to_owned(),
                 String::new(),
             )
@@ -2174,6 +2379,7 @@ mod tests {
                         json!({
                             "input": "must not see owner history",
                             "momo": {
+                                "schema": "momo.responses/1.0",
                                 "request_id": "cross-scope-response",
                                 "personal_space_id": OTHER_SCOPE,
                                 "conversation_space_id": OTHER_SCOPE,
@@ -2209,7 +2415,6 @@ mod tests {
                 TEST_SCOPE_ID.to_owned(),
                 "stream-contract".to_owned(),
                 "MO".to_owned(),
-                "stream contract character".to_owned(),
                 "Be concise.".to_owned(),
                 String::new(),
             )
@@ -2397,7 +2602,6 @@ mod tests {
                 TEST_SCOPE_ID.to_owned(),
                 "contract".to_owned(),
                 "MO".to_owned(),
-                "contract character".to_owned(),
                 "Be concise.".to_owned(),
                 "The user is testing the contract.".to_owned(),
             )
@@ -2531,6 +2735,33 @@ mod tests {
         assert_eq!(first["output_text"], "Aligned response");
         assert_eq!(first["momo"]["warnings"], json!([]));
         assert_eq!(first["usage"]["total_tokens"], 15);
+        assert_eq!(
+            first["momo"]["state_audit"]["manager"]["profile"],
+            "closed_autonomous"
+        );
+        assert_eq!(
+            first["momo"]["state_audit"]["runtime_snapshot"]["snapshot_revision"],
+            1
+        );
+        let runtime = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/mo-state/runtime?space_id={TEST_SCOPE_ID}"))
+                    .body(Body::empty())
+                    .expect("runtime request"),
+            )
+            .await
+            .expect("runtime response");
+        assert_eq!(runtime.status(), StatusCode::OK);
+        let runtime: Value = serde_json::from_slice(
+            &to_bytes(runtime.into_body(), 1024 * 1024)
+                .await
+                .expect("runtime body"),
+        )
+        .expect("runtime JSON");
+        assert_eq!(runtime["profile"], "closed_autonomous");
+        assert_eq!(runtime["snapshot_revision"], 1);
 
         drop(app);
         let restarted_app = build_app(AppState {
@@ -2589,7 +2820,6 @@ mod tests {
                 TEST_SCOPE_ID.to_owned(),
                 "multimodal-test".to_owned(),
                 "Direct multimodal character".to_owned(),
-                String::new(),
                 "Keep the roleplay voice.".to_owned(),
                 String::new(),
             )
@@ -2702,6 +2932,7 @@ mod tests {
                                 ]
                             }],
                             "momo": {
+                                "schema": "momo.responses/1.0",
                                 "request_id": "direct-multimodal-contract-1",
                                 "character_id": character_id,
                                 "personal_space_id": TEST_SCOPE_ID,
@@ -2737,43 +2968,62 @@ mod tests {
         let _test_guard = TEST_LOCK.lock().await;
         let initialized_dir = initialize_test_core().await;
         let scope_id = "00000000-0000-4000-8000-000000000077".to_owned();
-        simple::append_maintenance_turn_json(
-            json!({
-                "request_id": "maintenance-contract-1",
-                "scope_id": scope_id,
-                "user_content": "The moon gate requires a silver key.",
-                "assistant_content": "Understood."
-            })
-            .to_string(),
-            true,
-            true,
-        )
-        .await
-        .expect("register maintenance turn");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("maintenance gateway");
         let address = listener.local_addr().expect("maintenance address");
         tokio::spawn(async move {
-            for expected_model in ["memory_distillation", "semantic_graph_governance"] {
+            let mut generated = std::collections::HashSet::new();
+            let mut memory_generations = 0;
+            for _ in 0..5 {
                 let (mut socket, _) = listener.accept().await.expect("accept maintenance");
-                let mut request = vec![0_u8; 32 * 1024];
-                let read = socket.read(&mut request).await.expect("read maintenance");
-                let request = String::from_utf8_lossy(&request[..read]);
-                assert!(request.contains(&format!("\"model\":\"{expected_model}\"")));
+                let request = read_test_http_request(&mut socket).await;
+                if request.starts_with("GET /v1/models/") {
+                    assert!(
+                        request.starts_with("GET /v1/models/memory_distillation ")
+                            || request.starts_with("GET /v1/models/semantic_graph_governance ")
+                    );
+                    write_test_json_response(
+                        &mut socket,
+                        json!({
+                            "momo": {
+                                "context_window": 8192,
+                                "max_output_tokens": 1024,
+                                "modalities": ["text"]
+                            }
+                        }),
+                    )
+                    .await;
+                    continue;
+                }
                 let request_body = request
                     .split_once("\r\n\r\n")
                     .expect("maintenance HTTP body")
                     .1;
                 let request_json: Value =
                     serde_json::from_str(request_body).expect("maintenance request JSON");
-                let maintenance_input: Value = serde_json::from_str(
+                let expected_model = request_json["model"]
+                    .as_str()
+                    .expect("maintenance model alias");
+                assert!(matches!(
+                    expected_model,
+                    "memory_distillation" | "semantic_graph_governance"
+                ));
+                generated.insert(expected_model.to_owned());
+                if expected_model == "memory_distillation" {
+                    memory_generations += 1;
+                }
+                assert_eq!(request_json["max_tokens"], 1024);
+                let maintenance_request: Value = serde_json::from_str(
                     request_json["messages"][1]["content"]
                         .as_str()
                         .expect("structured maintenance input"),
                 )
                 .expect("maintenance input JSON");
+                let maintenance_input = maintenance_request
+                    .get("maintenance_input")
+                    .unwrap_or(&maintenance_request);
                 assert_eq!(
                     maintenance_input["maintenance_kind"],
                     if expected_model == "memory_distillation" {
@@ -2792,23 +3042,25 @@ mod tests {
                         .as_i64()
                         .is_some()
                 );
-                let body = json!({
-                    "choices": [{
-                        "message": {"role": "assistant", "content": "patches: []"},
-                        "finish_reason": "stop"
-                    }]
-                })
-                .to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                socket
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write maintenance");
+                write_test_json_response(
+                    &mut socket,
+                    json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "patches: []"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                )
+                .await;
             }
+            assert_eq!(
+                generated,
+                std::collections::HashSet::from([
+                    "memory_distillation".to_owned(),
+                    "semantic_graph_governance".to_owned(),
+                ])
+            );
+            assert_eq!(memory_generations, 2);
         });
         let state = AppState {
             data_dir: initialized_dir,
@@ -2817,16 +3069,77 @@ mod tests {
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
         };
-        state
-            .momo_api
-            .maintain(&scope_id, momo_core::MaintenanceKind::Memory, 1)
+        let app = api_routes().with_state(state);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/momo/maintenance/turns")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "request_id": "maintenance-contract-1",
+                            "space_id": scope_id,
+                            "user_content": "The moon gate requires a silver key.",
+                            "assistant_content": "Understood.",
+                            "memory_enabled": true,
+                            "nsg_enabled": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("recorded maintenance turn request"),
+            )
             .await
-            .expect("memory maintenance");
-        state
-            .momo_api
-            .maintain(&scope_id, momo_core::MaintenanceKind::SemanticGraph, 1)
+            .expect("recorded maintenance turn response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/momo/maintenance/turns")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "request_id": "maintenance-contract-1",
+                            "space_id": scope_id,
+                            "user_content": "Conflicting replay content.",
+                            "assistant_content": "Understood.",
+                            "memory_enabled": true,
+                            "nsg_enabled": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("conflicting maintenance turn request"),
+            )
             .await
-            .expect("NSG maintenance");
+            .expect("conflicting maintenance turn response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        // The HTTP barrier flushes a batch smaller than the normal automatic
+        // threshold and is safe to repeat without issuing model calls again.
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/momo/maintenance/drain")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(json!({"space_id": scope_id}).to_string()))
+                        .expect("drain request"),
+                )
+                .await
+                .expect("drain response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = serde_json::from_slice(
+                &to_bytes(response.into_body(), 4096)
+                    .await
+                    .expect("drain body"),
+            )
+            .expect("drain JSON");
+            assert_eq!(body["completed"], true);
+        }
         for kind in ["memory", "semantic_graph"] {
             let pending: Value = serde_json::from_str(
                 &simple::pending_maintenance_turns_json(scope_id.clone(), kind.to_owned(), 10)
@@ -2839,6 +3152,472 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hybrid_retrieval_keeps_room_for_a_complete_nsg_node() {
+        let _test_guard = TEST_LOCK.lock().await;
+        initialize_test_core().await;
+        let scope_id = uuid::Uuid::now_v7().to_string();
+        let padding = "x".repeat(500);
+        simple::apply_memory_patch_json(
+            scope_id.clone(),
+            format!(
+                r#"
+patches:
+  - target_file: world/astrolabe_context.md
+    operations:
+      - type: create
+        frontmatter:
+          id: world_astrolabe_context
+          type: world
+          importance: 0.8
+          weight: 0.8
+          decay_at: 2000000000
+          relations: {{}}
+          tags: [astrolabe]
+          aliases: [Mara]
+          status: active
+        content: |-
+          # Mara Astrolabe Context
+
+          {padding}
+"#
+            ),
+        )
+        .await
+        .expect("create large DMW document");
+        simple::apply_nsg_patch_json(
+            scope_id.clone(),
+            r#"
+patches:
+  - target_file: "lore/mara_navigation_storage.nsg"
+    operations:
+      - type: "create_node"
+        metadata:
+          id: "lore_mara_navigation_storage"
+          type: "lore"
+          importance: 0.8
+          mode: "canon"
+          status: "active"
+          zone: "auto"
+        anchors: "Glass-Archive-52636, Mara navigation instruments, winter storage"
+        condition: "The item is a navigation instrument owned by Mara."
+        trigger: "Mara stores the instrument for winter."
+        consequence: "The instrument is placed in Glass-Archive-52636."
+        constraint: "This rule does not confirm that any specific instrument is currently stored there."
+"#
+            .to_owned(),
+            true,
+        )
+        .await
+        .expect("create NSG node");
+
+        let retrieved: Value = serde_json::from_str(
+            &simple::retrieve_scoped_memory_json(
+                json!({
+                    "spaces": [{
+                        "space_id": scope_id,
+                        "label": "test",
+                        "weight": 100,
+                        "memory": true,
+                        "semantic_graph": true
+                    }],
+                    "query": "Where should I look for Mara's silver astrolabe now?",
+                    "max_tokens": 961
+                })
+                .to_string(),
+            )
+            .await
+            .expect("hybrid retrieval"),
+        )
+        .expect("retrieval JSON");
+        assert!(
+            retrieved
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["id"]
+                    == "lore_mara_navigation_storage"
+                    && item["estimated_tokens"]
+                        .as_u64()
+                        .is_some_and(|tokens| tokens <= 385))),
+            "hybrid retrieval omitted NSG node: {retrieved}"
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_repairs_invalid_memory_patch_before_staging() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let initialized_dir = initialize_test_core().await;
+        let scope_id = uuid::Uuid::now_v7().to_string();
+        simple::append_maintenance_turn_json(
+            json!({
+                "request_id": uuid::Uuid::now_v7().to_string(),
+                "scope_id": scope_id,
+                "user_content": "Remember that I prefer tea.",
+                "assistant_content": "Understood."
+            })
+            .to_string(),
+            true,
+            false,
+        )
+        .await
+        .expect("pending memory turn");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("maintenance gateway");
+        let address = listener.local_addr().expect("maintenance address");
+        let gateway = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept model discovery");
+            let request = read_test_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /v1/models/memory_distillation "));
+            write_test_json_response(
+                &mut socket,
+                json!({
+                    "momo": {
+                        "context_window": 8192,
+                        "max_output_tokens": 2048,
+                        "modalities": ["text"]
+                    }
+                }),
+            )
+            .await;
+
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept maintenance");
+                let request = read_test_http_request(&mut socket).await;
+                let request_body = request
+                    .split_once("\r\n\r\n")
+                    .expect("maintenance HTTP body")
+                    .1;
+                let request_json: Value =
+                    serde_json::from_str(request_body).expect("maintenance request JSON");
+                assert_eq!(request_json["max_tokens"], 1024);
+                let user_content: Value = serde_json::from_str(
+                    request_json["messages"][1]["content"]
+                        .as_str()
+                        .expect("maintenance user content"),
+                )
+                .expect("structured maintenance input");
+                if attempt == 0 {
+                    assert!(user_content.get("previous_output_error").is_none());
+                } else {
+                    assert!(
+                        user_content["previous_output_error"]
+                            .as_str()
+                            .is_some_and(|error| error.contains("decay_at"))
+                    );
+                    assert!(user_content["required_correction"].as_str().is_some_and(
+                        |instruction| instruction.contains("type must be exactly character")
+                    ));
+                }
+                let patch = if attempt == 0 {
+                    "patches:\n  - target_file: characters/player.md\n    operations:\n      - type: create\n        frontmatter:\n          id: character_player\n          type: character\n          importance: 0.7\n          weight: 0.7\n          status: active\n        content: '# Player'"
+                } else {
+                    "patches: []"
+                };
+                write_test_json_response(
+                    &mut socket,
+                    json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": patch},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                )
+                .await;
+            }
+        });
+        let state = AppState {
+            data_dir: initialized_dir,
+            momo_api: test_momo_api(format!("http://{address}/v1")),
+            response_concurrency: Arc::new(Semaphore::new(8)),
+            response_timeout: std::time::Duration::from_secs(120),
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let result = drain_momo_maintenance(
+            State(state),
+            Json(SpaceRequest {
+                space_id: scope_id.clone(),
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "repair invalid maintenance patch");
+        gateway.await.expect("mock gateway task");
+        let pending: Value = serde_json::from_str(
+            &simple::pending_maintenance_turns_json(scope_id, "memory".to_owned(), 10)
+                .await
+                .expect("pending turns"),
+        )
+        .expect("pending JSON");
+        assert_eq!(pending, json!([]));
+    }
+
+    #[tokio::test]
+    async fn maintenance_rechecks_an_empty_first_pass_before_acknowledging_turns() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let initialized_dir = initialize_test_core().await;
+        let scope_id = uuid::Uuid::now_v7().to_string();
+        simple::append_maintenance_turn_json(
+            json!({
+                "request_id": uuid::Uuid::now_v7().to_string(),
+                "scope_id": scope_id,
+                "user_content": "Remember that the meeting is at Glass-Archive-f41e9.",
+                "assistant_content": "Understood."
+            })
+            .to_string(),
+            true,
+            false,
+        )
+        .await
+        .expect("pending memory turn");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("maintenance gateway");
+        let address = listener.local_addr().expect("maintenance address");
+        let gateway = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept model discovery");
+            let request = read_test_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /v1/models/memory_distillation "));
+            write_test_json_response(
+                &mut socket,
+                json!({
+                    "momo": {
+                        "context_window": 8192,
+                        "max_output_tokens": 2048,
+                        "modalities": ["text"]
+                    }
+                }),
+            )
+            .await;
+
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept maintenance");
+                let request = read_test_http_request(&mut socket).await;
+                let request_body = request
+                    .split_once("\r\n\r\n")
+                    .expect("maintenance HTTP body")
+                    .1;
+                let request_json: Value =
+                    serde_json::from_str(request_body).expect("maintenance request JSON");
+                let user_content: Value = serde_json::from_str(
+                    request_json["messages"][1]["content"]
+                        .as_str()
+                        .expect("maintenance user content"),
+                )
+                .expect("structured maintenance input");
+                if attempt == 0 {
+                    assert!(user_content.get("previous_output_error").is_none());
+                } else {
+                    assert!(
+                        user_content["previous_output_error"]
+                            .as_str()
+                            .is_some_and(|error| error.contains("empty patch"))
+                    );
+                }
+                let patch = if attempt == 0 {
+                    "patches: []"
+                } else {
+                    "patches:\n  - target_file: events/meeting.md\n    operations:\n      - type: create\n        frontmatter:\n          id: event_meeting\n          type: event\n          importance: 0.8\n          weight: 0.8\n          decay_at: 1\n          relations: {}\n          tags: [meeting]\n          aliases: []\n          status: active\n        content: |-\n          # Meeting\n\n          ## Current commitment\n\n          - Meet at Glass-Archive-f41e9."
+                };
+                write_test_json_response(
+                    &mut socket,
+                    json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": patch},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                )
+                .await;
+            }
+        });
+        let state = AppState {
+            data_dir: initialized_dir,
+            momo_api: test_momo_api(format!("http://{address}/v1")),
+            response_concurrency: Arc::new(Semaphore::new(8)),
+            response_timeout: std::time::Duration::from_secs(120),
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let result = drain_momo_maintenance(
+            State(state),
+            Json(SpaceRequest {
+                space_id: scope_id.clone(),
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "retry empty memory patch");
+        gateway.await.expect("mock gateway task");
+        let retrieved: Value = serde_json::from_str(
+            &simple::retrieve_memory_json(scope_id, "meeting".to_owned(), 4096)
+                .await
+                .expect("retrieve repaired memory"),
+        )
+        .expect("retrieval JSON");
+        assert!(
+            retrieved
+                .as_array()
+                .is_some_and(|items| { items.iter().any(|item| item["id"] == "event_meeting") })
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_barrier_reports_upstream_failure_and_keeps_pending_work() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let data_dir = initialize_test_core().await;
+        let space_id = uuid::Uuid::now_v7().to_string();
+        simple::append_maintenance_turn_json(
+            json!({
+                "request_id": uuid::Uuid::now_v7().to_string(), "scope_id": space_id,
+                "user_content": "Remember this event", "assistant_content": "Acknowledged",
+            })
+            .to_string(),
+            true,
+            true,
+        )
+        .await
+        .expect("pending turn");
+        let state = AppState {
+            data_dir,
+            momo_api: test_momo_api("http://127.0.0.1:9/v1"),
+            response_concurrency: Arc::new(Semaphore::new(8)),
+            response_timeout: std::time::Duration::from_secs(2),
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let result = drain_momo_maintenance(
+            State(state),
+            Json(SpaceRequest {
+                space_id: space_id.clone(),
+            }),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("failed maintenance must not report completion"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.status,
+            StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT
+        ));
+        let pending: Vec<Value> = serde_json::from_str(
+            &simple::pending_maintenance_turns_json(space_id, "memory".to_owned(), 32)
+                .await
+                .expect("pending query"),
+        )
+        .expect("pending JSON");
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn maintenance_barrier_keeps_memory_progress_when_nsg_fails() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let data_dir = initialize_test_core().await;
+        let space_id = uuid::Uuid::now_v7().to_string();
+        simple::append_maintenance_turn_json(
+            json!({
+                "request_id": uuid::Uuid::now_v7().to_string(),
+                "scope_id": space_id,
+                "user_content": "Remember this event",
+                "assistant_content": "Acknowledged",
+            })
+            .to_string(),
+            true,
+            true,
+        )
+        .await
+        .expect("pending turn");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("maintenance gateway");
+        let address = listener.local_addr().expect("maintenance address");
+        let gateway = tokio::spawn(async move {
+            for expected in [
+                "GET /v1/models/memory_distillation ",
+                "POST /v1/chat/completions ",
+                "POST /v1/chat/completions ",
+                "GET /v1/models/semantic_graph_governance ",
+                "POST /v1/chat/completions ",
+            ] {
+                let (mut socket, _) = listener.accept().await.expect("accept maintenance");
+                let request = read_test_http_request(&mut socket).await;
+                assert!(
+                    request.starts_with(expected),
+                    "unexpected request: {request}"
+                );
+                if expected.starts_with("GET") {
+                    write_test_json_response(
+                        &mut socket,
+                        json!({
+                            "momo": {
+                                "context_window": 8192,
+                                "max_output_tokens": 1024,
+                                "modalities": ["text"]
+                            }
+                        }),
+                    )
+                    .await;
+                } else if request.contains("\"model\":\"memory_distillation\"") {
+                    write_test_json_response(
+                        &mut socket,
+                        json!({
+                            "choices": [{
+                                "message": {"role": "assistant", "content": "patches: []"},
+                                "finish_reason": "stop"
+                            }]
+                        }),
+                    )
+                    .await;
+                } else {
+                    let body = r#"{"error":{"message":"synthetic NSG failure"}}"#;
+                    let response = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write failed NSG response");
+                }
+            }
+        });
+        let state = AppState {
+            data_dir,
+            momo_api: test_momo_api(format!("http://{address}/v1")),
+            response_concurrency: Arc::new(Semaphore::new(8)),
+            response_timeout: std::time::Duration::from_secs(120),
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let result = drain_momo_maintenance(
+            State(state),
+            Json(SpaceRequest {
+                space_id: space_id.clone(),
+            }),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("failed NSG maintenance must not report completion"),
+            Err(error) => error,
+        };
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        gateway.await.expect("mock gateway task");
+
+        let memory_pending: Vec<Value> = serde_json::from_str(
+            &simple::pending_maintenance_turns_json(space_id.clone(), "memory".to_owned(), 32)
+                .await
+                .expect("pending memory query"),
+        )
+        .expect("pending memory JSON");
+        let nsg_pending: Vec<Value> = serde_json::from_str(
+            &simple::pending_maintenance_turns_json(space_id, "semantic_graph".to_owned(), 32)
+                .await
+                .expect("pending NSG query"),
+        )
+        .expect("pending NSG JSON");
+        assert!(memory_pending.is_empty());
+        assert_eq!(nsg_pending.len(), 1);
+    }
+
+    #[tokio::test]
     async fn structured_controls_switch_clear_and_delete_without_a_model() {
         let _test_guard = TEST_LOCK.lock().await;
         let initialized_dir = initialize_test_core().await;
@@ -2848,7 +3627,6 @@ mod tests {
                 test_space_id.clone(),
                 "control".to_owned(),
                 "First".to_owned(),
-                String::new(),
                 "First prompt".to_owned(),
                 String::new(),
             )
@@ -2861,7 +3639,6 @@ mod tests {
                 test_space_id.clone(),
                 "control".to_owned(),
                 "Second".to_owned(),
-                String::new(),
                 "Second prompt".to_owned(),
                 String::new(),
             )
@@ -2889,6 +3666,69 @@ mod tests {
             metrics: Arc::new(Mutex::new(HashMap::new())),
         };
         let app = build_app(state);
+        let invalid_schema = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/momo/control")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "schema": "momo.control/2.0",
+                    "request_id": "invalid-schema",
+                    "actor_space_id": test_space_id,
+                    "action": {
+                        "type": "clear_memory",
+                        "target_space_id": test_space_id,
+                        "memory": true,
+                        "semantic_graph": false,
+                    },
+                })
+                .to_string(),
+            ))
+            .expect("invalid control request");
+        assert_eq!(
+            app.clone()
+                .oneshot(invalid_schema)
+                .await
+                .expect("invalid schema response")
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let unknown_field = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/momo/control")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "schema": "momo.control/1.0",
+                    "request_id": "unknown-field",
+                    "actor_space_id": test_space_id,
+                    "unexpected": true,
+                    "action": {
+                        "type": "clear_memory",
+                        "target_space_id": test_space_id,
+                        "memory": true,
+                        "semantic_graph": false,
+                    },
+                })
+                .to_string(),
+            ))
+            .expect("unknown-field control request");
+        let unknown_field_response = app
+            .clone()
+            .oneshot(unknown_field)
+            .await
+            .expect("unknown-field response");
+        assert_eq!(
+            unknown_field_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let unknown_field_body: Value = serde_json::from_slice(
+            &to_bytes(unknown_field_response.into_body(), usize::MAX)
+                .await
+                .expect("unknown-field response body"),
+        )
+        .expect("unknown-field response JSON");
+        assert_eq!(unknown_field_body["error"]["code"], "invalid_json");
         let control = |request_id: &str, action: Value| {
             Request::builder()
                 .method(Method::POST)
@@ -2920,6 +3760,43 @@ mod tests {
             .await
             .expect("switch response");
         assert_eq!(response.status(), StatusCode::OK);
+        let first_switch_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("first switch body");
+        let replay = app
+            .clone()
+            .oneshot(control(
+                "switch-character",
+                json!({
+                    "type": "switch_character",
+                    "conversation_space_id": test_space_id,
+                    "conversation_id": conversation_id,
+                    "character_id": second["id"],
+                }),
+            ))
+            .await
+            .expect("switch replay");
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(replay.into_body(), usize::MAX)
+                .await
+                .expect("replayed switch body"),
+            first_switch_body
+        );
+        let conflict = app
+            .clone()
+            .oneshot(control(
+                "switch-character",
+                json!({
+                    "type": "switch_character",
+                    "conversation_space_id": test_space_id,
+                    "conversation_id": conversation_id,
+                    "character_id": first["id"],
+                }),
+            ))
+            .await
+            .expect("switch conflict");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
         let conversations: Value = serde_json::from_str(
             &simple::local_conversations_json(test_space_id.clone())
                 .await

@@ -1,8 +1,13 @@
 # MOMO 0.5 architecture and boundary contract
 
-This document is the normative architecture contract for MOMO 0.5. When an
+> **Historical:** this contract defines the released 0.5 boundary only. MOMO
+> Core 1.0 is governed by [`spec_index.md`](spec_index.md) and
+> [`http_api_1_0.md`](http_api_1_0.md). Nothing in this document overrides a
+> current 1.0 contract.
+
+This document was the normative architecture contract for MOMO 0.5. When an
 older roadmap, example, or implementation disagrees with this document, this
-document wins until the disagreement is removed.
+document wins only when interpreting the historical 0.5 release.
 
 ## 1. Core and adapters
 

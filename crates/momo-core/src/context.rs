@@ -28,10 +28,28 @@ pub struct PreparedContext {
     /// Number of retained messages whose content had to be shortened.  This is
     /// separate from `omitted_messages` so the UI can describe the actual loss.
     pub truncated_messages: usize,
+    /// Per-section losses, measured with the same counter as the final prompt.
+    #[serde(default)]
+    pub section_audit: Vec<ContextSectionAudit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextSectionAudit {
+    pub section: String,
+    /// Includes the section heading, excludes shared message overhead.
+    pub original_tokens: usize,
+    /// Includes any truncation marker; not a count of surviving source tokens.
+    pub injected_tokens: usize,
+    pub truncated: bool,
+    pub omitted: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ContextSections<'a> {
+    /// Governed runtime instructions supplied by the trusted host. These stay
+    /// in the system section so history truncation cannot silently discard an
+    /// override that the request audit reports as applied.
+    pub runtime_instructions: &'a str,
     pub character: &'a str,
     pub user: &'a str,
     pub memory: &'a str,
@@ -75,12 +93,13 @@ fn prepare_context_with_counter(
         .saturating_sub(request.budget.reserve_output_tokens)
         .saturating_sub(CONTEXT_SAFETY_MARGIN)
         .max(1);
-    let raw_system_content = system_prompt(request.sections);
+    let raw_sections = system_sections(request.sections);
     let mut selected = Vec::new();
     let mut used = 0;
     let mut truncated_messages = 0;
+    let mut section_audit = Vec::new();
 
-    if !raw_system_content.is_empty() {
+    if !raw_sections.is_empty() {
         // A huge character card must not crowd the newest user turn out of the
         // request entirely.  Reserve its full size when possible and otherwise
         // split the available budget between system context and the newest turn.
@@ -91,11 +110,11 @@ fn prepare_context_with_counter(
             .unwrap_or_default()
             .min(input_limit.div_ceil(2));
         let system_budget = input_limit.saturating_sub(newest_reserve);
-        let (system_content, was_truncated) =
-            truncate_message_content_with(&raw_system_content, system_budget, counter);
-        if was_truncated {
+        let (system_content, audit) = fit_system_sections(&raw_sections, system_budget, counter);
+        if audit.iter().any(|section| section.truncated) {
             truncated_messages += 1;
         }
+        section_audit = audit;
         if !system_content.is_empty() {
             let system = ChatInput {
                 role: MessageRole::System,
@@ -147,6 +166,7 @@ fn prepare_context_with_counter(
         estimated_input_tokens: used.saturating_add(history_tokens),
         omitted_messages,
         truncated_messages,
+        section_audit,
     }
 }
 
@@ -214,27 +234,123 @@ fn truncate_message_content_with(
     (best, true)
 }
 
-fn system_prompt(sections: ContextSections<'_>) -> String {
+fn system_sections(sections: ContextSections<'_>) -> Vec<(&'static str, String, usize)> {
     let mut output = Vec::new();
-    if !sections.character.trim().is_empty() {
-        output.push(format!("# Character\n{}", sections.character.trim()));
-    }
-    if !sections.user.trim().is_empty() {
-        output.push(format!("# User\n{}", sections.user.trim()));
-    }
-    if !sections.memory.trim().is_empty() {
-        output.push(format!("# Relevant Memory\n{}", sections.memory.trim()));
-    }
-    if !sections.state.trim().is_empty() {
-        output.push(sections.state.trim().to_owned());
-    }
-    if !sections.semantic_graph.trim().is_empty() {
-        output.push(format!(
-            "# Active Lore Context\n{}",
-            sections.semantic_graph.trim()
+    if !sections.runtime_instructions.trim().is_empty() {
+        output.push((
+            "runtime_instructions",
+            format!(
+                "# Runtime Instructions\n{}",
+                sections.runtime_instructions.trim()
+            ),
+            4,
         ));
     }
-    output.join("\n\n")
+    if !sections.character.trim().is_empty() {
+        output.push((
+            "character",
+            format!("# Character\n{}", sections.character.trim()),
+            4,
+        ));
+    }
+    if !sections.user.trim().is_empty() {
+        output.push(("user", format!("# User\n{}", sections.user.trim()), 2));
+    }
+    if !sections.memory.trim().is_empty() {
+        output.push((
+            "memory",
+            format!("# Relevant Memory\n{}", sections.memory.trim()),
+            3,
+        ));
+    }
+    if !sections.state.trim().is_empty() {
+        output.push(("state", sections.state.trim().to_owned(), 3));
+    }
+    if !sections.semantic_graph.trim().is_empty() {
+        output.push((
+            "semantic_graph",
+            format!("# Active Lore Context\n{}", sections.semantic_graph.trim()),
+            2,
+        ));
+    }
+    output
+}
+
+fn fit_system_sections(
+    sections: &[(&str, String, usize)],
+    message_budget: usize,
+    counter: &dyn Fn(&str) -> usize,
+) -> (String, Vec<ContextSectionAudit>) {
+    let join = |values: &[String]| {
+        values
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let originals = sections
+        .iter()
+        .map(|(_, text, _)| text.clone())
+        .collect::<Vec<_>>();
+    let full = join(&originals);
+    let content_budget = message_budget.saturating_sub(6);
+    let mut kept = originals.clone();
+    if message_budget <= 6 || counter(&full) > content_budget {
+        // Water-fill capped weighted shares. A giant card cannot erase all
+        // relationship, state or lore sections by occupying their position.
+        // Small sections finish early and return unused tokens to larger ones.
+        let separator_reserve = sections.len().saturating_sub(1) * counter("\n\n");
+        let mut remaining = content_budget.saturating_sub(separator_reserve);
+        let costs = originals.iter().map(|s| counter(s)).collect::<Vec<_>>();
+        let mut quotas = vec![0_usize; sections.len()];
+        while remaining > 0 {
+            let mut advanced = false;
+            for (index, (_, _, weight)) in sections.iter().enumerate() {
+                let grant = (*weight)
+                    .min(costs[index].saturating_sub(quotas[index]))
+                    .min(remaining);
+                quotas[index] += grant;
+                remaining -= grant;
+                advanced |= grant > 0;
+            }
+            if !advanced {
+                break;
+            }
+        }
+        kept = originals
+            .iter()
+            .zip(&quotas)
+            .map(|(text, quota)| {
+                if *quota == 0 {
+                    String::new()
+                } else {
+                    truncate_message_content_with(text, quota.saturating_add(6), counter).0
+                }
+            })
+            .collect();
+        // Exact tokenizers can merge tokens across section boundaries. Verify
+        // the combined prompt, not just the sum of independently counted parts.
+        // Very small budgets drop the lowest-priority nonempty section first.
+        while counter(&join(&kept)) > content_budget {
+            let Some(index) = (0..kept.len()).rev().find(|&i| !kept[i].is_empty()) else {
+                break;
+            };
+            kept[index].pop();
+        }
+    }
+    let audit = sections
+        .iter()
+        .zip(&kept)
+        .map(|((name, original, _), injected)| ContextSectionAudit {
+            section: (*name).to_owned(),
+            original_tokens: counter(original),
+            injected_tokens: counter(injected),
+            truncated: original != injected,
+            omitted: injected.is_empty(),
+        })
+        .collect();
+    (join(&kept), audit)
 }
 
 #[cfg(test)]
@@ -281,6 +397,31 @@ mod tests {
         assert!(prepared.messages[0].content.contains("# User"));
         assert!(prepared.messages[0].content.contains("# Relevant Memory"));
         assert_eq!(prepared.omitted_messages, 0);
+    }
+
+    #[test]
+    fn governed_runtime_instructions_are_system_context_not_trimmable_history() {
+        let messages = [message(&"old history ".repeat(200)), message("latest turn")];
+        let prepared = prepare_context(ContextRequest {
+            sections: ContextSections {
+                runtime_instructions: "Always answer in character.",
+                character: "A concise guide.",
+                ..ContextSections::default()
+            },
+            messages: &messages,
+            budget: ContextBudget {
+                context_window: 256,
+                reserve_output_tokens: 32,
+            },
+        });
+
+        let system = &prepared.messages[0].content;
+        assert!(system.starts_with("# Runtime Instructions"));
+        assert!(system.contains("Always answer in character."));
+        assert_eq!(
+            prepared.messages.last().expect("latest").content,
+            "latest turn"
+        );
     }
 
     #[test]
@@ -362,5 +503,53 @@ mod tests {
         assert_eq!(prepared.omitted_messages, 0);
         assert_eq!(prepared.truncated_messages, 1);
         assert!(prepared.estimated_input_tokens <= 36);
+    }
+
+    #[test]
+    fn huge_character_preserves_small_relationship_and_state_sections() {
+        let messages = [message("Where do we go next?")];
+        let character = "Biography detail. ".repeat(4_000);
+        for tokenizer in [TokenizerProfile::Cl100kBase, TokenizerProfile::Conservative] {
+            let prepared = prepare_context_with_tokenizer(
+                ContextRequest {
+                    sections: ContextSections {
+                        runtime_instructions: "Respect the traveler's choices.",
+                        character: &character,
+                        user: "The traveler trusts Mira.",
+                        memory: "Mira promised to meet at dawn.",
+                        state: "# Scene\nOnly Eren and the traveler are in the harbor.",
+                        semantic_graph: "Mira is a cartographer, not the harbor keeper.",
+                    },
+                    messages: &messages,
+                    budget: ContextBudget {
+                        context_window: 512,
+                        reserve_output_tokens: 64,
+                    },
+                },
+                &tokenizer,
+            );
+            let system = &prepared.messages[0].content;
+            assert!(system.contains("Mira promised to meet at dawn."));
+            assert!(system.contains("Only Eren and the traveler are in the harbor."));
+            assert!(system.contains("Respect the traveler's choices."));
+            assert_eq!(prepared.section_audit.len(), 6);
+            assert!(
+                prepared
+                    .section_audit
+                    .iter()
+                    .find(|s| s.section == "character")
+                    .unwrap()
+                    .truncated
+            );
+            assert!(
+                !prepared
+                    .section_audit
+                    .iter()
+                    .find(|s| s.section == "state")
+                    .unwrap()
+                    .truncated
+            );
+            assert!(prepared.estimated_input_tokens <= 320);
+        }
     }
 }

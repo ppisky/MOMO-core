@@ -57,6 +57,53 @@ pub async fn complete_response_operation(
         .map_err(|error| error.to_string())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitResponseCompletionRequest {
+    request_id: String,
+    conversation_scope_id: String,
+    conversation_id: String,
+    assistant_content: Option<String>,
+    maintenance_turn: Option<momo_storage::MaintenanceTurn>,
+    memory_enabled: bool,
+    nsg_enabled: bool,
+    #[serde(default)]
+    mo_state_operation_id: Option<String>,
+    response_json: String,
+}
+
+pub async fn commit_response_completion_json(request_json: String) -> Result<bool, String> {
+    let request: CommitResponseCompletionRequest =
+        serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
+    let conversation_scope_id =
+        uuid::Uuid::parse_str(&request.conversation_scope_id).map_err(|error| error.to_string())?;
+    let conversation_id =
+        uuid::Uuid::parse_str(&request.conversation_id).map_err(|error| error.to_string())?;
+    let assistant_message = request
+        .assistant_content
+        .map(|content| momo_domain::Message {
+            id: momo_domain::new_id(),
+            conversation_id,
+            role: momo_domain::MessageRole::Assistant,
+            content,
+            created_at: chrono::Utc::now(),
+        });
+    core()?
+        .store()
+        .commit_response_completion(momo_storage::ResponseCompletion {
+            request_id: &request.request_id,
+            conversation_scope_id,
+            assistant_message: assistant_message.as_ref(),
+            maintenance_turn: request.maintenance_turn.as_ref(),
+            memory_enabled: request.memory_enabled,
+            nsg_enabled: request.nsg_enabled,
+            mo_state_operation_id: request.mo_state_operation_id.as_deref(),
+            response_json: &request.response_json,
+        })
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub async fn append_maintenance_turn_json(
     turn_json: String,
     memory_enabled: bool,
@@ -105,8 +152,52 @@ pub async fn mark_maintenance_turns_done(
         .map_err(|error| error.to_string())
 }
 
+pub async fn stage_maintenance_batch_json(batch_json: String) -> Result<String, String> {
+    let batch: momo_storage::MaintenanceBatch =
+        serde_json::from_str(&batch_json).map_err(|error| error.to_string())?;
+    core()?
+        .store()
+        .stage_maintenance_batch(&batch)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn maintenance_batch_patch(batch_key: String) -> Result<Option<String>, String> {
+    core()?
+        .store()
+        .maintenance_batch_patch(&batch_key)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn discard_maintenance_batch(batch_key: String) -> Result<bool, String> {
+    core()?
+        .store()
+        .discard_maintenance_batch(&batch_key)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn complete_maintenance_batch(
+    batch_key: String,
+    request_ids: Vec<String>,
+    kind: String,
+) -> Result<(), String> {
+    let kind = match kind.as_str() {
+        "memory" => momo_storage::MaintenanceKind::Memory,
+        "semantic_graph" => momo_storage::MaintenanceKind::SemanticGraph,
+        _ => return Err("unknown maintenance kind".to_owned()),
+    };
+    core()?
+        .store()
+        .complete_maintenance_batch(&batch_key, &request_ids, kind)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub async fn cache_character_json(character_json: String) -> Result<(), String> {
     let character = serde_json::from_str(&character_json).map_err(|error| error.to_string())?;
+    validate_runtime_character(&character)?;
     core()?
         .store()
         .save_character(&character)
@@ -116,6 +207,7 @@ pub async fn cache_character_json(character_json: String) -> Result<(), String> 
 
 pub async fn stage_character_from_json(character_json: String) -> Result<(), String> {
     let character = serde_json::from_str(&character_json).map_err(|error| error.to_string())?;
+    validate_runtime_character(&character)?;
     core()?
         .store()
         .save_character(&character)
@@ -311,7 +403,6 @@ pub async fn stage_character_json(
     scope_id: String,
     author_display_name: String,
     name: String,
-    _description: String,
     character_markdown: String,
     user_markdown: String,
 ) -> Result<String, String> {
@@ -330,6 +421,7 @@ pub async fn stage_character_json(
         created_at: now,
         updated_at: now,
     };
+    validate_runtime_character(&card)?;
     core()?
         .store()
         .save_character(&card)
@@ -348,6 +440,7 @@ pub async fn stage_character_update_json(
     if card.scope_id != scope_id {
         return Err("character body scope does not match request scope".to_owned());
     }
+    validate_runtime_character(&card)?;
     let core = core()?;
     if core
         .store()
@@ -364,6 +457,40 @@ pub async fn stage_character_update_json(
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&card).map_err(|error| error.to_string())
+}
+
+fn validate_runtime_character(card: &momo_domain::CharacterCard) -> Result<(), String> {
+    if card.name.trim().is_empty() || card.name.chars().count() > 120 {
+        return Err("character name must contain between 1 and 120 characters".to_owned());
+    }
+    semver::Version::parse(&card.version)
+        .map_err(|error| format!("character version is not SemVer: {error}"))?;
+    if card.author_name.trim().is_empty() || card.author_name.chars().count() > 200 {
+        return Err("character author name must contain between 1 and 200 characters".to_owned());
+    }
+    if let Some(url) = card.author_url.as_deref() {
+        url::Url::parse(url)
+            .map_err(|error| format!("character author URL is invalid: {error}"))?;
+    }
+    for (name, markdown) in [
+        ("character_markdown", Some(card.character_markdown.as_str())),
+        ("user_markdown", Some(card.user_markdown.as_str())),
+        ("opening_markdown", card.opening_markdown.as_deref()),
+    ] {
+        let Some(markdown) = markdown else {
+            continue;
+        };
+        if markdown.len() > 200_000 {
+            return Err(format!("{name} exceeds 200000 bytes"));
+        }
+        let mut lines = markdown.lines();
+        if let Some(marker @ ("---" | "+++")) = lines.next().map(str::trim)
+            && lines.any(|line| line.trim() == marker)
+        {
+            return Err(format!("{name} must not contain frontmatter"));
+        }
+    }
+    Ok(())
 }
 
 pub async fn stage_character_delete(scope_id: String, id: String) -> Result<(), String> {
@@ -467,4 +594,43 @@ pub async fn stage_conversation_delete(scope_id: String, id: String) -> Result<(
         .stage_conversation_delete(id)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod character_validation_tests {
+    use super::*;
+
+    fn card() -> momo_domain::CharacterCard {
+        let now = chrono::Utc::now();
+        momo_domain::CharacterCard {
+            id: momo_domain::new_id(),
+            scope_id: momo_domain::new_id(),
+            name: "Momo".to_owned(),
+            version: "1.0.0".to_owned(),
+            author_name: "Author".to_owned(),
+            author_url: Some("https://example.test/author".to_owned()),
+            character_markdown: "# Momo\n\nStay in character.".to_owned(),
+            user_markdown: String::new(),
+            opening_markdown: Some("Hello.".to_owned()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn character_crud_uses_native_card_validation() {
+        validate_runtime_character(&card()).expect("valid character");
+
+        let mut invalid = card();
+        invalid.author_name.clear();
+        assert!(validate_runtime_character(&invalid).is_err());
+
+        let mut invalid = card();
+        invalid.version = "latest".to_owned();
+        assert!(validate_runtime_character(&invalid).is_err());
+
+        let mut invalid = card();
+        invalid.character_markdown = "---\nsecret: true\n---\n# Momo".to_owned();
+        assert!(validate_runtime_character(&invalid).is_err());
+    }
 }

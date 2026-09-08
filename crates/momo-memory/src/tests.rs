@@ -2,6 +2,255 @@ use super::*;
 
 const TEST_BODY: &str = "# Test\n\n## 关键变化\n\n旧内容。\n";
 
+#[test]
+fn body_only_identifiers_are_searchable_and_removed_when_corrected() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    write_fixture(
+        root.path(),
+        &event_fixture("events/owner.md", "owner", &["ownership"]),
+    );
+    let mut document = workspace.read("events/owner.md").expect("read");
+    document.body = "# Mara\n\nMara owns instrument S17.".to_owned();
+    fs::write(
+        root.path().join("events/owner.md"),
+        document.encode().expect("encode"),
+    )
+    .expect("write");
+    let query = |q| {
+        workspace
+            .retrieve(q, 4096, &ConservativeTokenCounter)
+            .expect("retrieve")
+    };
+    assert!(query("S17").iter().any(|r| r.id == "owner"));
+    assert!(!query("S71").iter().any(|r| r.id == "owner"));
+    assert!(!query("S170").iter().any(|r| r.id == "owner"));
+    document.body = "# Mara\n\nCorrection: Mara owns instrument S71.".to_owned();
+    fs::write(
+        root.path().join("events/owner.md"),
+        document.encode().expect("encode"),
+    )
+    .expect("write");
+    assert!(!query("S17").iter().any(|r| r.id == "owner"));
+    assert!(query("S71").iter().any(|r| r.id == "owner"));
+}
+
+#[test]
+fn structured_tags_and_ids_do_not_match_shared_prefix_tokens() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    for index in 0..3 {
+        let id = format!("event_{index:05}");
+        let tag = format!("unique_{index:05}");
+        let relative = format!("events/{id}.md");
+        let tags = [tag.as_str()];
+        write_fixture(root.path(), &event_fixture(&relative, &id, &tags));
+    }
+    workspace.rebuild_index().expect("index");
+
+    let retrieved = workspace
+        .retrieve("unique_00002", 4096, &ConservativeTokenCounter)
+        .expect("retrieve");
+    let event_ids = retrieved
+        .iter()
+        .filter(|item| item.path.starts_with("events"))
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(event_ids, vec!["event_00002"]);
+}
+
+#[test]
+fn body_terms_retrieve_specific_english_and_chinese_facts() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    write_fixture(
+        root.path(),
+        &event_fixture("events/english.md", "english_record", &[]),
+    );
+    write_fixture(
+        root.path(),
+        &event_fixture("events/chinese.md", "chinese_record", &[]),
+    );
+    let mut english = workspace.read("events/english.md").expect("english");
+    english.body =
+        "# Record Twenty Four\n\nMara's silver astrolabe is stored in Glass-Archive-52636."
+            .to_owned();
+    fs::write(
+        root.path().join("events/english.md"),
+        english.encode().expect("encode english"),
+    )
+    .expect("write english");
+    let mut chinese = workspace.read("events/chinese.md").expect("chinese");
+    chinese.body = "# 第二十四条记录\n\n玛拉的银色星盘存放在Glass-Archive-52636。".to_owned();
+    fs::write(
+        root.path().join("events/chinese.md"),
+        chinese.encode().expect("encode chinese"),
+    )
+    .expect("write chinese");
+
+    let english_results = workspace
+        .retrieve(
+            "Where is Mara's silver astrolabe?",
+            4096,
+            &ConservativeTokenCounter,
+        )
+        .expect("retrieve english");
+    assert!(
+        english_results
+            .iter()
+            .any(|item| item.id == "english_record")
+    );
+    let chinese_results = workspace
+        .retrieve(
+            "现在应该去哪里找玛拉的银色星盘？",
+            4096,
+            &ConservativeTokenCounter,
+        )
+        .expect("retrieve chinese");
+    assert!(
+        chinese_results
+            .iter()
+            .any(|item| item.id == "chinese_record")
+    );
+}
+
+#[test]
+fn cross_language_fallback_is_bounded_and_preserves_same_language_negatives() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    for (index, weight) in [(1, 0.9), (2, 0.8), (3, 0.7)] {
+        let id = format!("english_record_{index}");
+        let relative = format!("events/{id}.md");
+        write_fixture(root.path(), &event_fixture(&relative, &id, &[]));
+        let mut document = workspace.read(&relative).expect("read fixture");
+        document.metadata.weight = Some(weight);
+        document.body = format!("# Archive Record {index}\n\nMara stored an instrument safely.");
+        fs::write(
+            root.path().join(&relative),
+            document.encode().expect("encode fixture"),
+        )
+        .expect("write fixture");
+    }
+    workspace.rebuild_index().expect("index");
+
+    let cross_language = workspace
+        .retrieve("玛拉把星盘存放在哪里？", 4096, &ConservativeTokenCounter)
+        .expect("cross-language retrieval");
+    let ids = cross_language
+        .iter()
+        .filter(|item| item.path.starts_with("events"))
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["english_record_1", "english_record_2"]);
+
+    let same_language_negative = workspace
+        .retrieve("Where is Ivo's telescope?", 4096, &ConservativeTokenCounter)
+        .expect("same-language negative retrieval");
+    assert!(
+        same_language_negative
+            .iter()
+            .all(|item| !item.path.starts_with("events"))
+    );
+}
+
+#[test]
+fn retrieval_prefers_specific_entity_binding_over_popular_partial_matches() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    let mut distractor = event_fixture("events/decoy.md", "decoy", &["silver", "silver", "silver"]);
+    distractor.importance = 1.0;
+    write_fixture(root.path(), &distractor);
+    let mut target = event_fixture("events/target.md", "target", &["Mara silver astrolabe"]);
+    target.importance = 0.1;
+    write_fixture(root.path(), &target);
+    workspace.rebuild_index().expect("index");
+    let retrieved = workspace
+        .retrieve("Mara silver astrolabe", 4096, &ConservativeTokenCounter)
+        .expect("retrieve");
+    let ids: Vec<_> = retrieved
+        .iter()
+        .filter(|r| r.id == "target" || r.id == "decoy")
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["target", "decoy"]);
+}
+
+#[test]
+fn initialize_upgrades_an_empty_legacy_scene_without_overwriting_content() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("initialize");
+    let mut scene = workspace.read("current/scene.md").expect("scene");
+    scene.body = "# 当前场景\n\n".to_owned();
+    fs::write(
+        workspace.root().join("current/scene.md"),
+        scene.encode().expect("encode"),
+    )
+    .expect("write legacy scene");
+
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("reinitialize");
+    let upgraded = workspace.read("current/scene.md").expect("upgraded scene");
+    assert!(upgraded.body.contains("## Scene ID\nscene_initial"));
+    assert!(upgraded.body.contains("## Source References"));
+
+    let mut customized = upgraded;
+    customized.body = "# 当前场景\n\n用户自己写的场景。\n".to_owned();
+    fs::write(
+        workspace.root().join("current/scene.md"),
+        customized.encode().expect("encode customized"),
+    )
+    .expect("write customized scene");
+    MemoryWorkspace::initialize(root.path()).expect("reinitialize customized");
+    assert_eq!(
+        workspace.read("current/scene.md").expect("preserved").body,
+        customized.body
+    );
+}
+
+#[test]
+fn mo_state_source_identity_ignores_audit_but_tracks_scene_and_graph() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("initialize");
+    write_fixture(
+        workspace.root(),
+        &event_fixture("events/retrieval.md", "event_retrieval", &["retrievable"]),
+    );
+    workspace.rebuild_index().expect("rebuild index");
+    let initial = workspace
+        .mo_state_source_fingerprint()
+        .expect("initial fingerprint");
+    workspace
+        .retrieve("retrievable", 2_048, &ConservativeTokenCounter)
+        .expect("retrieve");
+    let after_retrieval = workspace
+        .mo_state_source_fingerprint()
+        .expect("retrieval fingerprint");
+    assert_eq!(initial, after_retrieval);
+    fs::write(
+        workspace.root().join("audit/memory.log"),
+        "volatile read audit\n",
+    )
+    .expect("audit");
+    let after_audit = workspace
+        .mo_state_source_fingerprint()
+        .expect("audit fingerprint");
+    assert_eq!(initial, after_audit);
+
+    let mut scene = workspace.read("current/scene.md").expect("scene");
+    scene.body = scene.body.replace("## Focus\n", "## Focus\n在客厅交谈\n");
+    fs::write(
+        workspace.root().join("current/scene.md"),
+        scene.encode().expect("encode"),
+    )
+    .expect("write scene");
+    let changed = workspace
+        .mo_state_source_fingerprint()
+        .expect("changed fingerprint");
+    assert_ne!(changed.dmw, initial.dmw);
+    assert_ne!(changed.scene, initial.scene);
+    assert_eq!(changed.nsg, initial.nsg);
+    assert_eq!(changed.scene_snapshot.focus.as_deref(), Some("在客厅交谈"));
+}
+
 struct Fixture<'a> {
     relative: &'a str,
     id: &'a str,
@@ -518,7 +767,7 @@ patches:
     operations:
       - type: create
         frontmatter:
-          id: event_created
+          id: event_record
           type: event
           importance: 0.7
           weight: 0.8
@@ -527,9 +776,9 @@ patches:
           tags: [created]
           status: active
         content: |-
-          # Created Memory
+          # Recorded Memory
 
-          Created memory.
+          Recorded memory.
 "#,
         )
         .expect("create");
@@ -551,16 +800,61 @@ patches:
             .retrieve("created", usize::MAX, &ConservativeTokenCounter)
             .expect("old tag query")
             .iter()
-            .all(|memory| memory.id != "event_created")
+            .all(|memory| memory.id != "event_record")
     );
     let retrieved = workspace
         .retrieve("renamed", usize::MAX, &ConservativeTokenCounter)
         .expect("new tag query");
-    assert!(retrieved.iter().any(|memory| memory.id == "event_created"));
+    assert!(retrieved.iter().any(|memory| memory.id == "event_record"));
     let by_title = workspace
-        .retrieve("created memory", usize::MAX, &ConservativeTokenCounter)
+        .retrieve("recorded memory", usize::MAX, &ConservativeTokenCounter)
         .expect("title alias query");
-    assert!(by_title.iter().any(|memory| memory.id == "event_created"));
+    assert!(by_title.iter().any(|memory| memory.id == "event_record"));
+}
+
+#[test]
+fn multiword_title_alias_is_searchable_by_a_specific_term() {
+    let root = tempfile::tempdir().expect("memory root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("initialize");
+    workspace
+        .apply_patch(
+            r#"
+patches:
+  - target_file: world/astrolabe_provenance.md
+    operations:
+      - type: create
+        frontmatter:
+          id: world_navigation_record
+          type: world
+          importance: 0.8
+          weight: 0.8
+          decay_at: 2000000000
+          relations: {}
+          tags: []
+          aliases: []
+          status: active
+        content: |-
+          # Astrolabe Provenance and Winter Storage
+
+          ## Confirmed Facts
+
+          - Mara's silver astrolabe is stored in the Glass Archive.
+"#,
+        )
+        .expect("create memory");
+
+    let retrieved = workspace
+        .retrieve(
+            "Where is Mara's silver astrolabe?",
+            576,
+            &ConservativeTokenCounter,
+        )
+        .expect("retrieve");
+    let memory = retrieved
+        .iter()
+        .find(|item| item.id == "world_navigation_record")
+        .expect("specific title term retrieves cropped document");
+    assert!(memory.body.contains("Glass Archive"));
 }
 
 #[test]
@@ -1014,6 +1308,47 @@ patches:
         original
     );
     assert!(!root.path().join("escape.md").exists());
+}
+
+#[test]
+fn exact_memory_patch_replay_is_idempotent() {
+    let root = tempfile::tempdir().expect("memory root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("initialize");
+    let create = r#"
+patches:
+  - target_file: events/replay.md
+    operations:
+      - type: create
+        frontmatter:
+          id: event_replay
+          type: event
+          importance: 0.5
+          weight: 0.5
+          decay_at: 1
+          status: active
+        content: |-
+          # Replay
+
+          ## Facts
+          original
+"#;
+    workspace.apply_patch(create).expect("first create");
+    workspace.apply_patch(create).expect("replayed create");
+
+    let append = r#"
+patches:
+  - target_file: events/replay.md
+    operations:
+      - type: append
+        section: Facts
+        content: durable addition
+"#;
+    workspace.apply_patch(append).expect("first append");
+    workspace.apply_patch(append).expect("replayed append");
+    let document = workspace
+        .read("events/replay.md")
+        .expect("replayed document");
+    assert_eq!(document.body.matches("durable addition").count(), 1);
 }
 
 #[test]

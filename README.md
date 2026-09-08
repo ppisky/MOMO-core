@@ -4,7 +4,7 @@
 
 MOMO Core is a local-first Rust foundation for AI character experiences. It
 provides character data, conversations, long-term memory, narrative semantics,
-state compilation, portable containers, encryption, model gateways, and a
+an autonomous state runtime, portable containers, encryption, model gateways, and a
 local HTTP interface in one workspace.
 
 ## Capabilities
@@ -17,7 +17,7 @@ local HTTP interface in one workspace.
 - typed MOMO LSB carriers for PNG and lossless WebP (no APNG or AVIF)
 - Dual-Mem Wiki (DMW) long-term memory
 - Narrative Semantic Graph (NSG)
-- MO State compilation
+- MO State v2 autonomous runtime with per-Space DMW/NSG, scene, revision, and snapshot management
 - SQLite application storage and a separate Turso vector store
 - native `MomoApi` orchestration plus outbound model-adapter interfaces
 - governed image input through an optional visual-description adapter
@@ -26,10 +26,14 @@ local HTTP interface in one workspace.
 
 The crates under `crates/` are implementation modules of MOMO Core. They are
 not separate products or independently published crates.io packages. The 1.0
-product stability surface is the native HTTP contract plus documented portable
-formats; embedders may still use the Rust API from this workspace. `momo-server`
-exposes the same Core capabilities over a loopback HTTP/SSE interface for local
-applications.
+product stability surface is the versioned native HTTP wire
+(`momo.responses/1.0` and `momo.control/1.0`) plus documented portable formats;
+the remaining `/v1` routes are a local administration profile.
+Embedders may still use the Rust API from the same pinned workspace revision,
+without an independent crates.io SemVer promise. See the
+[HTTP boundary](docs/http_api_1_0.md) and [specification index](docs/spec_index.md).
+`momo-server` exposes the same Core capabilities over a loopback HTTP/SSE
+interface for local applications.
 
 ## Character-card format boundary
 
@@ -51,13 +55,18 @@ Risu-specific extensions are identified from the
 used only as a downstream cross-check. All external specification documents are
 linked at pinned revisions rather than redistributed. See [character-card formats and compatibility](docs/character_card_compatibility.md)
 for source precedence, licensing boundaries, terminology, and implementation status.
+See [experience-grounded character design](docs/character_design_mechanism.en.md)
+for the authoring model used by the original MORP-Bench cast.
+The experimental [Dynamic Disposition Model](DYNAMIC_DISPOSITION_MODEL_v1.md)
+defines how those stable tendencies could be modulated by current context and
+MO State without creating another memory store.
 
 ## Workspace
 
 - `momo-core`: orchestration and client-facing Rust APIs
 - `momo-domain`: shared domain types
 - `momo-storage`: SQLite application persistence and Turso vector storage
-- `momo-memory`: DMW, NSG, retrieval, and MO State
+- `momo-memory`: DMW, NSG, retrieval, scene parsing, and MO State projection
 - `momo-moc`: MOC containers
 - `momo-crypto`: encrypted private containers
 - `momo-config`: portable runtime configuration
@@ -109,8 +118,8 @@ images go directly to an image-capable conversation model, or through the
 optional logical `vision` description route when the conversation model is
 text-only. Resolved input and usage are persisted for deterministic request-ID
 replay. The `momo.responses/1.0` cross-repository fixtures are frozen, but this
-is only a local `v1.0.0` candidate and has not been pushed or published;
-credentialed owner testing remains the GitHub publication gate. See the
+is published as the `v1.0.0-rc.1` prerelease; broader credentialed and MORP
+coverage remains the stable `v1.0.0` gate. See the
 [1.0.0 release contract](docs/roadmap_1_0_0.md).
 
 Background maintenance prompts are portable Markdown files rather than
@@ -131,6 +140,27 @@ UUID. See the [normative Space model](docs/space_model_1_0.md) and the
 [host guide](docs/spaces_and_controls.en.md).
 
 ## Validate
+
+[MORP-Bench](benchmarks/morp/README.en.md) adds original memory scenarios, ACGN
+label-ablation experiments, reproducible scoring and source-license notes.
+Run `bash scripts/test-morp.sh`; Windows PowerShell also has `./scripts/test-morp.ps1`.
+The default workflow is offline; candidate and judge inference require an
+explicit `--allow-ai` and are not part of CI.
+
+Generate a model plan without contacting a provider:
+
+```bash
+bash scripts/run-morp-model.sh \
+  --config benchmarks/morp/configs/baseline.example.json
+```
+
+The runner supports lightweight selection by character, dimension, scenario
+family, ACGN arm, or exact case ID. Reports expose explicit 0–100 objective and
+selected-dimension summaries without converting pending subjective judgements
+into zero. Record a credentialed run in the
+[real-results template](benchmarks/morp/RESULTS_TEMPLATE.md).
+The current non-normative engineering assessment is available in the
+[role-playing implementation review](docs/roleplay_implementation_review.en.md).
 
 ```bash
 cargo fmt --all -- --check

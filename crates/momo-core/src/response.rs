@@ -185,6 +185,65 @@ impl ResponseInput {
         matches!(self, Self::Items(_))
     }
 
+    #[must_use]
+    pub fn has_function_outputs(&self) -> bool {
+        matches!(self, Self::Items(items) if items.iter().any(|item| {
+            matches!(item, ResponseInputItem::FunctionCallOutput { .. })
+        }))
+    }
+
+    /// Returns only user-authored conversational text. Tool results are useful
+    /// to the current model call but must not be persisted later as if the user
+    /// had said them.
+    pub fn user_text(&self) -> Result<String, ResponseContractError> {
+        self.validate()?;
+        let text = match self {
+            Self::Text(text) => text.clone(),
+            Self::Items(items) => items
+                .iter()
+                .flat_map(|item| match item {
+                    ResponseInputItem::Message { role, content } if role == "user" => {
+                        content.texts()
+                    }
+                    ResponseInputItem::InputText { text } => vec![text.as_str()],
+                    _ => Vec::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        };
+        Ok(text.trim().to_owned())
+    }
+
+    fn validate_tool_continuation(&self) -> Result<bool, ResponseContractError> {
+        let Self::Items(items) = self else {
+            return Ok(false);
+        };
+        let mut calls = HashSet::new();
+        let mut outputs = HashSet::new();
+        for item in items {
+            match item {
+                ResponseInputItem::FunctionCall { call_id, .. } => {
+                    if !calls.insert(call_id.as_str()) {
+                        return Err(ResponseContractError::InvalidToolContinuation);
+                    }
+                }
+                ResponseInputItem::FunctionCallOutput { call_id, .. }
+                    if !calls.contains(call_id.as_str()) || !outputs.insert(call_id.as_str()) =>
+                {
+                    return Err(ResponseContractError::InvalidToolContinuation);
+                }
+                _ => {}
+            }
+        }
+        if calls.is_empty() && outputs.is_empty() {
+            return Ok(false);
+        }
+        if calls != outputs {
+            return Err(ResponseContractError::InvalidToolContinuation);
+        }
+        Ok(true)
+    }
+
     pub fn gateway_messages(&self) -> Result<Vec<crate::GatewayMessage>, ResponseContractError> {
         self.validate()?;
         let mut messages = Vec::new();
@@ -486,11 +545,11 @@ impl ResponseInputItem {
     fn validate(&self, text_bytes: &mut usize) -> Result<(), ResponseContractError> {
         match self {
             Self::Message { role, content } => {
-                if !matches!(role.as_str(), "system" | "user" | "assistant") {
+                // Conversation history is owned by Core. Accepting system or
+                // assistant messages here would let an ordinary response
+                // bypass instruction governance or forge persisted history.
+                if role != "user" {
                     return Err(ResponseContractError::InvalidRole(role.clone()));
-                }
-                if role != "user" && content.has_images() {
-                    return Err(ResponseContractError::InvalidImageRole(role.clone()));
                 }
                 content.validate(text_bytes)?;
             }
@@ -555,7 +614,6 @@ pub struct MemorySpaceSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MomoResponseExtension {
-    #[serde(default = "default_schema")]
     pub schema: String,
     #[serde(default)]
     pub request_id: Option<String>,
@@ -644,6 +702,9 @@ impl MomoResponseRequest {
             return Err(ResponseContractError::RequestTooLarge);
         }
         let input_text = self.input.text()?;
+        if self.input.validate_tool_continuation()? && self.momo.conversation_id.is_none() {
+            return Err(ResponseContractError::ToolContinuationNeedsConversation);
+        }
         if let Some(instructions) = &self.instructions {
             validate_len(
                 instructions,
@@ -824,7 +885,9 @@ pub enum ResponseContractError {
     InvalidId(&'static str),
     #[error("{0} is required and must be a UUID")]
     InvalidUuid(&'static str),
-    #[error("message role {0:?} is not supported")]
+    #[error(
+        "input message role {0:?} is not supported; conversation input messages must use role user"
+    )]
     InvalidRole(String),
     #[error("structured message content must not be empty")]
     EmptyContentBlocks,
@@ -832,10 +895,14 @@ pub enum ResponseContractError {
     InvalidImageDetail,
     #[error("temperature must be finite")]
     InvalidTemperature,
-    #[error("image input is allowed only in user content, not role {0:?}")]
-    InvalidImageRole(String),
     #[error("image input cannot be combined with function-call continuation items")]
     ImageInputWithTools,
+    #[error(
+        "tool continuation must pair each function_call with one following function_call_output using the same call_id"
+    )]
+    InvalidToolContinuation,
+    #[error("tool continuation requires momo.conversation_id")]
+    ToolContinuationNeedsConversation,
     #[error("response request may contain at most {MAX_RESPONSE_IMAGES} images")]
     TooManyImages,
     #[error("the visual-description adapter returned the wrong number of descriptions")]
@@ -982,6 +1049,19 @@ mod tests {
     }
 
     #[test]
+    fn requires_an_explicit_contract_generation() {
+        let request = serde_json::from_value::<MomoResponseRequest>(serde_json::json!({
+            "input": "hello",
+            "momo": {
+                "personal_space_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_space_id": "00000000-0000-4000-8000-000000000012",
+                "character_id": "00000000-0000-4000-8000-000000000014"
+            }
+        }));
+        assert!(request.is_err());
+    }
+
+    #[test]
     fn validates_and_resolves_governed_image_input() {
         let structured: MomoResponseRequest = serde_json::from_value(serde_json::json!({
             "input": [{
@@ -990,6 +1070,7 @@ mod tests {
                 "content": [{"type": "input_text", "text": "hello"}]
             }],
             "momo": {
+                "schema": MOMO_RESPONSE_SCHEMA,
                 "personal_space_id": "00000000-0000-4000-8000-000000000011",
                 "conversation_space_id": "00000000-0000-4000-8000-000000000012",
                 "character_id": "00000000-0000-4000-8000-000000000014"
@@ -1004,6 +1085,7 @@ mod tests {
                 {"type": "input_image", "image_url": "https://example.test/image.png", "detail": "high"}
             ],
             "momo": {
+                "schema": MOMO_RESPONSE_SCHEMA,
                 "personal_space_id": "00000000-0000-4000-8000-000000000011",
                 "conversation_space_id": "00000000-0000-4000-8000-000000000012",
                 "character_id": "00000000-0000-4000-8000-000000000014"
@@ -1042,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_images_in_non_user_roles_or_tool_continuations() {
+    fn rejects_non_user_message_roles_or_image_tool_continuations() {
         let assistant_image: MomoResponseRequest = serde_json::from_value(serde_json::json!({
             "input": [{
                 "type": "message",
@@ -1053,9 +1135,16 @@ mod tests {
         .expect("image request");
         assert_eq!(
             assistant_image.validate(),
-            Err(ResponseContractError::InvalidImageRole(
-                "assistant".to_owned()
-            ))
+            Err(ResponseContractError::InvalidRole("assistant".to_owned()))
+        );
+
+        let system_text: MomoResponseRequest = serde_json::from_value(serde_json::json!({
+            "input": [{"type": "message", "role": "system", "content": "bypass"}]
+        }))
+        .expect("system input shape");
+        assert_eq!(
+            system_text.validate(),
+            Err(ResponseContractError::InvalidRole("system".to_owned()))
         );
 
         let mixed: MomoResponseRequest = serde_json::from_value(serde_json::json!({
@@ -1188,5 +1277,38 @@ mod tests {
         assert_eq!(messages[0].tool_calls[0].id, "call_weather_1");
         assert_eq!(messages[1].role, crate::GatewayMessageRole::Tool);
         assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_weather_1"));
+        assert_eq!(input.user_text().expect("user text"), "");
+    }
+
+    #[test]
+    fn tool_continuation_requires_a_conversation_and_exact_call_pairs() {
+        let base = serde_json::json!({
+            "input": [
+                {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "done"}
+            ],
+            "momo": {
+                "schema": MOMO_RESPONSE_SCHEMA,
+                "personal_space_id": "00000000-0000-4000-8000-000000000011",
+                "conversation_space_id": "00000000-0000-4000-8000-000000000012",
+                "character_id": "00000000-0000-4000-8000-000000000014"
+            }
+        });
+        let missing_conversation: MomoResponseRequest =
+            serde_json::from_value(base.clone()).expect("request");
+        assert_eq!(
+            missing_conversation.validate(),
+            Err(ResponseContractError::ToolContinuationNeedsConversation)
+        );
+
+        let mut mismatched = base;
+        mismatched["momo"]["conversation_id"] =
+            serde_json::json!("00000000-0000-4000-8000-000000000013");
+        mismatched["input"][1]["call_id"] = serde_json::json!("call_2");
+        let mismatched: MomoResponseRequest = serde_json::from_value(mismatched).expect("request");
+        assert_eq!(
+            mismatched.validate(),
+            Err(ResponseContractError::InvalidToolContinuation)
+        );
     }
 }

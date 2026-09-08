@@ -3,7 +3,7 @@
 ```
 Standard: MOMO-STD-0001                              August 04, 2026
 Category: Specification
-Status: Implementation Baseline (v2.0.0)
+Status: Implemented Normative Contract (v2.0.0)
 ```
 
 ---

@@ -1,3 +1,7 @@
+> **Historical:** superseded by
+> [`Narrative_Semantic_Graph_v2.md`](Narrative_Semantic_Graph_v2.md). This final
+> v1 record does not define the MOMO Core 1.0 runtime.
+
 Internal Request for Comments: DMW-RFC-0012             July 30, 2026
 Category: Implementation Guide                       Status: Final
 Obsoletes: N/A                                       Updates: DMW-RFC-0011

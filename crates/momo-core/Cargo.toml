@@ -9,6 +9,7 @@ publish = false
 base64.workspace = true
 crc32fast.workspace = true
 futures-util.workspace = true
+fs2.workspace = true
 chrono.workspace = true
 hex.workspace = true
 image.workspace = true

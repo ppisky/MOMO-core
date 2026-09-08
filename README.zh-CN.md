@@ -3,7 +3,7 @@
 [English](README.md)
 
 MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数据、会话、长期记忆、
-叙事语义、状态编译、可移植容器、加密、模型网关与本地 HTTP 接口都在同一个 workspace
+叙事语义、自治状态运行时、可移植容器、加密、模型网关与本地 HTTP 接口都在同一个 workspace
 中实现。
 
 ## 主要能力
@@ -16,7 +16,7 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 - PNG/无损 WebP 的 MOMO LSB 载体；不支持 APNG 或 AVIF
 - Dual-Mem Wiki（DMW）长期记忆
 - Narrative Semantic Graph（NSG）
-- MO State 编译
+- MO State v2 自治运行时：按 Space 管理 DMW、NSG、场景、版本与持久快照
 - SQLite 业务存储与独立 Turso 向量存储
 - 原生 `MomoApi` 编排与面向模型服务的适配器接口
 - 通过可选视觉描述适配器处理的受治理图片输入
@@ -24,9 +24,11 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 - 向量存储契约与确定性检索
 
 `crates/` 下的 crate 是 MOMO Core 的内部实现模块，不是彼此独立的产品，也不会作为
-独立 crates.io 包发布。1.0 的产品稳定面是原生 HTTP 契约和已记录的可移植格式；嵌入方
-仍可直接从本 workspace 使用 Rust API。`momo-server` 通过仅限本机的 HTTP/SSE 接口提供
-同一组 Core 能力。
+独立 crates.io 包发布。1.0 的产品稳定面是版本化的原生 HTTP wire（`momo.responses/1.0`
+与 `momo.control/1.0`）和已记录的可移植格式；其余 `/v1` 路由属于本机管理 profile。嵌入方仍可从同一固定 workspace revision
+使用 Rust API，但这些 API 没有独立的 crates.io SemVer 承诺。详见
+[HTTP 边界](docs/http_api_1_0.md)与[规范索引](docs/spec_index.md)。`momo-server` 通过仅限
+本机的 HTTP/SSE 接口提供同一组 Core 能力。
 
 ## 角色卡格式边界
 
@@ -50,7 +52,7 @@ CCv2/CCv3 JSON 与 CHARX 导出；APNG 明确不支持。CHARX 的资产、`x_me
 - `momo-core`：编排与面向调用方的 Rust API
 - `momo-domain`：共享领域类型
 - `momo-storage`：SQLite 业务持久化与 Turso 向量存储
-- `momo-memory`：DMW、NSG、检索与 MO State
+- `momo-memory`：DMW、NSG、检索、场景解析与 MO State 投影
 - `momo-moc`：MOC 容器
 - `momo-crypto`：私有容器加密
 - `momo-config`：可移植运行配置
@@ -87,8 +89,8 @@ DMW/NSG 检索、MO State、上下文预算、逻辑路由和助手持久化，�
 本地 1.0 候选现已接入完整图片输入链路：单次最多八张用户图片；主对话模型声明
 `image` 时直接接收原图，纯文本主模型才使用可选的逻辑 `vision` 描述路由。解析结果与
 usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.responses/1.0` fixture 已冻结，
-当前只有本地 `v1.0.0` 候选标签，没有 push 或发布 GitHub Release；带真实凭据的所有者测试
-仍是 GitHub 发布门槛。详见
+当前以 `v1.0.0-rc.1` 预发布；更广的凭据测试与 MORP 覆盖仍是稳定版 `v1.0.0`
+发布门槛。详见
 [1.0.0 发布契约](docs/roadmap_1_0_0.md)。
 
 后台维护提示词使用可移植 Markdown 文件，不再把简化文本内联到 TOML。请从
@@ -106,6 +108,15 @@ usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.respons
 [Space 模型](docs/space_model_1_0.md)与[简体中文宿主指南](docs/spaces_and_controls.zh-CN.md)。
 
 ## 验证
+
+角色扮演与记忆评测见 [MORP-Bench](benchmarks/morp/README.md)：原创 ACGN 角色去标签对照、
+50/100/500 事件记忆压力测试、可重复评分与来源许可说明。Windows 运行
+`./scripts/test-morp.ps1`，Linux/macOS 运行 `bash scripts/test-morp.sh`；默认全程离线，
+需要模型的候选生成和裁判脚本只有显式 `--allow-ai` 才执行。需要先检查调用计划时，可用
+`bash scripts/run-morp-model.sh --config <配置文件>`；它默认只生成数据、验证并打印预计调用数，
+不访问模型。该入口支持按角色、维度、场景族、实验组或 case ID 生成轻量计划，并在执行后
+报告 0–100 的客观分与所选维度分。真实运行可记录到
+[结果表模板](benchmarks/morp/RESULTS_TEMPLATE.md)。Windows PowerShell 也保留对应的 `.ps1` 入口。
 
 ```bash
 cargo fmt --all -- --check

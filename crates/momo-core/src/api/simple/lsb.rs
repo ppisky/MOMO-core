@@ -17,7 +17,7 @@ const fn default_true() -> bool {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum LsbExportPayload {
     MomoCharacter {
-        scope_id: uuid::Uuid,
+        owner_space_id: uuid::Uuid,
         character_id: uuid::Uuid,
     },
     Moc {
@@ -64,19 +64,19 @@ pub async fn embed_lsb_image_json(request_json: String) -> Result<String, String
     let carrier = read_bounded_file(&request.carrier_path, crate::MAX_LSB_IMAGE_BYTES as u64)?;
     let (payload_type, payload) = match request.payload {
         LsbExportPayload::MomoCharacter {
-            scope_id,
+            owner_space_id,
             character_id,
         } => {
             let character = core()?
                 .store()
-                .list_characters_for_scope(scope_id)
+                .list_characters_for_scope(owner_space_id)
                 .await
                 .map_err(|error| error.to_string())?
                 .into_iter()
                 .find(|character| character.id == character_id)
                 .ok_or_else(|| "character does not exist in the requested scope".to_owned())?;
             let bytes = serde_json::to_vec(&json!({
-                "schema": "momo.character/0.5",
+                "schema": crate::MOMO_LSB_CHARACTER_SCHEMA,
                 "character": character,
             }))
             .map_err(|error| error.to_string())?;

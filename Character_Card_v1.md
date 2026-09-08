@@ -1,3 +1,6 @@
+> **Historical:** superseded by [`Character_Card_v2.md`](Character_Card_v2.md).
+> MOMO Core 1.0 uses Character Card v2 as its native character format.
+
 **Standard: MOMO-STD-0001**                                 July 19, 2026
 **Category: Specification**
 **Status: Final (v1.0.0)**

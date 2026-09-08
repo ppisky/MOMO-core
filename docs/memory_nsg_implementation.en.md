@@ -1,10 +1,10 @@
-# Dual-Mem Wiki and NSG v1 Implementation
+# Dual-Mem Wiki and NSG v2 Implementation
 
-**Updated:** 2026-08-10
+**Updated:** 2026-09-05
 
-This document describes the implemented runtime contract. The normative product
-specifications remain `Dual-Mem_Wiki_v1.md` and
-`Narrative_Semantic_Graph_v1.md`.
+This document describes the implemented runtime profile. The normative product
+specifications are [`Dual-Mem_Wiki_v2.md`](../Dual-Mem_Wiki_v2.md) and
+[`Narrative_Semantic_Graph_v2.md`](../Narrative_Semantic_Graph_v2.md).
 
 ## Distillation
 
@@ -38,21 +38,41 @@ specifications remain `Dual-Mem_Wiki_v1.md` and
 - Automatically created nodes start as `draft`.
 - Canon mutations become pending revision candidates unless an authorized
   manual operation explicitly changes them.
-- Retrieval combines normalized deterministic anchor matching with optional
+- Retrieval tokenizes multiword anchors for normalized deterministic matching with optional
   vector reciprocal-rank fusion, then applies importance/ID ordering, one-hop
   expansion, Zone filtering, and a hard token budget.
-- Chat retrieval allocates 75 percent of the memory budget to DMW and gives the
-  remaining budget to NSG.
+- Hybrid chat retrieval caps DMW at 60 percent before NSG runs. Any unused DMW
+  share remains available to NSG, so a complete graph node is not starved by
+  always-loaded current-memory documents.
+- Direct DMW hits that exceed their remaining share are cropped at Markdown
+  paragraph boundaries instead of being discarded as a whole.
+- DMW IDs, aliases, and tags support specific-term matches inside multiword
+  values, so a query does not need to repeat an entire generated title.
 
 ## MO State
 
-- `momo-memory` implements a deterministic MO State v1 compiler.
+- `momo-memory` keeps the deterministic v1 projector as one component of the
+  implemented MO State v2 autonomous runtime.
 - The compiler starts with the built-in five-dimension contract and may merge a
   user override from `config/state_contract.yaml`.
-- It extracts DMW and NSG signals, emits ordered state directives, trims lower
-  priority dimensions to fit the state budget, and returns an audit object.
+- Retrieval embeds the exact DMW metadata snapshot needed by the compiler, so
+  MO State performs no second file read and cannot mix two filesystem versions.
+- It extracts DMW and NSG signals, resolves explicitly declared rule conflicts,
+  emits ordered state directives, enforces a hard state budget, and returns an
+  audit object.
 - Contract load failures degrade the state context and surface warnings instead
   of failing the entire chat path.
+- A structured `current/scene.md` is parsed into a first-class scene snapshot;
+  an empty legacy scene template is upgraded without overwriting user content.
+- Authoritative DMW, NSG, and scene content receive independent fingerprints
+  and monotonic revisions. Retrieval-only `touch_at`, indexes, and audit logs do
+  not manufacture source revisions.
+- The Core response runtime serializes mutation per Space, journals each state
+  event in SQLite, idempotently publishes its snapshot, and atomically marks
+  the projected state operation complete with the response replay record.
+- In `closed_autonomous`, due DMW/NSG maintenance is recovered before the next
+  observation and scene-aware DMW distillation is scheduled after each text
+  turn. The external tool executor remains owned by the host harness.
 
 ## Verification Fixture
 

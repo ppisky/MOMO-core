@@ -25,6 +25,86 @@ async fn migrated_schema_uses_scope_id_exclusively() {
     assert!(vector_columns.is_empty());
 }
 
+fn mo_state_observation(operation_id: &str, event_fingerprint: &str) -> MoStateObservation {
+    MoStateObservation {
+        operation_id: operation_id.to_owned(),
+        space_id: "01900000-0000-7000-8000-000000000101".to_owned(),
+        event_type: "user_message".to_owned(),
+        event_fingerprint: event_fingerprint.to_owned(),
+        profile: "closed_autonomous".to_owned(),
+        dmw_fingerprint: "dmw-a".to_owned(),
+        nsg_fingerprint: "nsg-a".to_owned(),
+        scene_fingerprint: "scene-a".to_owned(),
+        scene_json: r#"{"scene_id":"scene_initial","status":"inactive"}"#.to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn mo_state_runtime_versions_sources_and_replays_snapshots() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let observation = mo_state_observation("state-operation-1", "event-a");
+    let operation = store
+        .observe_mo_state_operation(&observation)
+        .await
+        .expect("observe");
+    assert_eq!(operation.base_dmw_revision, 1);
+    assert_eq!(operation.base_nsg_revision, 1);
+    assert_eq!(operation.base_scene_revision, 1);
+
+    let state_result = r#"{"context":"[STATE_CONTEXT]","audit":{"dimensions_active":2}}"#;
+    let snapshot = store
+        .publish_mo_state_snapshot("state-operation-1", state_result, false, None)
+        .await
+        .expect("publish");
+    assert_eq!(snapshot.snapshot_revision, 1);
+    assert_eq!(snapshot.state_context, "[STATE_CONTEXT]");
+
+    let replayed_operation = store
+        .observe_mo_state_operation(&observation)
+        .await
+        .expect("replay observation");
+    let replayed = store
+        .publish_mo_state_snapshot("state-operation-1", state_result, false, None)
+        .await
+        .expect("replay snapshot");
+    assert!(replayed_operation.snapshot_json.is_some());
+    assert_eq!(replayed, snapshot);
+
+    let mut second = mo_state_observation("state-operation-2", "event-b");
+    second.dmw_fingerprint = "dmw-b".to_owned();
+    second.scene_fingerprint = "scene-b".to_owned();
+    let operation = store
+        .observe_mo_state_operation(&second)
+        .await
+        .expect("observe changed sources");
+    assert_eq!(operation.base_dmw_revision, 2);
+    assert_eq!(operation.base_nsg_revision, 1);
+    assert_eq!(operation.base_scene_revision, 2);
+
+    let status = store
+        .mo_state_runtime_status(&observation.space_id)
+        .await
+        .expect("status")
+        .expect("runtime");
+    assert_eq!(status.snapshot_revision, 1);
+    assert_eq!(status.current_snapshot, Some(snapshot));
+}
+
+#[tokio::test]
+async fn mo_state_operation_identity_is_immutable() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let original = mo_state_observation("state-operation-conflict", "event-a");
+    store
+        .observe_mo_state_operation(&original)
+        .await
+        .expect("observe");
+    let changed = mo_state_observation("state-operation-conflict", "event-b");
+    assert!(matches!(
+        store.observe_mo_state_operation(&changed).await,
+        Err(StorageError::MoStateOperationConflict(_))
+    ));
+}
+
 #[tokio::test]
 async fn response_operations_survive_reopen_semantics() {
     let store = LocalStore::in_memory().await.expect("store");
@@ -84,6 +164,82 @@ async fn response_operations_survive_reopen_semantics() {
         .expect("unchanged operation");
     assert_eq!(unchanged.request_fingerprint, "fingerprint-1");
     assert_eq!(unchanged.conversation_id, "conversation-1");
+}
+
+#[tokio::test]
+async fn control_operations_claim_and_replay_persistently() {
+    let store = LocalStore::in_memory().await.expect("store");
+    assert!(
+        store
+            .begin_control_operation("control-1", "fingerprint-1")
+            .await
+            .expect("claim control")
+    );
+    assert!(
+        !store
+            .begin_control_operation("control-1", "fingerprint-1")
+            .await
+            .expect("duplicate claim")
+    );
+    store
+        .complete_control_operation("control-1", r#"{"status":"completed"}"#)
+        .await
+        .expect("complete control");
+    let operation = store
+        .control_operation("control-1")
+        .await
+        .expect("read control")
+        .expect("stored control");
+    assert_eq!(operation.request_fingerprint, "fingerprint-1");
+    assert_eq!(
+        operation.response_json.as_deref(),
+        Some(r#"{"status":"completed"}"#)
+    );
+}
+
+#[tokio::test]
+async fn reopening_releases_only_interrupted_control_claims() {
+    let path =
+        std::env::temp_dir().join(format!("momo-control-recovery-{}.sqlite3", Uuid::new_v4()));
+    let store = LocalStore::open(&path).await.expect("store");
+    assert!(
+        store
+            .begin_control_operation("pending", "pending-fingerprint")
+            .await
+            .expect("claim pending control")
+    );
+    assert!(
+        store
+            .begin_control_operation("completed", "completed-fingerprint")
+            .await
+            .expect("claim completed control")
+    );
+    store
+        .complete_control_operation("completed", r#"{"status":"completed"}"#)
+        .await
+        .expect("complete control");
+    store.pool.close().await;
+
+    let reopened = LocalStore::open(&path).await.expect("reopen store");
+    assert!(
+        reopened
+            .control_operation("pending")
+            .await
+            .expect("read interrupted control")
+            .is_none()
+    );
+    assert_eq!(
+        reopened
+            .control_operation("completed")
+            .await
+            .expect("read completed control")
+            .expect("completed control")
+            .response_json
+            .as_deref(),
+        Some(r#"{"status":"completed"}"#)
+    );
+    reopened.pool.close().await;
+    std::fs::remove_file(path).expect("remove test database");
 }
 
 #[tokio::test]
@@ -153,6 +309,265 @@ async fn response_user_message_and_phase_marker_commit_atomically() {
 }
 
 #[tokio::test]
+async fn response_completion_commits_assistant_maintenance_and_replay_once() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let scope_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let now = Utc::now();
+    store
+        .save_conversation(&Conversation {
+            id: conversation_id,
+            scope_id,
+            character_id: None,
+            title: "atomic completion".to_owned(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("conversation");
+    store
+        .begin_response_operation(
+            "request-completion",
+            "fingerprint-completion",
+            &conversation_id.to_string(),
+            r#"{"text":"hello"}"#,
+        )
+        .await
+        .expect("operation");
+    let assistant = Message {
+        id: Uuid::new_v4(),
+        conversation_id,
+        role: MessageRole::Assistant,
+        content: "completed answer".to_owned(),
+        created_at: now,
+    };
+    let maintenance = MaintenanceTurn {
+        request_id: "request-completion".to_owned(),
+        scope_id: scope_id.to_string(),
+        user_content: "hello".to_owned(),
+        assistant_content: "completed answer".to_owned(),
+    };
+    let state_observation = MoStateObservation {
+        operation_id: "request-completion".to_owned(),
+        space_id: scope_id.to_string(),
+        event_type: "user_message".to_owned(),
+        event_fingerprint: "state-event-completion".to_owned(),
+        profile: "closed_autonomous".to_owned(),
+        dmw_fingerprint: "dmw-completion".to_owned(),
+        nsg_fingerprint: "nsg-completion".to_owned(),
+        scene_fingerprint: "scene-completion".to_owned(),
+        scene_json: "{}".to_owned(),
+    };
+    store
+        .observe_mo_state_operation(&state_observation)
+        .await
+        .expect("state operation");
+    store
+        .publish_mo_state_snapshot(
+            "request-completion",
+            r#"{"context":"state","audit":{}}"#,
+            false,
+            None,
+        )
+        .await
+        .expect("state snapshot");
+    assert!(
+        store
+            .commit_response_completion(ResponseCompletion {
+                request_id: "request-completion",
+                conversation_scope_id: scope_id,
+                assistant_message: Some(&assistant),
+                maintenance_turn: Some(&maintenance),
+                memory_enabled: true,
+                nsg_enabled: true,
+                mo_state_operation_id: Some("request-completion"),
+                response_json: r#"{"status":"completed"}"#,
+            })
+            .await
+            .expect("commit completion")
+    );
+    assert_eq!(
+        store
+            .list_messages(conversation_id)
+            .await
+            .expect("messages"),
+        vec![assistant]
+    );
+    assert_eq!(
+        store
+            .pending_maintenance_turns(&scope_id.to_string(), MaintenanceKind::Memory, 10)
+            .await
+            .expect("maintenance"),
+        vec![maintenance]
+    );
+    assert_eq!(
+        store
+            .response_operation("request-completion")
+            .await
+            .expect("operation")
+            .expect("stored operation")
+            .response_json
+            .as_deref(),
+        Some(r#"{"status":"completed"}"#)
+    );
+    assert_eq!(
+        store
+            .observe_mo_state_operation(&state_observation)
+            .await
+            .expect("completed state operation")
+            .phase,
+        "completed"
+    );
+
+    let retry = Message {
+        id: Uuid::new_v4(),
+        conversation_id,
+        role: MessageRole::Assistant,
+        content: "must not be appended".to_owned(),
+        created_at: Utc::now(),
+    };
+    assert!(
+        !store
+            .commit_response_completion(ResponseCompletion {
+                request_id: "request-completion",
+                conversation_scope_id: scope_id,
+                assistant_message: Some(&retry),
+                maintenance_turn: None,
+                memory_enabled: false,
+                nsg_enabled: false,
+                mo_state_operation_id: None,
+                response_json: r#"{"status":"different"}"#,
+            })
+            .await
+            .expect("idempotent completion replay")
+    );
+    assert_eq!(
+        store
+            .list_messages(conversation_id)
+            .await
+            .expect("unchanged messages")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn maintenance_batch_reuses_patch_and_acknowledges_atomically() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let scope_id = Uuid::new_v4().to_string();
+    let turn = MaintenanceTurn {
+        request_id: "maintenance-turn-1".to_owned(),
+        scope_id: scope_id.clone(),
+        user_content: "user".to_owned(),
+        assistant_content: "assistant".to_owned(),
+    };
+    store
+        .append_maintenance_turn(&turn, true, false)
+        .await
+        .expect("turn");
+    let batch = MaintenanceBatch {
+        batch_key: "maintenance-batch-1".to_owned(),
+        scope_id,
+        kind: "memory".to_owned(),
+        request_ids: vec![turn.request_id.clone()],
+        patch_yaml: "patch-v1".to_owned(),
+    };
+    assert_eq!(
+        store
+            .stage_maintenance_batch(&batch)
+            .await
+            .expect("stage batch"),
+        "patch-v1"
+    );
+    let mut retry = batch.clone();
+    retry.patch_yaml = "different-regeneration".to_owned();
+    assert_eq!(
+        store
+            .stage_maintenance_batch(&retry)
+            .await
+            .expect("reuse original batch"),
+        "patch-v1"
+    );
+    assert!(
+        store
+            .discard_maintenance_batch(&batch.batch_key)
+            .await
+            .expect("discard invalid patch")
+    );
+    assert!(
+        store
+            .maintenance_batch_patch(&batch.batch_key)
+            .await
+            .expect("read discarded batch")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .pending_maintenance_turns(&batch.scope_id, MaintenanceKind::Memory, 10)
+            .await
+            .expect("pending turn survives discard"),
+        vec![turn.clone()]
+    );
+    assert!(
+        !store
+            .discard_maintenance_batch(&batch.batch_key)
+            .await
+            .expect("discard is idempotent")
+    );
+    store
+        .stage_maintenance_batch(&batch)
+        .await
+        .expect("restage valid patch");
+    store
+        .complete_maintenance_batch(
+            &batch.batch_key,
+            &batch.request_ids,
+            MaintenanceKind::Memory,
+        )
+        .await
+        .expect("complete batch");
+    assert!(
+        store
+            .maintenance_batch_patch(&batch.batch_key)
+            .await
+            .expect("read batch")
+            .is_none()
+    );
+    assert!(
+        store
+            .pending_maintenance_turns(&batch.scope_id, MaintenanceKind::Memory, 10)
+            .await
+            .expect("pending turns")
+            .is_empty()
+    );
+
+    let cleanup_batch = MaintenanceBatch {
+        batch_key: "maintenance-batch-cleanup".to_owned(),
+        patch_yaml: "cleanup".to_owned(),
+        ..batch
+    };
+    store
+        .stage_maintenance_batch(&cleanup_batch)
+        .await
+        .expect("stage cleanup batch");
+    store
+        .clear_space_memory_state(
+            Uuid::parse_str(&cleanup_batch.scope_id).expect("scope id"),
+            true,
+            false,
+        )
+        .await
+        .expect("clear memory state");
+    assert!(
+        store
+            .maintenance_batch_patch(&cleanup_batch.batch_key)
+            .await
+            .expect("read cleared batch")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn maintenance_turns_are_independently_acknowledged() {
     let store = LocalStore::in_memory().await.expect("store");
     let turn = MaintenanceTurn {
@@ -165,6 +580,18 @@ async fn maintenance_turns_are_independently_acknowledged() {
         .append_maintenance_turn(&turn, true, true)
         .await
         .expect("append turn");
+    store
+        .append_maintenance_turn(&turn, true, true)
+        .await
+        .expect("identical replay is idempotent");
+    let mut conflicting = turn.clone();
+    conflicting.user_content = "different immutable input".to_owned();
+    assert!(matches!(
+        store
+            .append_maintenance_turn(&conflicting, true, true)
+            .await,
+        Err(StorageError::MaintenanceTurnConflict(_))
+    ));
     assert_eq!(
         store
             .pending_maintenance_turns("scope-1", MaintenanceKind::Memory, 10)

@@ -3,29 +3,22 @@
 # absolute host paths in this document.
 schema_version = 1
 
-# memory 和 semantic_graph 指向同一个逻辑 profile 就是共用模型；也可分别
-# 指向 config.toml 中不同的模型 profile。
-[model_use]
-chat = "chat-main"
-memory = "refiner-shared"
-semantic_graph = "refiner-shared"
-embedding = "" # 留空关闭向量请求；填 embedding-main 即启用 /embeddings。
-vision = "" # 多模态主模型留空；纯文本主模型可填 config.toml 的 vision-fallback。
-
+# 这里只列 MOMO Core 当前会执行的可移植运行策略。模型路由、默认角色、
+# 多 Space 读取权重、写入目标、并发和重试由宿主配置或每次原生响应请求决定。
 [runtime]
-character_id = "01900000-0000-7000-8000-000000000202" # 示例角色卡资源 UUID；Core 全局按此 ID 解析。
-memory_enabled = true          # DMW 检索与个人长期记忆。
-semantic_graph_enabled = true  # NSG 检索；关闭后不会调用 embedding。
-personal_memory_weight = 70    # 多 Space 检索时，个人记忆的相对预算权重（1..100）。
-conversation_memory_weight = 30 # 群聊/共享会话 Space 的相对预算权重（1..100）。
-conversation_memory_enabled = true # 群聊时同时读取共享会话 Space；私聊和 CLI 默认只读个人 Space。
-memory_write_target = "personal" # 每轮维护只写一个 Space：personal 或 conversation。
-mo_state_enabled = true
-max_concurrent_chats = 4
-transient_retries = 2
 memory_distillation_enabled = true
 memory_distill_every_turns = 12
+semantic_graph_enabled = true
 nsg_govern_every_turns = 12
+
+# 每次请求仍通过 momo.mo_state 决定是否为该轮启用状态投影。
+[mo_state]
+profile = "closed_autonomous" # 或 v1_projection，仅保留 v1 只读状态投影。
+scene_management = true       # 自治档逐轮收敛 current/scene.md。
+max_reconcile_steps = 4
+max_agent_steps = 8
+operation_timeout_ms = 30000
+injection_mode = "active"     # shadow 会计算、持久化和审计，但不注入回复。
 
 # allow: apply the request value after range/capability checks.
 # ignore: keep the configured/default value and report the ignored override.
@@ -39,8 +32,8 @@ visual_description_prompt = "ignore"
 tools = "allow"
 allowed_parameters = [] # e.g. ["seed", "stop"], never protocol-owned fields.
 
-# 打开后允许图片输入。主 chat 模型支持 image 时直接看图；否则才通过
-# model_use.vision 的回退模型生成受治理的文字描述。
+# 打开后允许图片输入。主 conversation 路由支持 image 时直接看图；否则才通过
+# 宿主提供的逻辑 vision 路由生成受治理的文字描述。
 [vision]
 enabled = true # 允许图片输入；并不表示一定会调用 vision 回退模型。
 prompt = "Describe only visible facts relevant to the conversation. Do not infer identity, intent, private attributes, or illegible text." # 仅回退路径使用。

@@ -9,6 +9,7 @@ mod lsb;
 mod memory;
 mod nsg;
 mod portable;
+mod state_runtime;
 
 pub use capabilities::*;
 pub use character_compat::*;
@@ -21,12 +22,13 @@ pub use lsb::*;
 pub use memory::*;
 pub use nsg::*;
 pub use portable::*;
+pub use state_runtime::*;
 
 use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        Arc, LazyLock, Mutex,
+        Arc, LazyLock, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -58,7 +60,27 @@ static MEMORY_PATCH_REVIEW_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 static CONTROL_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+static MO_STATE_SPACE_LOCKS: LazyLock<
+    tokio::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+> = LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 const MAX_IMPORTED_FONT_BYTES: usize = 64 * 1024 * 1024;
+
+pub(crate) async fn lock_mo_state_space(space_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = MO_STATE_SPACE_LOCKS.lock().await;
+        if locks.len() >= 1_024 {
+            locks.retain(|_, lock| lock.strong_count() > 0);
+        }
+        if let Some(lock) = locks.get(space_id).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(space_id.to_owned(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    lock.lock_owned().await
+}
 
 pub(crate) trait ChatEventSink: Send + Sync {
     fn add(&self, event_json: String) -> Result<(), String>;
@@ -103,6 +125,7 @@ async fn approve_memory_patch_review(
     review_id: uuid::Uuid,
 ) -> Result<String, String> {
     let _guard = MEMORY_PATCH_REVIEW_LOCK.lock().await;
+    let _state_guard = lock_mo_state_space(&scope_id.to_string()).await;
     let existing = core()?
         .store()
         .memory_patch_review(scope_id, review_id)

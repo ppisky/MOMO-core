@@ -89,6 +89,71 @@ pub struct MomoRuntimeConfig {
     pub nsg_govern_every_turns: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MoStateProfile {
+    #[default]
+    ClosedAutonomous,
+    V1Projection,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MoStateInjectionMode {
+    #[default]
+    Active,
+    Shadow,
+}
+
+impl MoStateInjectionMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Shadow => "shadow",
+        }
+    }
+}
+
+impl MoStateProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClosedAutonomous => "closed_autonomous",
+            Self::V1Projection => "v1_projection",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MoStateRuntimeConfig {
+    #[serde(default)]
+    pub profile: MoStateProfile,
+    #[serde(default = "default_true")]
+    pub scene_management: bool,
+    #[serde(default = "default_max_reconcile_steps")]
+    pub max_reconcile_steps: usize,
+    #[serde(default = "default_max_agent_steps")]
+    pub max_agent_steps: usize,
+    #[serde(default = "default_mo_state_operation_timeout_ms")]
+    pub operation_timeout_ms: u64,
+    #[serde(default)]
+    pub injection_mode: MoStateInjectionMode,
+}
+
+impl Default for MoStateRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            profile: MoStateProfile::ClosedAutonomous,
+            scene_management: true,
+            max_reconcile_steps: default_max_reconcile_steps(),
+            max_agent_steps: default_max_agent_steps(),
+            operation_timeout_ms: default_mo_state_operation_timeout_ms(),
+            injection_mode: MoStateInjectionMode::Active,
+        }
+    }
+}
+
 impl Default for MomoRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -129,6 +194,8 @@ pub struct MomoConfig {
     #[serde(default)]
     pub runtime: MomoRuntimeConfig,
     #[serde(default)]
+    pub mo_state: MoStateRuntimeConfig,
+    #[serde(default)]
     pub vision: VisionDescriptionConfig,
     #[serde(default)]
     pub prompts: MaintenancePromptConfig,
@@ -140,6 +207,7 @@ impl Default for MomoConfig {
             schema_version: MOMO_CONFIG_SCHEMA_VERSION,
             request_overrides: RequestOverridePolicy::default(),
             runtime: MomoRuntimeConfig::default(),
+            mo_state: MoStateRuntimeConfig::default(),
             vision: VisionDescriptionConfig::default(),
             prompts: MaintenancePromptConfig::default(),
         }
@@ -215,6 +283,15 @@ impl MomoConfig {
         {
             return Err(GovernanceError::Invalid(
                 "runtime maintenance intervals must be between 1 and 200 turns".to_owned(),
+            ));
+        }
+        if !(1..=16).contains(&self.mo_state.max_reconcile_steps)
+            || !(1..=32).contains(&self.mo_state.max_agent_steps)
+            || !(1_000..=300_000).contains(&self.mo_state.operation_timeout_ms)
+        {
+            return Err(GovernanceError::Invalid(
+                "MO State limits must use 1..=16 reconcile steps, 1..=32 agent steps, and a 1000..=300000 ms timeout"
+                    .to_owned(),
             ));
         }
         const RESERVED: [&str; 8] = [
@@ -293,6 +370,18 @@ const fn default_true() -> bool {
 
 const fn default_maintenance_turns() -> usize {
     12
+}
+
+const fn default_max_reconcile_steps() -> usize {
+    4
+}
+
+const fn default_max_agent_steps() -> usize {
+    8
+}
+
+const fn default_mo_state_operation_timeout_ms() -> u64 {
+    30_000
 }
 
 pub fn validate_momo_document(text: &str) -> Result<(), GovernanceError> {
@@ -599,6 +688,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_distiller_preserves_confirmed_rule_outcomes_in_dmw() {
+        let config = MomoConfig::default();
+        assert!(
+            config
+                .prompts
+                .memory_distillation
+                .contains("preserve the concrete outcome in DMW")
+        );
+    }
+
+    #[test]
     fn denied_ignored_and_allowed_overrides_are_distinct() {
         let policy = RequestOverridePolicy {
             context_window: OverrideMode::Ignore,
@@ -699,6 +799,14 @@ semantic_graph_enabled = true
 nsg_govern_every_turns = 19
 max_concurrent_chats = 4
 
+[mo_state]
+profile = "closed_autonomous"
+scene_management = true
+max_reconcile_steps = 4
+max_agent_steps = 8
+operation_timeout_ms = 30000
+injection_mode = "shadow"
+
 [prompts]
 memory_distillation_file = "prompts/dmw_distiller.md"
 semantic_graph_governance_file = "prompts/nsg_governor.md"
@@ -713,6 +821,9 @@ semantic_graph_governance_file = "prompts/nsg_governor.md"
         assert_eq!(config.runtime.memory_distill_every_turns, 7);
         assert!(config.runtime.semantic_graph_enabled);
         assert_eq!(config.runtime.nsg_govern_every_turns, 19);
+        assert_eq!(config.mo_state.profile, MoStateProfile::ClosedAutonomous);
+        assert!(config.mo_state.scene_management);
+        assert_eq!(config.mo_state.injection_mode, MoStateInjectionMode::Shadow);
 
         let mut invalid = config;
         invalid.runtime.nsg_govern_every_turns = 0;

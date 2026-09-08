@@ -2,7 +2,7 @@
 
 
 Standard: DMW-STD-0010                                 August 04, 2026
-Category: Specification                                Status: Implementation Baseline
+Category: Specification                                Status: Implemented Normative Contract
 
 
 ## 摘要 (Abstract)

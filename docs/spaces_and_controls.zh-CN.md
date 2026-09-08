@@ -1,5 +1,7 @@
 # MOMO Space、会话与控制动作指南
 
+[English](spaces_and_controls.en.md)
+
 本文面向接入 Core 的宿主开发者，解释 1.0 中最容易混淆的四个对象。
 
 ## 四个对象不是一回事
@@ -45,7 +47,7 @@ Space 的记忆；角色卡本身不会因此复制到这些 Space。
 ```json
 {
   "schema": "momo.control/1.0",
-  "request_id": "<uuid>",
+  "request_id": "<unique-request-id>",
   "actor_space_id": "<personal-space>",
   "action": {
     "type": "clear_memory",
@@ -64,6 +66,10 @@ Space 的记忆；角色卡本身不会因此复制到这些 Space。
 群聊的 Space UUID 放入 `target_space_id`；清理个人记忆时则放个人 Space UUID。两者是同
 一个控制协议，不需要再制造“个人版 Core”或“群聊版 Core”。
 
+已完成的控制操作按 `actor_space_id` 与 `request_id` 持久化重放；相同操作不会再次执行，
+同一标识若换成不同动作内容则返回 HTTP 409。直接 CRUD 删除路由属于可信本机管理 profile，
+不能替代面向最终用户的控制协议；完整分层见 [HTTP 边界](http_api_1_0.md)。
+
 mobot 把这些控制映射为不同命令：
 
 | 意图 | CLI / 交互 | Discord |
@@ -79,7 +85,9 @@ mobot 把这些控制映射为不同命令：
 
 ## 权重和写入目标
 
-标准示例把运行策略写在 `[runtime]`：
+这些选择属于宿主的会话策略；宿主把它们转换成每次
+`momo.responses/1.0` 请求里的 `memory_sources` 与
+`memory_write_space_id`。例如宿主可维护如下自己的配置：
 
 ```toml
 personal_memory_weight = 70
@@ -93,6 +101,10 @@ memory_write_target = "personal"
 作为群聊记忆来源，但不会删除数据。`memory_write_target` 只能选 `personal` 或
 `conversation`；选后者时若当前运行环境没有会话记忆来源，配置/请求会被拒绝，而不是退回
 个人 Space。
+
+这些字段不是 MOMO Core `momo.toml` 的可执行字段。若把它们原样放进可移植配置，容器
+往返会保留它们，但 Core 不会据此构造请求；官方可执行字段见
+[`runtime_config_0_1.md`](runtime_config_0_1.md)。
 
 ## MOC 导入导出
 

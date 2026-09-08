@@ -430,9 +430,6 @@ impl NsgWorkspace {
                 .filter(|operation| matches!(operation, NsgOperation::CreateNode { .. }))
                 .count();
             if create_count == 1 && file_patch.operations.len() == 1 {
-                if path.exists() {
-                    return Err(invalid("NSG create target exists"));
-                }
                 let NsgOperation::CreateNode {
                     metadata,
                     anchors,
@@ -469,6 +466,14 @@ impl NsgWorkspace {
                     inject_character_ids: metadata.inject_character_ids,
                     edges,
                 };
+                node.validate()?;
+                if path.exists() {
+                    let existing = NsgNode::parse(&fs::read_to_string(&path)?)?;
+                    if existing == node {
+                        continue;
+                    }
+                    return Err(invalid("NSG create target exists with different content"));
+                }
                 mutations.push(FileMutation::Write {
                     path,
                     content: node.encode()?.into_bytes(),
@@ -1016,23 +1021,22 @@ fn apply_operation(node: &mut NsgNode, operation: NsgOperation) -> Result<(), Me
         }
         NsgOperation::AddEdge { edge } => {
             edge.validate()?;
-            if node
+            if let Some(existing) = node
                 .edges
                 .iter()
-                .any(|existing| existing.key() == edge.key())
+                .find(|existing| existing.key() == edge.key())
             {
-                return Err(invalid("duplicate NSG edge"));
+                if existing == &edge {
+                    return Ok(());
+                }
+                return Err(invalid("duplicate NSG edge key has different content"));
             }
             node.edges.push(edge);
         }
         NsgOperation::RemoveEdge { edge } => {
-            let previous = node.edges.len();
             node.edges.retain(|existing| {
                 existing.key() != (&edge.category, &edge.relation, &edge.target)
             });
-            if node.edges.len() == previous {
-                return Err(invalid("NSG edge was not found"));
-            }
         }
         NsgOperation::UpdateFrontmatter { fields } => {
             if let Some(value) = fields.importance {
@@ -1228,8 +1232,7 @@ impl AnchorIndex {
             .map(|node| {
                 node.anchors
                     .iter()
-                    .map(|value| normalize(value))
-                    .filter(|value| !value.is_empty())
+                    .flat_map(|value| normalized_terms(value))
                     .collect::<BTreeSet<_>>()
             })
             .collect::<Vec<_>>();
@@ -1273,8 +1276,7 @@ impl AnchorIndex {
             .collect::<BTreeSet<_>>();
         let anchors = anchors
             .iter()
-            .map(|value| normalize(value))
-            .filter(|value| !value.is_empty())
+            .flat_map(|value| normalized_terms(value))
             .collect::<BTreeSet<_>>();
         let matched = query_terms
             .intersection(&anchors)
@@ -1461,6 +1463,17 @@ patches:
     }
 
     #[test]
+    fn exact_nsg_create_patch_replay_is_idempotent() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");
+        workspace.apply_patch(CREATE_DRAFT).expect("first create");
+        workspace
+            .apply_patch(CREATE_DRAFT)
+            .expect("replayed create");
+        assert_eq!(workspace.list_nodes(false).expect("nodes").len(), 1);
+    }
+
+    #[test]
     fn automatic_creation_requires_draft_and_rejects_unknown_fields() {
         let root = tempfile::tempdir().expect("root");
         let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");
@@ -1475,6 +1488,28 @@ patches:
             workspace.apply_patch(&unknown),
             Err(MemoryError::Yaml(_))
         ));
+    }
+
+    #[test]
+    fn retrieval_matches_terms_inside_multiword_anchors() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");
+        workspace
+            .apply_patch_authorized(&CREATE_DRAFT.replace("mode: \"draft\"", "mode: \"canon\""))
+            .expect("create Canon fixture");
+
+        let retrieved = workspace
+            .retrieve(
+                "What happens when someone uses black flame?",
+                &[],
+                512,
+                &ConservativeTokenCounter,
+            )
+            .expect("retrieve");
+        assert!(
+            retrieved.iter().any(|item| item.id == "lore_black_flame"),
+            "multiword anchor was not searchable: {retrieved:?}"
+        );
     }
 
     #[test]

@@ -1,0 +1,1 @@
+{"backend":"momo","base_url":"http://127.0.0.1:8765/v1","model":"conversation","revision":"dashscope:qwen3.8-flash:rolling-alias:observed-2026-09-05","temperature":0,"max_output_tokens":512,"context_window":8192,"timeout_seconds":120,"memory":true,"semantic_graph":true,"mo_state":true,"pricing":{"currency":"CNY","input_per_million":0.8,"output_per_million":2.7}}

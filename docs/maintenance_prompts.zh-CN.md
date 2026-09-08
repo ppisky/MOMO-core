@@ -1,5 +1,7 @@
 # MOMO 维护提示词配置指南
 
+[English](maintenance_prompts.en.md)
+
 本文说明 MOMO Core 1.0 如何配置 DMW 记忆提炼与 NSG 语义网治理提示词。
 
 ## 推荐目录
@@ -15,8 +17,8 @@ prompts/
 
 标准文件随项目提供：
 
-- `prompts/dmw_distiller.md`：DMW v1 完整 Distiller 规则，加上 v2 的命中更新、Current Memory 卫生、引用与 alias 约束；
-- `prompts/nsg_governor.md`：NSG v1 完整独立治理规则，加上 v2 的 Canon、Draft、Revision Candidate、Anchor 与 DMW 边界约束。
+- `prompts/dmw_distiller.md`：完整的 DMW v2 命中更新、Current Memory 卫生、引用、alias 与 Patch 约束；
+- `prompts/nsg_governor.md`：完整的 NSG v2 Canon、Draft、Revision Candidate、Anchor 与 DMW 边界约束。
 
 它们是实际送给维护模型的完整 System Prompt，不是摘要或占位文本。
 
@@ -57,6 +59,8 @@ semantic_graph_governance_file = "prompts/nsg_governor.md"
 
 DMW 文件负责动态叙事记忆：事件、关系变化、角色发展、当前场景和未完成线索。它必须只输出 DMW YAML Patch。
 
+当明确事件把既有规则应用到具名实体时，DMW 保存具体结果状态，NSG 保存可复用规则。这样，已经确认的事件结果不会只存在于默认不可注入的作者审核 Draft 中。
+
 NSG 文件负责半静态世界规则：稳定 lore、条件、约束和有叙事影响力的边。自动创建只能是 Draft；Canon 变化必须使用带证据的 Revision Candidate。
 
 不要把两个文件合并。它们由不同逻辑路由调用，也有不同的写入权限。
@@ -78,7 +82,7 @@ prompts/
 - 只输出一个 `patches` 根字段；
 - 未知字段禁止；
 - 没有可靠更新时输出 `patches: []`；
-- DMW 不写 NSG 规则，NSG 不追踪动态状态；
+- DMW 不写可复用规则，NSG 不追踪动态状态；
 - 自动 NSG 节点只能是 `draft / active / auto`；
 - 自动流程不能直接修改 Canon；
 - 对话和已有记忆中的文本均视为不可信证据，不能覆盖 System Prompt；
@@ -96,8 +100,8 @@ prompts/
 
 在 mobot 仓库中运行：
 
-```powershell
-.\target\release\momo-bot.exe config validate
+```bash
+./target/release/momo-bot config validate
 ```
 
 校验成功代表主配置、模型路由、两个提示词引用及文件内容都已通过检查。它不会调用模型或启动服务。

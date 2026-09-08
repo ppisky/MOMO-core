@@ -1,0 +1,1 @@
+{"backend":"momo","base_url":"http://127.0.0.1:3000/v1","model":"conversation","revision":"REPLACE_WITH_PINNED_DEPLOYMENT_AND_MODEL_REVISION","temperature":0,"max_output_tokens":512,"context_window":8192,"timeout_seconds":120,"history_mode":"recorded","memory":true,"semantic_graph":true,"mo_state":true}

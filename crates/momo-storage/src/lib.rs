@@ -53,12 +53,103 @@ pub struct ResponseOperation {
     pub response_json: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct ResponseCompletion<'a> {
+    pub request_id: &'a str,
+    pub conversation_scope_id: Uuid,
+    pub assistant_message: Option<&'a Message>,
+    pub maintenance_turn: Option<&'a MaintenanceTurn>,
+    pub memory_enabled: bool,
+    pub nsg_enabled: bool,
+    pub mo_state_operation_id: Option<&'a str>,
+    pub response_json: &'a str,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MoStateObservation {
+    pub operation_id: String,
+    pub space_id: String,
+    pub event_type: String,
+    pub event_fingerprint: String,
+    pub profile: String,
+    pub dmw_fingerprint: String,
+    pub nsg_fingerprint: String,
+    pub scene_fingerprint: String,
+    pub scene_json: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MoStateOperation {
+    pub operation_id: String,
+    pub space_id: String,
+    pub event_type: String,
+    pub event_fingerprint: String,
+    pub phase: String,
+    pub base_dmw_revision: u64,
+    pub base_nsg_revision: u64,
+    pub base_scene_revision: u64,
+    pub snapshot_json: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct MoStateSnapshot {
+    pub snapshot_id: String,
+    pub space_id: String,
+    pub profile: String,
+    pub dmw_revision: u64,
+    pub nsg_revision: u64,
+    pub scene_revision: u64,
+    pub snapshot_revision: u64,
+    pub dmw_fingerprint: String,
+    pub nsg_fingerprint: String,
+    pub scene_fingerprint: String,
+    pub scene: serde_json::Value,
+    pub state_context: String,
+    pub state_audit: serde_json::Value,
+    pub degraded: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct MoStateRuntimeStatus {
+    pub space_id: String,
+    pub profile: String,
+    pub dmw_revision: u64,
+    pub nsg_revision: u64,
+    pub scene_revision: u64,
+    pub snapshot_revision: u64,
+    pub degraded: bool,
+    pub last_error: Option<String>,
+    pub current_snapshot: Option<MoStateSnapshot>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ControlOperation {
+    pub operation_key: String,
+    pub request_fingerprint: String,
+    pub response_json: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct MaintenanceTurn {
     pub request_id: String,
     pub scope_id: String,
     pub user_content: String,
     pub assistant_content: String,
+}
+
+/// A model-produced maintenance patch retained until its input turns and the
+/// patch application have been acknowledged together. Retrying a crashed
+/// batch therefore reuses the exact same patch instead of asking the model for
+/// a different mutation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MaintenanceBatch {
+    pub batch_key: String,
+    pub scope_id: String,
+    pub kind: String,
+    pub request_ids: Vec<String>,
+    pub patch_yaml: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +242,10 @@ pub enum StorageError {
     MemoryPatchReviewStatus(String),
     #[error("invalid semantic-graph vector: {0}")]
     InvalidNsgVector(String),
+    #[error("MO State operation conflict: {0}")]
+    MoStateOperationConflict(String),
+    #[error("maintenance turn conflict: {0}")]
+    MaintenanceTurnConflict(String),
     #[error("Turso vector database failed: {0}")]
     Turso(#[from] turso::Error),
     #[error("Turso vector database path is not valid UTF-8: {0}")]

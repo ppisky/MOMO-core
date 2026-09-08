@@ -295,16 +295,26 @@ pub(super) fn mutate_section(
     let next_heading = body[content_start..]
         .find("\n## ")
         .map_or(body.len(), |offset| content_start + offset + 1);
+    let existing = body[content_start..next_heading].trim_matches('\n');
+    let addition = content.trim();
+    if !replace
+        && (existing == addition
+            || existing
+                .strip_suffix(addition)
+                .is_some_and(|prefix| prefix.ends_with('\n')))
+    {
+        return Ok(body.to_owned());
+    }
     let mut output = String::new();
     output.push_str(&body[..content_start]);
     output.push('\n');
     if !replace {
-        output.push_str(body[content_start..next_heading].trim_matches('\n'));
+        output.push_str(existing);
         if !output.ends_with('\n') {
             output.push('\n');
         }
     }
-    output.push_str(content.trim());
+    output.push_str(addition);
     output.push('\n');
     output.push_str(&body[next_heading..]);
     Ok(output)

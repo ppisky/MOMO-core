@@ -1,3 +1,6 @@
+> **Historical:** superseded by [`Dual-Mem_Wiki_v2.md`](Dual-Mem_Wiki_v2.md).
+> This final v1 record does not define the MOMO Core 1.0 runtime.
+
 **Internal Request for Comments: DMW-RFC-0009**             July 30, 2026
 **Category: Implementation Guide**
 **Status: Final**
