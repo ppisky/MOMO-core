@@ -29,6 +29,8 @@ struct PrepareContextJsonRequest {
     #[serde(default)]
     runtime_instructions: String,
     #[serde(default)]
+    roleplay_director: String,
+    #[serde(default)]
     character_markdown: String,
     #[serde(default)]
     user_markdown: String,
@@ -91,6 +93,7 @@ pub fn prepare_context_json(request_json: String) -> Result<String, String> {
     let prepared = prepare_context(ContextRequest {
         sections: ContextSections {
             runtime_instructions: &request.runtime_instructions,
+            roleplay_director: &request.roleplay_director,
             character: &request.character_markdown,
             user: &request.user_markdown,
             memory: &request.memory_markdown,

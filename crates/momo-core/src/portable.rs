@@ -995,10 +995,14 @@ fn copy_config_bundle(
         ))
     })?;
     let canonical_destination_base = fs::canonicalize(destination_base)?;
-    for reference in [
+    let mut prompt_references = vec![
         &config.prompts.memory_distillation_file,
         &config.prompts.semantic_graph_governance_file,
-    ] {
+    ];
+    if let Some(reference) = config.prompts.roleplay_director_file.as_ref() {
+        prompt_references.push(reference);
+    }
+    for reference in prompt_references {
         let relative = validate_asset_path(&reference.to_string_lossy())?;
         let source = source_base.join(&relative);
         let canonical_source = fs::canonicalize(&source).map_err(|error| {
@@ -1939,6 +1943,11 @@ mod tests {
             b"full NSG test prompt",
         )
         .expect("NSG prompt");
+        atomic_write(
+            &base.join("prompts/roleplay_director.md"),
+            b"full roleplay director test prompt",
+        )
+        .expect("roleplay prompt");
     }
 
     fn test_export_plan(
@@ -2610,7 +2619,8 @@ name = "Tester"
                 "runtime": { "memory_enabled": true },
                 "prompts": {
                     "memory_distillation_file": "prompts/dmw_distiller.md",
-                    "semantic_graph_governance_file": "prompts/nsg_governor.md"
+                    "semantic_graph_governance_file": "prompts/nsg_governor.md",
+                    "roleplay_director_file": "prompts/roleplay_director.md"
                 },
                 "extension": { "preserved": true }
             }),
@@ -2629,6 +2639,11 @@ name = "Tester"
             fs::read_to_string(directory.path().join("prompts/nsg_governor.md"))
                 .expect("exported NSG prompt"),
             "full NSG test prompt"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("prompts/roleplay_director.md"))
+                .expect("exported roleplay prompt"),
+            "full roleplay director test prompt"
         );
 
         let error = export_momo_config(

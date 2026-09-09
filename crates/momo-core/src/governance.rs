@@ -71,10 +71,29 @@ pub struct VisionDescriptionConfig {
 pub struct MaintenancePromptConfig {
     pub memory_distillation_file: PathBuf,
     pub semantic_graph_governance_file: PathBuf,
+    /// Optional external override. Configurations created before the role-play
+    /// director existed use the embedded audited default.
+    #[serde(default)]
+    pub roleplay_director_file: Option<PathBuf>,
     #[serde(skip)]
     pub memory_distillation: String,
     #[serde(skip)]
     pub semantic_graph_governance: String,
+    #[serde(skip, default = "default_roleplay_director_prompt")]
+    pub roleplay_director: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoleplayRuntimeConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for RoleplayRuntimeConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,8 +198,10 @@ impl Default for MaintenancePromptConfig {
         Self {
             memory_distillation_file: PathBuf::from(DEFAULT_MEMORY_PROMPT_FILE),
             semantic_graph_governance_file: PathBuf::from(DEFAULT_NSG_PROMPT_FILE),
+            roleplay_director_file: None,
             memory_distillation: include_str!("../../../prompts/dmw_distiller.md").to_owned(),
             semantic_graph_governance: include_str!("../../../prompts/nsg_governor.md").to_owned(),
+            roleplay_director: include_str!("../../../prompts/roleplay_director.md").to_owned(),
         }
     }
 }
@@ -196,6 +217,8 @@ pub struct MomoConfig {
     #[serde(default)]
     pub mo_state: MoStateRuntimeConfig,
     #[serde(default)]
+    pub roleplay: RoleplayRuntimeConfig,
+    #[serde(default)]
     pub vision: VisionDescriptionConfig,
     #[serde(default)]
     pub prompts: MaintenancePromptConfig,
@@ -208,6 +231,7 @@ impl Default for MomoConfig {
             request_overrides: RequestOverridePolicy::default(),
             runtime: MomoRuntimeConfig::default(),
             mo_state: MoStateRuntimeConfig::default(),
+            roleplay: RoleplayRuntimeConfig::default(),
             vision: VisionDescriptionConfig::default(),
             prompts: MaintenancePromptConfig::default(),
         }
@@ -245,6 +269,10 @@ impl MomoConfig {
                 "prompts.semantic_graph_governance_file",
                 &self.prompts.semantic_graph_governance,
             ),
+            (
+                "prompts.roleplay_director_file",
+                &self.prompts.roleplay_director,
+            ),
         ] {
             if prompt.trim().is_empty()
                 || u64::try_from(prompt.len()).unwrap_or(u64::MAX) > MAX_MAINTENANCE_PROMPT_BYTES
@@ -277,6 +305,9 @@ impl MomoConfig {
             ),
         ] {
             validate_prompt_reference(name, path)?;
+        }
+        if let Some(path) = self.prompts.roleplay_director_file.as_deref() {
+            validate_prompt_reference("prompts.roleplay_director_file", path)?;
         }
         if !(1..=200).contains(&self.runtime.memory_distill_every_turns)
             || !(1..=200).contains(&self.runtime.nsg_govern_every_turns)
@@ -329,6 +360,12 @@ impl MomoConfig {
             "prompts.semantic_graph_governance_file",
             &self.prompts.semantic_graph_governance_file,
         )?;
+        self.prompts.roleplay_director =
+            if let Some(path) = self.prompts.roleplay_director_file.as_deref() {
+                read_prompt_file(config_path, "prompts.roleplay_director_file", path)?
+            } else {
+                include_str!("../../../prompts/roleplay_director.md").to_owned()
+            };
         Ok(())
     }
 
@@ -611,6 +648,10 @@ fn default_visual_description_prompt() -> String {
     "Describe only visible facts that are relevant to the conversation. Do not infer identity, intent, private attributes, or text that is not legible.".to_owned()
 }
 
+fn default_roleplay_director_prompt() -> String {
+    include_str!("../../../prompts/roleplay_director.md").to_owned()
+}
+
 fn validate_prompt_reference(name: &str, path: &Path) -> Result<(), GovernanceError> {
     if path.as_os_str().is_empty()
         || path.is_absolute()
@@ -696,6 +737,14 @@ mod tests {
                 .memory_distillation
                 .contains("preserve the concrete outcome in DMW")
         );
+        assert!(config.roleplay.enabled);
+        assert!(
+            config
+                .prompts
+                .roleplay_director
+                .contains("performer of the character")
+        );
+        assert!(config.prompts.roleplay_director_file.is_none());
     }
 
     #[test]
@@ -843,6 +892,14 @@ semantic_graph_governance_file = "prompts/nsg_governor.md"
         assert_eq!(
             config.prompts.semantic_graph_governance_file,
             PathBuf::from(DEFAULT_NSG_PROMPT_FILE)
+        );
+        assert!(config.roleplay.enabled);
+        assert!(config.prompts.roleplay_director_file.is_none());
+        assert!(
+            config
+                .prompts
+                .roleplay_director
+                .contains("Stay inside the fiction")
         );
     }
 

@@ -1,1 +1,1 @@
-"""MORP-Bench: offline-first, versioned memory and roleplay evaluation."""
+"""MORP-Bench: offline-first, versioned role-playing evaluation."""

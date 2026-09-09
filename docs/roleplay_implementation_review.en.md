@@ -10,6 +10,17 @@ and maintenance-batch changes
 **Nature:** non-normative engineering review; precedence remains defined by
 [`spec_index.md`](spec_index.md)
 
+> **2026-09-08 update:** this point-in-time score has not been recalculated.
+> Since the review, Core gained a default, auditable Roleplay Director in the
+> real response path, and MORP 1.0 replaced the mixed memory suite with a
+> role-play-only bilingual counterfactual evaluation. The historical gaps and
+> verification counts below should be read as dated evidence.
+>
+> **2026-09-09 update:** the complete 64-case MORP 1.0 run scored **88.87/100**
+> with three terminal gateway failures retained as zeroes. Relationship dynamics
+> was strongest; narrative coherence and world embodiment were the weakest
+> dimensions. This is a single provisional synthetic run, not human calibration.
+
 ## Conclusion
 
 MOMO Core is already a solid role-playing runtime foundation, but the existing

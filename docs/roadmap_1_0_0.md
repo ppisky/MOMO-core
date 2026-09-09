@@ -1,10 +1,10 @@
 # MOMO Core 1.0.0 release contract
 
-**Status:** `v1.0.0-rc.1` authorized for GitHub prerelease publication; the
+**Status:** `v1.0.0-rc.2` authorized for GitHub prerelease publication; the
 existing local `v1.0.0` tag remains a historical candidate and must not be
 moved or published
 
-**Updated:** 2026-09-08
+**Updated:** 2026-09-09
 
 The checks and artifact hashes below describe the existing tagged candidate,
 not later work made after that tag. Current contract precedence is
@@ -56,7 +56,7 @@ not compatibility surfaces.
 - [ ] Owner-run credentialed Core -> gateway -> provider smoke tests with both a
   remote HTTPS image and a bounded data URL.
 
-The `v1.0.0-rc.1` prerelease is authorized with this item still open. It remains
+The `v1.0.0-rc.2` prerelease is authorized with this item still open. It remains
 a stable `v1.0.0` gate. Local direct-multimodal, fallback, persistence, replay,
 and cross-protocol tests are green.
 
@@ -106,6 +106,13 @@ and cross-protocol tests are green.
 - [x] Receive owner authorization for local-only commit/tag creation.
 - [x] Receive owner authorization to publish the post-tag corrections as the
   `v1.0.0-rc.1` GitHub prerelease without moving the historical `v1.0.0` tag.
+- [x] Add the default Roleplay Director and MORP 1.0 role-play-only benchmark,
+  run all 64 bilingual cases, and retain provider failures as scored zeroes.
+- [x] Reduce the recommended rc.2 topology to one Qwen deployment shared by
+  the three core scenarios plus one embedding deployment; use one auditable
+  Codex reviewer instead of requiring two external judge models.
+- [x] Receive owner authorization to publish `v1.0.0-rc.2` without moving the
+  historical `v1.0.0` or `v1.0.0-rc.1` tags.
 
 ## Explicitly outside 1.0
 

@@ -3,6 +3,10 @@
 # absolute host paths in this document.
 schema_version = 1
 
+# rc.2 推荐宿主只配置两个供应商部署：同一个 Qwen 模型映射 conversation、
+# memory_distillation、semantic_graph_governance；一个向量化模型映射 embedding。
+# 路由和凭据属于宿主/网关，不进入这个可移植文件。
+
 # 这里只列 MOMO Core 当前会执行的可移植运行策略。模型路由、默认角色、
 # 多 Space 读取权重、写入目标、并发和重试由宿主配置或每次原生响应请求决定。
 [runtime]
@@ -19,6 +23,11 @@ max_reconcile_steps = 4
 max_agent_steps = 8
 operation_timeout_ms = 30000
 injection_mode = "active"     # shadow 会计算、持久化和审计，但不注入回复。
+
+# 角色导演是产品运行时规则，不属于作者角色卡。它把静态人物设定、当前情绪、
+# 关系和场景转换成本轮自然表演，并阻止客服腔、越权代演用户和元叙事泄漏。
+[roleplay]
+enabled = true
 
 # allow: apply the request value after range/capability checks.
 # ignore: keep the configured/default value and report the ignored override.
@@ -38,7 +47,8 @@ allowed_parameters = [] # e.g. ["seed", "stop"], never protocol-owned fields.
 enabled = true # 允许图片输入；并不表示一定会调用 vision 回退模型。
 prompt = "Describe only visible facts relevant to the conversation. Do not infer identity, intent, private attributes, or illegible text." # 仅回退路径使用。
 
-# MOMO Core 后台维护提示词。路径相对于本文件；MOC 会连同文件一起移动。
+# MOMO Core 前台角色导演与后台维护提示词。路径相对于本文件；MOC 会连同文件一起移动。
 [prompts]
 memory_distillation_file = "prompts/dmw_distiller.md"
 semantic_graph_governance_file = "prompts/nsg_governor.md"
+roleplay_director_file = "prompts/roleplay_director.md"

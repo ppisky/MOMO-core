@@ -2874,6 +2874,7 @@ mod tests {
             let request_text = String::from_utf8_lossy(&request[..read]);
             assert!(request_text.starts_with("POST /v1/chat/completions "));
             assert!(request_text.contains("Keep the roleplay voice."));
+            assert!(request_text.contains("Stay inside the fiction."));
             assert!(request_text.contains("https://example.test/original.png"));
             assert!(request_text.contains("\"type\":\"image_url\""));
             assert!(!request_text.contains("FALLBACK_ONLY_PROMPT"));

@@ -1,23 +1,51 @@
 """Versioned metrics. None means unmeasured, never a passing score."""
 from collections import Counter, defaultdict
+from difflib import SequenceMatcher
 import math
 import random
 import unicodedata
 
 from .common import canonical, digest, finite, require, unique
-from .corpus import DIMENSIONS
+from .corpus import DIMENSIONS, LEGACY_DIMENSIONS, ROLEPLAY_DIMENSIONS
 
-POLICY = {"version": "morp.scoring/1", "aggregation": "field -> case -> family -> dimension -> macro",
+POLICY = {"version": "morp.roleplay-scoring/2", "aggregation": "reviewer -> case -> counterfactual family -> roleplay dimension -> macro",
           "missing_prediction": 0, "invalid_prediction": 0, "leak_gate": "case_zero",
           "judge_scale": [0, 4], "judge_disagreement_limit": 1,
           "bootstrap_unit": "family", "bootstrap_samples": 2000, "seed": 20260905,
           "minimum_families_for_interval": 2, "human_calibrated": False,
-          "primary_acgn_arm": "label_free", "evidence_metrics": "self-report diagnostic only",
-          "invalid_judge": None, "human_adjudication": "one evidence-bound final vote"}
+          "primary_acgn_arm": "label_free", "evidence_metrics": "legacy diagnostic only; excluded from roleplay",
+          "invalid_judge": None,
+          "reviewer_adjudication": "one identity-bound, evidence-grounded final vote",
+          "model_judges": "optional compatibility path; two independent votes"}
 
 
 def norm(value):
     return unicodedata.normalize("NFKC", value).casefold().strip()
+
+
+def quote_is_grounded(answer, quote):
+    """Accept exact evidence and conservative, formatting-only quote elisions.
+
+    Judges sometimes remove dialogue punctuation or a short speaker tag while
+    copying an otherwise verbatim passage.  Requiring one contiguous byte-for-
+    byte substring makes valid votes disappear, especially across Chinese and
+    English typography.  The fallback keeps only letters/numbers, preserves
+    order, and requires both a substantial exact block and very high overall
+    coverage.  Paraphrases and invented evidence still fail closed.
+    """
+    if quote in answer:
+        return True
+    clean = lambda value: "".join(character for character in norm(value) if character.isalnum())
+    answer_clean, quote_clean = clean(answer), clean(quote)
+    if not quote_clean:
+        return False
+    if quote_clean in answer_clean:
+        return True
+    blocks = SequenceMatcher(None, quote_clean, answer_clean, autojunk=False).get_matching_blocks()
+    matched = sum(block.size for block in blocks)
+    longest = max((block.size for block in blocks), default=0)
+    minimum_block = max(6, min(12, len(quote_clean) // 2))
+    return longest >= minimum_block and matched / len(quote_clean) >= 0.85
 
 
 def same(actual, expected):
@@ -101,23 +129,29 @@ def grade_judges(case, prediction, votes):
         return None, "unjudged"
     judges = set()
     scores = []
-    human = []
+    reviewers = []
     for vote in votes:
+        require(vote.get("status", "ok") == "ok", "judge vote is not complete")
         require(vote["case_id"] == case["id"] and vote["prediction_sha256"] == digest(prediction), "judge/prediction mismatch")
         require(vote["rubric_sha256"] == digest(case["expected"]["rubric"]), "judge/rubric mismatch")
         require(isinstance(vote["judge"], str) and vote["judge"] and vote["judge"] not in judges, "duplicate/empty judge")
         judges.add(vote["judge"])
         require(type(vote["score"]) is int and 0 <= vote["score"] <= 4, "invalid judge score")
         quote = vote.get("quote", "")
-        require(isinstance(quote, str) and bool(quote.strip()) and quote in prediction["answer"], "judge quote is not candidate evidence")
+        require(isinstance(quote, str) and bool(quote.strip())
+                and quote_is_grounded(prediction["answer"], quote),
+                "judge quote is not candidate evidence")
         require(isinstance(vote.get("reason"), str) and bool(vote["reason"].strip()), "missing judge reason")
         scores.append(vote["score"])
-        if vote.get("source") == "human":
-            require(isinstance(vote.get("reviewer"), str) and bool(vote["reviewer"].strip()), "human adjudication requires reviewer identity")
-            human.append(vote["score"])
-    require(len(human) <= 1, "conflicting human adjudications")
-    if human:
-        return human[0] / 4, "human_adjudicated"
+        source = vote.get("source", "model")
+        require(source in ("model", "reviewer", "human"), "unknown judge source")
+        if source in ("reviewer", "human"):
+            require(isinstance(vote.get("reviewer"), str) and bool(vote["reviewer"].strip()),
+                    "review adjudication requires reviewer identity")
+            reviewers.append(vote["score"])
+    require(len(reviewers) <= 1, "conflicting reviewer adjudications")
+    if reviewers:
+        return reviewers[0] / 4, "reviewer_adjudicated"
     if len(scores) < 2:
         return None, "needs_second_judge"
     if max(scores) - min(scores) > POLICY["judge_disagreement_limit"]:
@@ -182,11 +216,15 @@ def score(cases, predictions, votes=()):
         dimensions[dimension] = {"score": sum(means) / len(means) if means else None,
                                  "family_count": len(families), "ci95_family_bootstrap": interval(means),
                                  "complete": complete}
-    scores = [x["score"] for x in dimensions.values()]
+    primary_dimensions = (ROLEPLAY_DIMENSIONS
+                          if cases and all(case.get("evaluation_mode") == "roleplay" for case in cases)
+                          else LEGACY_DIMENSIONS)
+    scores = [dimensions[name]["score"] for name in primary_dimensions]
     observed = sum(row["status"] not in ("missing", "error", "invalid") for row in details)
     leaks = [row for row in details if next(c for c in cases if c["id"] == row["case_id"])["expected"]["forbidden"]]
     return {"schema": "morp.report/1", "policy": POLICY, "policy_sha256": digest(POLICY),
             "macro_score": sum(scores) / len(scores) if all(x is not None for x in scores) else None,
+            "primary_dimensions": list(primary_dimensions),
             "dimensions": dimensions, "coverage": {"planned": len(cases), "valid_predictions": observed,
                 "fraction": observed / len(cases) if cases else 0, "statuses": dict(Counter(r["status"] for r in details))},
             "leakage": {"planned_cases": len(leaks), "observed_violations": sum(r["leak"] for r in leaks),

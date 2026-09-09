@@ -107,7 +107,8 @@ class ScenarioTests(unittest.TestCase):
             with patch("benchmarks.morp.scenarios.execute") as execute_mock:
                 run(root / "plans", self.manifest, [self.case], root / "runs", True)
             self.assertEqual([c.args[0]["config"]["scenario"] for c in execute_mock.call_args_list],
-                             ["basic_context", "all_enabled", "all_enabled", "basic_context"])
+                             ["basic_context", "dmw_nsg", "all_enabled",
+                              "dmw_nsg", "all_enabled", "basic_context"])
 
     def test_causal_matrix_changes_one_component_group_at_a_time(self):
         with tempfile.TemporaryDirectory() as temp:

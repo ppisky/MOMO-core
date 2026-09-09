@@ -1,8 +1,8 @@
-# MOMO Maintenance Prompt Configuration Guide
+# MOMO Runtime and Maintenance Prompt Configuration Guide
 
 [简体中文](maintenance_prompts.zh-CN.md)
 
-This guide explains how MOMO Core 1.0 configures the DMW memory distiller and the NSG semantic-graph governor.
+This guide explains how MOMO Core 1.0 configures the Roleplay Director, DMW memory distiller, and NSG semantic-graph governor.
 
 ## Recommended layout
 
@@ -12,19 +12,21 @@ Keep the configuration and prompts in one portable directory tree:
 momo.toml
 prompts/
 ├── dmw_distiller.md
-└── nsg_governor.md
+├── nsg_governor.md
+└── roleplay_director.md
 ```
 
-The project ships two standard files:
+The project ships three standard files:
 
 - `prompts/dmw_distiller.md`: the complete DMW v2 hit-update, Current Memory hygiene, reference, alias, and patch constraints;
-- `prompts/nsg_governor.md`: the complete NSG v2 Canon, Draft, Revision Candidate, anchor, and DMW-boundary constraints.
+- `prompts/nsg_governor.md`: the complete NSG v2 Canon, Draft, Revision Candidate, anchor, and DMW-boundary constraints;
+- `prompts/roleplay_director.md`: foreground discipline for voice, continuity, agency, embodiment, initiative, and viewpoint.
 
-These files are the complete System Prompts sent to the maintenance models. They are not summaries or placeholders.
+These are the complete System Prompts used by Core. The director is foreground context; the other two are maintenance prompts. They are not summaries or placeholders.
 
 ## Minimal configuration
 
-When the standard filenames are used, `[prompts]` may be omitted from `momo.toml`. Core reads these paths by default:
+When `[prompts]` is omitted, Core reads the two maintenance paths below and uses its bundled Roleplay Director:
 
 ```text
 prompts/dmw_distiller.md
@@ -37,6 +39,7 @@ To make the selection explicit or use other filenames:
 [prompts]
 memory_distillation_file = "prompts/dmw_distiller.md"
 semantic_graph_governance_file = "prompts/nsg_governor.md"
+roleplay_director_file = "prompts/roleplay_director.md"
 ```
 
 Long inline TOML prompts are no longer supported. Markdown files preserve headings, lists, examples, and multi-line normative text and are easier to review.
@@ -57,13 +60,15 @@ Absolute paths, `..`, escaping symlinks, missing files, and non-UTF-8 files fail
 
 ## Responsibilities
 
+The Roleplay Director governs the foreground turn. It does not write memory; it turns the Character Card, transcript, memory, lore, and MO State into scene-native performance while preserving user agency.
+
 The DMW file governs dynamic narrative memory: events, relationship changes, character development, current scene state, and unresolved threads. It may emit only DMW YAML Patch operations.
 
 If an explicit event applies an established rule to named entities, DMW keeps the concrete resulting state while NSG keeps the reusable rule. This prevents an author-only Draft rule from becoming the sole storage location for an already confirmed event outcome.
 
 The NSG file governs semi-static world rules: durable lore, conditions, constraints, and narratively meaningful edges. Automatic creation is Draft-only; Canon changes require an evidence-bearing Revision Candidate.
 
-Do not merge the files. They are called through separate logical routes and have different write authority.
+Do not merge the files. The director runs in the conversation context; DMW and NSG use separate maintenance routes with different write authority.
 
 ## Customization
 
@@ -74,7 +79,8 @@ prompts/
 ├── dmw_distiller.md
 ├── nsg_governor.md
 ├── dmw_distiller.my-product.md
-└── nsg_governor.my-product.md
+├── nsg_governor.my-product.md
+└── roleplay_director.my-product.md
 ```
 
 Then change the TOML references. A customization should retain these non-negotiable boundaries:
@@ -92,7 +98,7 @@ The YAML examples in the standard files demonstrate structure only. Their entiti
 
 ## MOC behavior
 
-When Core exports the MOC `config` module, it resolves both references in `momo.toml` and includes the Markdown files under the same `config/` tree. Import validates the MOC manifest, then validates the prompt paths and content, and finally writes the TOML and files together into the local configuration directory.
+When Core exports the MOC `config` module, it resolves every configured prompt reference in `momo.toml` and includes the Markdown files under the same `config/` tree. The bundled Roleplay Director needs no extra file unless an override is configured. Import validates the MOC manifest, prompt paths, and content before writing the TOML and files together.
 
 The receiver does not install prompts separately. A MOC with a missing referenced file is rejected rather than run with degraded policy.
 

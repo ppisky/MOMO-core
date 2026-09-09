@@ -118,9 +118,11 @@ images go directly to an image-capable conversation model, or through the
 optional logical `vision` description route when the conversation model is
 text-only. Resolved input and usage are persisted for deterministic request-ID
 replay. The `momo.responses/1.0` cross-repository fixtures are frozen, but this
-is published as the `v1.0.0-rc.1` prerelease; broader credentialed and MORP
+is published as the `v1.0.0-rc.2` prerelease; broader credentialed and MORP
 coverage remains the stable `v1.0.0` gate. See the
 [1.0.0 release contract](docs/roadmap_1_0_0.md).
+Release-candidate changes are summarized in the
+[rc.2 release notes](docs/release_notes_1_0_0_rc2.md).
 
 Background maintenance prompts are portable Markdown files rather than
 abbreviated inline TOML. Start from [momo.example.toml](momo.example.toml) and
@@ -141,23 +143,28 @@ UUID. See the [normative Space model](docs/space_model_1_0.md) and the
 
 ## Validate
 
-[MORP-Bench](benchmarks/morp/README.en.md) adds original memory scenarios, ACGN
-label-ablation experiments, reproducible scoring and source-license notes.
+[MORP-Bench](benchmarks/morp/README.en.md) is the role-playing benchmark: 64
+bilingual counterfactual scenes measure character fidelity, emotional and
+relationship continuity, user agency, world embodiment, initiative, narrative
+coherence, and character-bounded knowledge. Memory and retrieval suites remain
+available only as explicitly selected legacy diagnostics.
 Run `bash scripts/test-morp.sh`; Windows PowerShell also has `./scripts/test-morp.ps1`.
-The default workflow is offline; candidate and judge inference require an
-explicit `--allow-ai` and are not part of CI.
+The default workflow is offline; candidate inference requires an explicit
+`--allow-ai` and is not part of CI.
 
 Generate a model plan without contacting a provider:
 
 ```bash
 bash scripts/run-morp-model.sh \
-  --config benchmarks/morp/configs/baseline.example.json
+  --config benchmarks/morp/configs/qwen3.8-flash.momo.json
 ```
 
-The runner supports lightweight selection by character, dimension, scenario
-family, ACGN arm, or exact case ID. Reports expose explicit 0–100 objective and
-selected-dimension summaries without converting pending subjective judgements
-into zero. Record a credentialed run in the
+The runner supports lightweight selection by persona, dimension, scenario
+family, or exact case ID. The rc.2 deployment profile uses one Qwen model for
+conversation, DMW distillation, and NSG governance across the three core arms,
+plus one embedding model. Reports expose a 0–100 role-play score after one
+identity-bound reviewer supplies grounded quotes and reasons; Codex may perform
+that review without posing as a human. Pending reviews remain null. Record a credentialed run in the
 [real-results template](benchmarks/morp/RESULTS_TEMPLATE.md).
 The current non-normative engineering assessment is available in the
 [role-playing implementation review](docs/roleplay_implementation_review.en.md).

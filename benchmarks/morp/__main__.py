@@ -5,16 +5,16 @@ from pathlib import Path
 import sys
 
 from .common import digest, load_dataset, read_json, read_jsonl, require, unique, write_new
-from .corpus import DIMENSIONS, VERSION, make_cases
+from .corpus import DIMENSIONS, ROLEPLAY_DIMENSIONS, VERSION, make_cases
 from .metrics import POLICY, ablation_report, compare, emotion_metrics, interval, score, stance_metrics
 from .offline import run_probe
-from .runner import execute, execute_judge, judge_plan, plan
+from .runner import execute, execute_judge, judge_plan, plan, review_template
 from .upstream import SOURCES, import_locked, pin
 from .acgn import CAST, make_acgn_cases
 from .calibration import calibration_plan, calibration_score
 from .momo_presets import make_momo_preset_cases
 from .stress import make_stress_cases
-from .roleplay_v02 import make_roleplay_v02_cases
+from .roleplay_v1 import PERSONAS, make_roleplay_v1_cases
 from . import scenarios
 from .performance import report as performance_report
 
@@ -38,6 +38,7 @@ def select_cases(cases, split="eval", dimensions=(), families=(), characters=(),
     arms, case_ids, dependencies = set(arms), set(case_ids), set(dependencies)
     character_aliases = {identity: identity for identity, _, _, _ in CAST}
     character_aliases.update({name: identity for identity, name, _, _ in CAST})
+    character_aliases.update({identity: identity for identity in PERSONAS})
     unknown_characters = characters - character_aliases.keys()
     require(not unknown_characters, f"unknown characters: {sorted(unknown_characters)}")
     character_ids = {character_aliases[value] for value in characters}
@@ -48,6 +49,8 @@ def select_cases(cases, split="eval", dimensions=(), families=(), characters=(),
     require(case_ids <= available_ids, f"unknown case IDs: {sorted(case_ids - available_ids)}")
 
     def character_id(case):
+        if case.get("evaluation_mode") == "roleplay":
+            return case.get("roleplay", {}).get("character")
         parts = case["id"].split("/")
         return parts[2] if len(parts) > 2 and parts[0] == "acgn" else None
 
@@ -86,12 +89,21 @@ def score_run(dataset, run_plan, rows, votes):
         reports.append(report)
     result = reports[0]
     details = [{**row, "case_id": row["case_id"] + f"@repeat-{i}"} for i, report in enumerate(reports) for row in report["cases"]]
-    case_metadata = {case["id"]: case.get("momo_preset", {}) for case in all_cases}
+    case_metadata = {
+        case["id"]: (case.get("roleplay", {})
+                     if case.get("evaluation_mode") == "roleplay"
+                     else case.get("momo_preset", {}))
+        for case in all_cases
+    }
     for row in details:
         metadata = case_metadata[row["case_id"].rsplit("@repeat-", 1)[0]]
-        if metadata:
+        if "dependency" in metadata:
             row["dependency"] = metadata["dependency"]
             row["difficulty"] = metadata["difficulty"]
+        if "challenge" in metadata:
+            row["character"] = metadata["character"]
+            row["challenge"] = metadata["challenge"]
+            row["branch"] = metadata["branch"]
     # Repeated runs/lengths/languages remain inside their scenario cluster.
     for dimension in result["dimensions"]:
         families = {}
@@ -102,7 +114,8 @@ def score_run(dataset, run_plan, rows, votes):
         means = [sum(xs) / len(xs) for xs in families.values()] if complete else []
         result["dimensions"][dimension].update(score=sum(means) / len(means) if means else None,
                                                ci95_family_bootstrap=interval(means), complete=complete)
-    scores = [r["score"] for r in result["dimensions"].values()]
+    primary_dimensions = result["primary_dimensions"]
+    scores = [result["dimensions"][name]["score"] for name in primary_dimensions]
     result["macro_score"] = sum(scores) / len(scores) if all(x is not None for x in scores) else None
     result["cases"] = details
     result["acgn_ablation"] = ablation_report(all_cases, details)
@@ -122,7 +135,7 @@ def score_run(dataset, run_plan, rows, votes):
             "case_mean_diagnostic": (sum(r["score"] for r in details if r[field] == value) / sum(r[field] == value for r in details)
                                      if all(r["score"] is not None for r in details if r[field] == value) else None)}
             for value in sorted({r[field] for r in details}, key=str)}
-    for field in ("dependency", "difficulty"):
+    for field in ("character", "challenge", "branch", "dependency", "difficulty"):
         values = sorted({row[field] for row in details if field in row})
         if values:
             result["slices"][field] = {value: {
@@ -141,6 +154,15 @@ def score_run(dataset, run_plan, rows, votes):
 
     chosen_cases = {identity: next(case for case in all_cases if case["id"] == identity)
                     for identity, _ in expected}
+    roleplay_run = all(case.get("evaluation_mode") == "roleplay" for case in chosen_cases.values())
+    complete_roleplay_selection = (
+        roleplay_run and set(selected_dimensions) == set(ROLEPLAY_DIMENSIONS)
+    )
+    roleplay_score = (selected_score
+                      if complete_roleplay_selection and not statuses.get("missing", 0)
+                      else None)
+    if roleplay_run:
+        result["macro_score"] = roleplay_score
     objective_groups = {}
     for row in details:
         identity = row["case_id"].rsplit("@repeat-", 1)[0]
@@ -172,17 +194,19 @@ def score_run(dataset, run_plan, rows, votes):
         "scale": "0..100",
         "status": ("incomplete_execution" if statuses.get("missing", 0) or statuses.get("error", 0) else
                    "invalid_predictions" if statuses.get("invalid", 0) else
-                   "complete" if selected_score is not None else
-                   "objective_only" if objective_score is not None else "requires_judges"),
+                   "complete" if selected_score is not None and (not roleplay_run or complete_roleplay_selection) else
+                   "partial_roleplay" if selected_score is not None and roleplay_run else
+                   "objective_only" if objective_score is not None else "requires_review"),
         "selected_dimensions": selected_dimensions,
         "selected_score": round(selected_score * 100, 2) if selected_score is not None else None,
+        "roleplay_score": round(roleplay_score * 100, 2) if roleplay_score is not None else None,
         "objective_dimensions": sorted(objective_dimensions),
         "objective_score": round(objective_score * 100, 2) if objective_score is not None else None,
         "facts_only_diagnostic": (
             round(facts_only_diagnostic * 100, 2) if facts_only_diagnostic is not None else None
         ),
         "coverage": round(result["coverage"]["fraction"] * 100, 2),
-        "note": "Missing/error predictions retain the registered zero penalty, but do not mean execution completed or that an answer was factually wrong. Subjective cases require two independent judges or one auditable human adjudication."
+        "note": "Missing/error predictions retain the registered zero penalty, but do not mean execution completed or that an answer was factually wrong. Subjective cases require one identity-bound, evidence-grounded reviewer vote; two independent model votes remain an optional compatibility path."
     }
     result["performance"] = performance_report(rows, run_plan["config"], len(expected), votes)
     pipeline_cases = []
@@ -221,7 +245,7 @@ def main(argv=None):
     build.add_argument("--out", required=True)
     build.add_argument("--horizons", type=int, nargs="+", default=[50, 100, 500])
     build.add_argument("--variants", type=int, default=2)
-    build.add_argument("--suite", choices=["all", "memory", "acgn", "momo", "stress", "roleplay"], default="all")
+    build.add_argument("--suite", choices=["roleplay", "legacy-all", "memory", "acgn", "momo", "stress"], default="roleplay")
     validate = sub.add_parser("validate")
     validate.add_argument("dataset")
     planned = sub.add_parser("plan")
@@ -231,14 +255,14 @@ def main(argv=None):
     planned.add_argument("--repeats", type=int, default=3)
     planned.add_argument("--dimension", action="append", choices=DIMENSIONS, default=[])
     planned.add_argument("--family", action="append", default=[])
-    planned.add_argument("--character", action="append", default=[], help="ACGN character ID such as c01, or its exact name")
+    planned.add_argument("--character", action="append", default=[], help="Role-play persona ID, ACGN character ID, or exact ACGN name")
     planned.add_argument("--arm", action="append", choices=["label_free", "labeled", "labels_only"], default=[])
     planned.add_argument("--case-id", action="append", default=[])
     planned.add_argument("--dependency", action="append", choices=["context", "extracted"], default=[])
     planned.add_argument("--out", required=True)
     scenario_plan = sub.add_parser("scenario-plan", parents=[planned], add_help=False,
-                                   help="Create paired basic_context/all_enabled plans, offline")
-    scenario_plan.add_argument("--matrix", choices=["paired", "core", "causal"], default="paired")
+                                   help="Create the three-plan core matrix, offline")
+    scenario_plan.add_argument("--matrix", choices=["paired", "core", "causal"], default="core")
     scenario_run = sub.add_parser("scenario-run")
     scenario_run.add_argument("dataset")
     scenario_run.add_argument("--plans", required=True)
@@ -267,6 +291,10 @@ def main(argv=None):
     jp.add_argument("dataset")
     jp.add_argument("--predictions", required=True)
     jp.add_argument("--out", required=True)
+    reviewer = sub.add_parser("review-template")
+    reviewer.add_argument("--plan", required=True)
+    reviewer.add_argument("--reviewer", required=True)
+    reviewer.add_argument("--out", required=True)
     judge = sub.add_parser("judge")
     judge.add_argument("--plan", required=True)
     judge.add_argument("--config", required=True)
@@ -304,23 +332,25 @@ def main(argv=None):
         require(len(set(args.horizons)) == len(args.horizons) and all(10 <= h <= 2000 for h in args.horizons), "unique horizons must be 10..2000")
         require(1 <= args.variants <= 20, "variants must be 1..20")
         cases = (make_cases(tuple(sorted(args.horizons)), args.variants)
-                 if args.suite in ("all", "memory") else [])
-        if args.suite in ("all", "acgn"):
+                 if args.suite in ("legacy-all", "memory") else [])
+        if args.suite in ("legacy-all", "acgn"):
             cases += make_acgn_cases()
-        if args.suite in ("all", "momo"):
+        if args.suite in ("legacy-all", "momo"):
             cases += make_momo_preset_cases(tuple(sorted(args.horizons)), args.variants)
-        if args.suite in ("all", "stress"):
+        if args.suite in ("legacy-all", "stress"):
             cases += make_stress_cases()
-        if args.suite in ("all", "roleplay"):
-            cases += make_roleplay_v02_cases()
+        if args.suite == "roleplay":
+            cases += make_roleplay_v1_cases()
         provenance = {"source": "MOMO original", "horizons": args.horizons, "variants": args.variants, "suite": args.suite}
         if args.suite == "stress":
             provenance.update(horizons=[36], variants=2, suite_revision="0.2.0")
         elif args.suite == "roleplay":
-            provenance.update(horizons=[24], variants=2, suite_revision="0.2.0")
-        elif args.suite == "all":
-            provenance.update(component_versions={"legacy": VERSION, "stress": "0.2.0", "roleplay": "0.2.0"})
-        dataset_version = "0.2.0" if args.suite in ("all", "stress", "roleplay") else VERSION
+            provenance.update(horizons=[4], variants=2, suite_revision="1.0.0",
+                              purpose="roleplay_performance_only")
+        elif args.suite == "legacy-all":
+            provenance.update(component_versions={"legacy": "0.1.2", "stress": "0.2.0"})
+        dataset_version = ("1.0.0" if args.suite == "roleplay" else
+                           "0.2.0" if args.suite in ("stress", "legacy-all") else VERSION)
         result = save_dataset(args.out, sorted(cases, key=lambda c: c["id"]), provenance, dataset_version)
     elif args.command == "validate":
         result, _ = load_dataset(args.dataset)
@@ -355,6 +385,10 @@ def main(argv=None):
         _, cases = load_dataset(args.dataset)
         result = judge_plan(cases, read_jsonl(args.predictions))
         write_new(args.out, result)
+    elif args.command == "review-template":
+        rows = review_template(read_json(args.plan), args.reviewer)
+        write_new(args.out, rows, lines=True)
+        result = {"reviews": args.out, "count": len(rows), "status": "pending"}
     elif args.command == "judge":
         execute_judge(read_json(args.plan), read_json(args.config), args.out, args.allow_ai)
         result = {"votes": args.out}

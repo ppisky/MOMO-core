@@ -50,6 +50,10 @@ pub struct ContextSections<'a> {
     /// in the system section so history truncation cannot silently discard an
     /// override that the request audit reports as applied.
     pub runtime_instructions: &'a str,
+    /// Product-owned performance policy. It is separate from the author-owned
+    /// character card so a card describes identity without having to recreate
+    /// the runtime's role-play discipline.
+    pub roleplay_director: &'a str,
     pub character: &'a str,
     pub user: &'a str,
     pub memory: &'a str,
@@ -246,15 +250,25 @@ fn system_sections(sections: ContextSections<'_>) -> Vec<(&'static str, String, 
             4,
         ));
     }
+    if !sections.roleplay_director.trim().is_empty() {
+        output.push((
+            "roleplay_director",
+            format!(
+                "# Roleplay Direction\n{}",
+                sections.roleplay_director.trim()
+            ),
+            6,
+        ));
+    }
     if !sections.character.trim().is_empty() {
         output.push((
             "character",
             format!("# Character\n{}", sections.character.trim()),
-            4,
+            6,
         ));
     }
     if !sections.user.trim().is_empty() {
-        output.push(("user", format!("# User\n{}", sections.user.trim()), 2));
+        output.push(("user", format!("# User\n{}", sections.user.trim()), 3));
     }
     if !sections.memory.trim().is_empty() {
         output.push((
@@ -514,6 +528,7 @@ mod tests {
                 ContextRequest {
                     sections: ContextSections {
                         runtime_instructions: "Respect the traveler's choices.",
+                        roleplay_director: "Stay embodied in the current scene.",
                         character: &character,
                         user: "The traveler trusts Mira.",
                         memory: "Mira promised to meet at dawn.",
@@ -532,7 +547,14 @@ mod tests {
             assert!(system.contains("Mira promised to meet at dawn."));
             assert!(system.contains("Only Eren and the traveler are in the harbor."));
             assert!(system.contains("Respect the traveler's choices."));
-            assert_eq!(prepared.section_audit.len(), 6);
+            assert!(system.contains("Stay embodied in the current scene."));
+            assert!(
+                prepared
+                    .section_audit
+                    .iter()
+                    .any(|section| section.section == "roleplay_director" && !section.omitted)
+            );
+            assert_eq!(prepared.section_audit.len(), 7);
             assert!(
                 prepared
                     .section_audit

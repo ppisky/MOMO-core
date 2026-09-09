@@ -4,8 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="${PYTHON:-python3}"
 config=""
-suite="memory"
-split="dev"
+suite="roleplay"
+split="eval"
 repeats="1"
 variants="1"
 output_root=""
@@ -23,14 +23,14 @@ usage() {
 Usage: scripts/run-morp-model.sh --config PATH [options]
 
 Options:
-  --suite all|memory|acgn|momo   Dataset suite (default: memory)
-  --split dev|eval|all     Dataset split (default: dev)
+  --suite roleplay|legacy-all|memory|acgn|momo|stress   Dataset suite (default: roleplay)
+  --split dev|eval|all     Dataset split (default: eval)
   --repeats N              Planned repeats (default: 1)
   --horizon N              Event horizon; repeat for more than one (default: 50)
   --variants N             Template variants (default: 1)
   --dimension NAME         Include a dimension; repeat to include more than one
   --family NAME            Include a scenario family; repeat to include more than one
-  --character ID_OR_NAME   Include an ACGN character; repeat to include more than one
+  --character ID_OR_NAME   Include a role-play persona or legacy ACGN character; repeatable
   --arm NAME               Include label_free, labeled, or labels_only; repeatable
   --case-id ID             Include one exact case ID; repeatable
   --dependency NAME        Include context or extracted MOMO presets; repeatable
@@ -79,7 +79,7 @@ fi
 dataset="$output_root/dataset"
 plan="$output_root/plan.json"
 run="$output_root/run"
-report="$output_root/objective-report.json"
+report="$output_root/prejudge-report.json"
 
 "$python_bin" -m benchmarks.morp build --out "$dataset" --suite "$suite" \
   --horizons "${horizons[@]}" --variants "$variants"
@@ -114,7 +114,7 @@ printf 'WARNING: AI execution enabled: up to %s candidate calls, plus provider-d
 "$python_bin" -m benchmarks.morp score "$dataset" --plan "$plan" \
   --predictions "$run/predictions.jsonl" --out "$report"
 printf 'Candidate predictions: %s\n' "$run/predictions.jsonl"
-printf 'Objective-only report: %s\n' "$report"
+printf 'Pre-judge report: %s\n' "$report"
 "$python_bin" - "$report" <<'PY'
 import json
 import sys
@@ -125,5 +125,7 @@ selected = "pending" if summary["selected_score"] is None else summary["selected
 print(f"Coverage: {summary['coverage']}/100")
 print(f"Objective score: {objective}/100")
 print(f"Selected score: {selected}/100 ({summary['status']})")
+roleplay = "pending" if summary.get("roleplay_score") is None else summary["roleplay_score"]
+print(f"Role-play score: {roleplay}/100")
 PY
-printf '%s\n' 'Subjective dimensions remain pending until two independent judge result files or one auditable human adjudication are supplied.'
+printf '%s\n' 'Role-play score remains pending until one identity-bound reviewer file is supplied (two model judges remain optional).'

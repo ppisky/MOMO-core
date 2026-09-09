@@ -55,8 +55,8 @@ pub use gateway::{
 pub use governance::{
     GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION, MaintenancePromptConfig,
     MoStateInjectionMode, MoStateProfile, MoStateRuntimeConfig, MomoConfig, MomoRuntimeConfig,
-    OverrideMode, RequestOverridePolicy, RequestedOverrides, VisionDescriptionConfig,
-    validate_momo_document,
+    OverrideMode, RequestOverridePolicy, RequestedOverrides, RoleplayRuntimeConfig,
+    VisionDescriptionConfig, validate_momo_document,
 };
 pub use lsb::{
     LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,

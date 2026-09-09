@@ -89,6 +89,14 @@ def load_dataset(directory):
         require(isinstance(case["persona"], str) and bool(case["persona"].strip()), "persona required")
         require(isinstance(case["query"], str) and bool(case["query"].strip()), "query required")
         require(type(case["requires_judge"]) is bool, "requires_judge must be boolean")
+        mode = case.get("evaluation_mode", "legacy")
+        require(mode in ("legacy", "roleplay"), "unknown evaluation mode")
+        if mode == "roleplay":
+            require(case["requires_judge"], "roleplay cases require judges")
+            require(not case["facts_schema"] and not case["expected"]["facts"],
+                    "roleplay primary score cannot contain fact targets")
+            require(not case["expected"]["evidence_ids"],
+                    "roleplay primary score cannot contain retrieval targets")
         require(set(case["facts_schema"]) == set(case["expected"]["facts"]), "facts/labels schema mismatch")
         require(case["requires_judge"] or bool(case["expected"]["facts"]), "objective case has no targets")
         require(isinstance(case["expected"]["rubric"], str) and bool(case["expected"]["rubric"].strip()), "rubric required")
@@ -97,6 +105,9 @@ def load_dataset(directory):
         require(family_splits.setdefault(case["family"], case["split"]) == case["split"], "family crosses splits")
         event_ids = unique(case["history"], "id")
         require(all(isinstance(e["text"], str) and bool(e["text"].strip()) for e in case["history"]), "invalid history text")
+        if mode == "roleplay":
+            require(all(e.get("role") in ("user", "assistant") for e in case["history"]),
+                    "roleplay transcript entries require user/assistant roles")
         require(set(case["expected"]["evidence_ids"]) <= set(event_ids), "dangling evidence")
         require(all(event_ids[e]["scope"] in case["visible_scopes"] for e in case["expected"]["evidence_ids"]), "private evidence in gold")
         preset = case.get("momo_preset")

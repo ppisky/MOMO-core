@@ -1,5 +1,7 @@
 # MORP 0.2：MOMO 组件归因场景
 
+> 历史诊断协议：此处评估记忆、语义网和 MO State 的组件归因，不属于 MORP 1.0 角色扮演主分。
+
 状态：执行与报告代码已提供，真实模型成绩尚未测量。模型、固定部署 revision 和价格由运行者提供。
 
 ## 实验定义
@@ -56,16 +58,21 @@ live 模式在探针后也排空新产生的维护工作；recorded 模式不等
 
 ```powershell
 python -m benchmarks.morp build --suite momo --horizons 24 --variants 1 --out target/morp-preset-data
-python -m benchmarks.morp scenario-plan target/morp-preset-data --config benchmarks/morp/configs/momo.example.json --split all --repeats 1 --matrix core --out target/morp-preset-plans
+python -m benchmarks.morp scenario-plan target/morp-preset-data --config benchmarks/morp/configs/qwen3.8-flash.momo.json --split all --repeats 1 --out target/morp-preset-plans
 ```
 
 支持原 `plan` 的过滤器，并新增可重复的 `--dependency context` / `--dependency extracted`。
 `--arm` 仍指 ACGN 的标签实验组，不指基础/全开场景。计划文件分别是
 计划文件按实验臂命名，`experiment.json` 汇总调用计划。`paired` 生成基础/全开两臂；
-`core` 生成基础、DMW+NSG、全开三臂；`causal` 生成全部七臂。
+默认 `core` 生成基础、DMW+NSG、全开三臂；`paired` 只生成基础/全开，`causal` 生成全部七臂。
 recorded 模式的候选调用数是 `case 数 × repeats × 臂数`；live 模式才是
 `(历史条数 + 1) × case 数 × repeats × 臂数`。后台维护、embedding、裁判调用另计。
 离线生成不访问模型。
+
+rc.2 的最小模型拓扑只有两个部署：一个 Qwen 模型同时映射 `conversation`、
+`memory_distillation` 和 `semantic_graph_governance` 三条逻辑路由；另一个向量化模型映射
+`embedding`。三个 core 场景复用完全相同的 Qwen 与 embedding 部署，只改变 DMW、NSG、
+MO State 开关。模型路由映射由外部网关负责，不写入可移植 `momo.toml`，密钥也不得写入仓库。
 
 ## 提供模型后执行
 
@@ -88,28 +95,24 @@ python -m benchmarks.morp scenario-run target/morp-pair-data --plans target/morp
 崩溃期间的原生成功响应可通过 request ID 重放恢复，已保存响应计时随 checkpoint 保留。
 中断期间尚未保存的网络耗时和供应商计费可能不完整。
 
-## 质量与模型协助审查
+## 质量与可审计评审
 
-分别对两组生成 `judge-plan`，再用两个不同、固定版本的裁判配置运行 `judge`。
-候选模型和两个裁判的具体模型可以稍后确定。裁判输入隐藏候选模型、场景名和运行指标，
-两组用同一套 rubric；相同裁判配置重复执行不算两个独立裁判。
+分别为各组生成同一格式的盲审计划，再由 Codex 按冻结 rubric 填写一份身份绑定的 reviewer 文件。
+评审输入隐藏候选模型、场景名和运行指标，各组使用同一套 rubric；不再要求额外部署两个裁判模型。
 
 以下以基础组为例；全部开启组替换路径中的 `basic_context`：
 
 ```powershell
 python -m benchmarks.morp judge-plan target/morp-pair-data --predictions target/morp-pair-run/basic_context/predictions.jsonl --out target/basic-judge-plan.json
-python -m benchmarks.morp judge --plan target/basic-judge-plan.json --config judge-a.json --out target/basic-votes-a.jsonl --allow-ai
-python -m benchmarks.morp judge --plan target/basic-judge-plan.json --config judge-b.json --out target/basic-votes-b.jsonl --allow-ai
-python -m benchmarks.morp score target/morp-pair-data --plan target/morp-pair-plans/basic_context.plan.json --predictions target/morp-pair-run/basic_context/predictions.jsonl --votes target/basic-votes-a.jsonl target/basic-votes-b.jsonl --out target/basic-report.json
+python -m benchmarks.morp review-template --plan target/basic-judge-plan.json --reviewer codex:rc2 --out target/basic-reviews.jsonl
+# Codex 填写 score、quote、reason，并将 status 改为 ok。
+python -m benchmarks.morp score target/morp-pair-data --plan target/morp-pair-plans/basic_context.plan.json --predictions target/morp-pair-run/basic_context/predictions.jsonl --votes target/basic-reviews.jsonl --out target/basic-report.json
 ```
 
-无需裁判即可给客观题打分；主观题需要两名裁判，严重分歧保留为待人工审查。
-裁判引用必须来自候选回答。可以先省略 `--votes` 得到客观分、覆盖率和性能报告，
-但未评主观题不能生成完整质量对照。裁判可各自配置 pricing，用量和费用与候选分开。
-对于默认开启长思考的 OpenAI Chat Completions 服务，可以在裁判配置中填写
-`"thinking":"disabled"`；运行器会发送 `{"thinking":{"type":"disabled"}}`，
-避免短格式裁判的思考 token 挤占最终 JSON。其他值会被拒绝。
-沿用 `calibration-plan` / `calibration-score` 做裁判校准；未校准结果仍标记 provisional。
+无需 reviewer 即可给客观题打分；主观题需要一份 `source: "reviewer"`、包含稳定 reviewer 身份、
+候选原文引用和具体理由的票。可以先省略 `--votes` 得到客观分、覆盖率和性能报告，
+但未评主观题不能生成完整质量对照。旧 `judge` 命令仍可运行两个独立模型作为兼容路径，
+但不是 rc.2 的模型依赖或推荐流程。未完成人类校准的结果仍标记 provisional。
 
 两组评分完成后：
 
@@ -136,6 +139,6 @@ python -m benchmarks.morp scenario-compare target/basic-report.json target/all-r
 - 原生响应不包含完整的后台维护、embedding 或网关内部账单，**原生 total_estimate 始终为 null**。
   实际总成本需要补充供应商/网关账单；不能据此宣称全部开启更便宜。平价公式也不计算缓存折扣。
 - 无效 JSON 回答仍保留已返回用量；失败请求可能已计费但未返回 usage，明确记为未测量。
-- 裁判费用单独按币种汇总，不与候选费用混算，不跨币种相加。
+- 若使用可选模型裁判，其费用单独按币种汇总，不与候选费用混算，不跨币种相加；Codex reviewer 不伪造供应商费用。
 
 当前仓库没有真实场景成绩；离线 mock 和 HTTP 测试只验证执行与计量契约。

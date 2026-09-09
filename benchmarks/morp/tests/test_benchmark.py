@@ -35,8 +35,9 @@ class CorpusTests(unittest.TestCase):
 
     def test_frozen_release_fingerprint(self):
         from benchmarks.morp.common import read_json
+        from benchmarks.morp.roleplay_v1 import make_roleplay_v1_cases
         release = read_json(Path(__file__).parents[1] / "release.json")
-        cases = sorted(make_cases() + make_acgn_cases() + make_momo_preset_cases(), key=lambda c: c["id"])
+        cases = make_roleplay_v1_cases()
         self.assertEqual(digest(cases), release["cases_sha256"], "update the benchmark version/release when changing the corpus")
         self.assertEqual(digest(POLICY), release["policy_sha256"], "version scoring changes explicitly")
 
@@ -296,6 +297,29 @@ class JudgeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             grade_judges(self.case, self.row, [self.vote("a", 4), self.vote("a", 4)])
 
+    def test_quote_typography_and_short_speaker_tag_elision_are_grounded(self):
+        self.row["answer"] = (
+            "“The count is complete,” she answered. “I did not see the ballot opened.”"
+        )
+        vote = {**self.vote("a", 4),
+                "prediction_sha256": digest(self.row),
+                "quote": "The count is complete... I did not see the ballot opened."}
+        self.assertEqual(grade_judges(self.case, self.row, [vote])[1], "needs_second_judge")
+
+        self.row["answer"] = "“南边没用了，”她说，“那楼梯现在只配当废料。”"
+        vote = {**self.vote("a", 4),
+                "prediction_sha256": digest(self.row),
+                "quote": "南边没用了，那楼梯现在只配当废料。"}
+        self.assertEqual(grade_judges(self.case, self.row, [vote])[1], "needs_second_judge")
+
+    def test_loose_paraphrase_is_not_grounded(self):
+        self.row["answer"] = "The count is complete, but I did not witness the ballot."
+        vote = {**self.vote("a", 4),
+                "prediction_sha256": digest(self.row),
+                "quote": "Everyone agrees the secret vote was definitely unanimous."}
+        with self.assertRaises(ValueError):
+            grade_judges(self.case, self.row, [vote])
+
     def test_judge_nan_bool_and_out_of_range_rejected(self):
         for value in (float("nan"), True, 5, -1):
             with self.assertRaises(ValueError):
@@ -306,9 +330,24 @@ class JudgeTests(unittest.TestCase):
         self.assertIsNone(result["cases"][0]["score"])
         self.assertEqual(result["cases"][0]["status"], "invalid_judgement")
 
-    def test_human_can_resolve_disagreement_with_auditable_evidence(self):
-        votes = [self.vote("a", 4), self.vote("b", 1), {**self.vote("human-1", 3), "source": "human", "reviewer": "reviewer-1"}]
-        self.assertEqual(grade_judges(self.case, self.row, votes), (.75, "human_adjudicated"))
+    def test_one_auditable_reviewer_is_sufficient(self):
+        vote = {**self.vote("review-1", 3), "source": "reviewer", "reviewer": "codex:release-review"}
+        self.assertEqual(grade_judges(self.case, self.row, [vote]), (.75, "reviewer_adjudicated"))
+
+    def test_reviewer_can_resolve_model_disagreement(self):
+        votes = [self.vote("a", 4), self.vote("b", 1),
+                 {**self.vote("review-1", 3), "source": "reviewer", "reviewer": "codex:release-review"}]
+        self.assertEqual(grade_judges(self.case, self.row, votes), (.75, "reviewer_adjudicated"))
+
+    def test_reviewer_identity_and_source_are_validated(self):
+        with self.assertRaises(ValueError):
+            grade_judges(self.case, self.row, [{**self.vote("review-1", 3), "source": "reviewer"}])
+        with self.assertRaises(ValueError):
+            grade_judges(self.case, self.row, [{**self.vote("review-1", 3), "source": "untrusted"}])
+        with self.assertRaises(ValueError):
+            grade_judges(self.case, self.row, [{**self.vote("review-1", 3),
+                                                "source": "reviewer", "reviewer": "codex:test",
+                                                "status": "pending"}])
 
 
 class RunnerTests(unittest.TestCase):

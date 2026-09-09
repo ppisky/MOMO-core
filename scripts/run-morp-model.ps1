@@ -2,10 +2,10 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Config,
-    [ValidateSet('all', 'memory', 'acgn', 'momo')]
-    [string]$Suite = 'memory',
+    [ValidateSet('roleplay', 'legacy-all', 'memory', 'acgn', 'momo', 'stress')]
+    [string]$Suite = 'roleplay',
     [ValidateSet('dev', 'eval', 'all')]
-    [string]$Split = 'dev',
+    [string]$Split = 'eval',
     [ValidateRange(1, 20)]
     [int]$Repeats = 1,
     [ValidateRange(1, 1000)]
@@ -42,7 +42,7 @@ try {
     $dataset = Join-Path $OutputRoot 'dataset'
     $plan = Join-Path $OutputRoot 'plan.json'
     $run = Join-Path $OutputRoot 'run'
-    $report = Join-Path $OutputRoot 'objective-report.json'
+    $report = Join-Path $OutputRoot 'prejudge-report.json'
     $horizonArguments = @($Horizons | ForEach-Object { $_.ToString() })
 
     $buildArguments = @(
@@ -88,12 +88,13 @@ try {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     Write-Output "Candidate predictions: $(Join-Path $run 'predictions.jsonl')"
-    Write-Output "Objective-only report: $report"
+    Write-Output "Pre-judge report: $report"
     $scoreDocument = Get-Content -Raw -LiteralPath $report | ConvertFrom-Json
     Write-Output ("Coverage: {0}/100" -f $scoreDocument.score_summary.coverage)
     Write-Output ("Objective score: {0}/100" -f $(if ($null -eq $scoreDocument.score_summary.objective_score) { 'pending' } else { $scoreDocument.score_summary.objective_score }))
     Write-Output ("Selected score: {0}/100 ({1})" -f $(if ($null -eq $scoreDocument.score_summary.selected_score) { 'pending' } else { $scoreDocument.score_summary.selected_score }), $scoreDocument.score_summary.status)
-    Write-Output 'Subjective dimensions remain pending until two independent judge result files or one auditable human adjudication are supplied.'
+    Write-Output ("Role-play score: {0}/100" -f $(if ($null -eq $scoreDocument.score_summary.roleplay_score) { 'pending' } else { $scoreDocument.score_summary.roleplay_score }))
+    Write-Output 'Role-play score remains pending until one identity-bound reviewer file is supplied (two model judges remain optional).'
 } finally {
     Pop-Location
 }

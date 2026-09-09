@@ -1301,6 +1301,14 @@ impl MomoApiService {
         let prepared = parse_json(simple::prepare_context_json(
             json!({
                 "runtime_instructions": governed.instructions.as_deref().unwrap_or_default(),
+                "roleplay_director": if self.config.roleplay.enabled
+                    && character.get("character_markdown").and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                {
+                    self.config.prompts.roleplay_director.as_str()
+                } else {
+                    ""
+                },
                 "character_markdown": character.get("character_markdown").and_then(Value::as_str).unwrap_or_default(),
                 "user_markdown": character.get("user_markdown").and_then(Value::as_str).unwrap_or_default(),
                 "memory_markdown": if include_memory { joined_bodies(&memory) } else { String::new() },

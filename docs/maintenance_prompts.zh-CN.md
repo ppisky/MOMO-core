@@ -1,8 +1,8 @@
-# MOMO 维护提示词配置指南
+# MOMO 运行时与维护提示词配置指南
 
 [English](maintenance_prompts.en.md)
 
-本文说明 MOMO Core 1.0 如何配置 DMW 记忆提炼与 NSG 语义网治理提示词。
+本文说明 MOMO Core 1.0 如何配置角色扮演导演、DMW 记忆提炼与 NSG 语义网治理提示词。
 
 ## 推荐目录
 
@@ -12,19 +12,21 @@
 momo.toml
 prompts/
 ├── dmw_distiller.md
-└── nsg_governor.md
+├── nsg_governor.md
+└── roleplay_director.md
 ```
 
-标准文件随项目提供：
+三个标准文件随项目提供：
 
 - `prompts/dmw_distiller.md`：完整的 DMW v2 命中更新、Current Memory 卫生、引用、alias 与 Patch 约束；
-- `prompts/nsg_governor.md`：完整的 NSG v2 Canon、Draft、Revision Candidate、Anchor 与 DMW 边界约束。
+- `prompts/nsg_governor.md`：完整的 NSG v2 Canon、Draft、Revision Candidate、Anchor 与 DMW 边界约束；
+- `prompts/roleplay_director.md`：前台角色扮演约束，负责人物声音、连续性、用户主导权、场景具身、主动性与角色视角。
 
-它们是实际送给维护模型的完整 System Prompt，不是摘要或占位文本。
+它们是 Core 实际使用的完整 System Prompt，不是摘要或占位文本。
 
 ## 最简单的填写方式
 
-使用标准文件名时，`momo.toml` 可以完全省略 `[prompts]`。Core 默认读取：
+省略 `[prompts]` 时，Core 默认读取下面两个维护文件，并使用内置的角色扮演导演：
 
 ```text
 prompts/dmw_distiller.md
@@ -37,6 +39,7 @@ prompts/nsg_governor.md
 [prompts]
 memory_distillation_file = "prompts/dmw_distiller.md"
 semantic_graph_governance_file = "prompts/nsg_governor.md"
+roleplay_director_file = "prompts/roleplay_director.md"
 ```
 
 不再支持把长提示词直接写进 TOML。这样可以正常使用 Markdown 标题、列表、示例与多行规范，也便于代码审查。
@@ -55,7 +58,9 @@ semantic_graph_governance_file = "prompts/nsg_governor.md"
 
 绝对路径、`..`、越界符号链接、缺失文件和非 UTF-8 文件会让配置校验直接失败。Core 不会用短提示词静默替代错误文件。
 
-## 两个提示词的职责
+## 三个提示词的职责
+
+角色扮演导演负责前台回复。它不写入记忆，而是把角色卡、当前对话、相关记忆、世界规则和 MO State 转化为符合场景的人物表演，同时保留用户的行动权。
 
 DMW 文件负责动态叙事记忆：事件、关系变化、角色发展、当前场景和未完成线索。它必须只输出 DMW YAML Patch。
 
@@ -63,7 +68,7 @@ DMW 文件负责动态叙事记忆：事件、关系变化、角色发展、当�
 
 NSG 文件负责半静态世界规则：稳定 lore、条件、约束和有叙事影响力的边。自动创建只能是 Draft；Canon 变化必须使用带证据的 Revision Candidate。
 
-不要把两个文件合并。它们由不同逻辑路由调用，也有不同的写入权限。
+不要合并三个文件。角色扮演导演进入对话上下文；DMW 与 NSG 由不同维护路由调用，也有不同的写入权限。
 
 ## 如何定制
 
@@ -74,7 +79,8 @@ prompts/
 ├── dmw_distiller.md
 ├── nsg_governor.md
 ├── dmw_distiller.my-product.md
-└── nsg_governor.my-product.md
+├── nsg_governor.my-product.md
+└── roleplay_director.my-product.md
 ```
 
 然后修改 TOML 引用。定制时应保留以下不可削弱边界：
@@ -92,7 +98,7 @@ prompts/
 
 ## MOC 行为
 
-导出 MOC 的 `config` 模块时，Core 会解析 `momo.toml` 的两个引用，并把对应 Markdown 文件放入同一 `config/` 目录树。导入时先验证 MOC 清单，再验证提示词路径和内容，最后把 TOML 与文件一起写入本地配置目录。
+导出 MOC 的 `config` 模块时，Core 会解析 `momo.toml` 中所有已配置的提示词引用，并把对应 Markdown 文件放入同一 `config/` 目录树。内置角色扮演导演只有在显式覆盖时才需要额外文件。导入时先验证 MOC 清单，再验证提示词路径和内容，最后把 TOML 与文件一起写入本地配置目录。
 
 因此 MOC 接收方不需要另外安装提示词；缺失引用文件的 MOC 会被拒绝，而不是降级运行。
 

@@ -5,16 +5,19 @@ from .common import digest, read_json, require, write_new
 from .runner import execute, plan, MOMO_SCENARIO_FLAGS
 from .metrics import compare, interval
 
-SCENARIOS = ("basic_context", "all_enabled")
+PAIRED_SCENARIOS = ("basic_context", "all_enabled")
+# Compatibility alias for callers that explicitly request the historical
+# two-arm matrix. The CLI default is CORE_SCENARIOS.
+SCENARIOS = PAIRED_SCENARIOS
 CORE_SCENARIOS = ("basic_context", "dmw_nsg", "all_enabled")
 CAUSAL_SCENARIOS = tuple(MOMO_SCENARIO_FLAGS)
 
 
-def create(cases, manifest, config, repeats, directory, selection=None, matrix="paired"):
+def create(cases, manifest, config, repeats, directory, selection=None, matrix="core"):
     require(config.get("backend") == "momo", "scenarios require a MOMO config")
     root = Path(directory)
     require(not root.exists(), "scenario output already exists")
-    names = {"paired": SCENARIOS, "core": CORE_SCENARIOS,
+    names = {"paired": PAIRED_SCENARIOS, "core": CORE_SCENARIOS,
              "causal": CAUSAL_SCENARIOS}.get(matrix)
     require(names is not None, "unknown scenario matrix")
     plans = {}

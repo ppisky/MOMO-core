@@ -32,6 +32,9 @@ max_agent_steps = 8
 operation_timeout_ms = 30000
 injection_mode = "active"
 
+[roleplay]
+enabled = true
+
 [request_overrides]
 context_window = "ignore"
 max_output_tokens = "allow"
@@ -48,6 +51,7 @@ prompt = "Describe only visible facts that are relevant to the conversation. Do 
 [prompts]
 memory_distillation_file = "prompts/dmw_distiller.md"
 semantic_graph_governance_file = "prompts/nsg_governor.md"
+roleplay_director_file = "prompts/roleplay_director.md"
 ```
 
 ## Request governance
@@ -96,6 +100,19 @@ without exposing memory bodies. This supports safe rollout and causal
 evaluation without letting an uncertain state projection influence replies and
 later memory maintenance.
 
+## Role-play runtime
+
+`roleplay.enabled = true` injects a product-owned Roleplay Director into every
+character-bound conversation-model request. It keeps performance inside the fiction, preserves
+character voice, emotional and relationship continuity, physical constraints,
+user agency, bounded initiative, and the character's knowledge boundary. The
+director is separate from the author-owned Character Card: the card defines who
+the character is; the director defines how the runtime performs that character.
+
+Set `enabled = false` only when a host intentionally supplies a different
+performance layer. Memory and MO State remain evidence sources and are not a
+substitute for this runtime direction.
+
 ## Vision
 
 `vision.enabled = true` permits image-bearing native response requests. Core
@@ -118,15 +135,18 @@ extra instruction for a multimodal conversation model.
 
 `prompts.memory_distillation_file` and
 `prompts.semantic_graph_governance_file` reference the complete system
-instructions for Core-owned background maintenance. Paths are relative to the
+instructions for Core-owned background maintenance.
+`prompts.roleplay_director_file` optionally replaces the bundled foreground
+Roleplay Director. Paths are relative to the
 directory containing `momo.toml`; they must be safe `.md` paths and cannot use
 absolute paths, `..`, symlinks that escape the directory, or files larger than
 256 KiB. A MOC config module carries the referenced files with `momo.toml`.
 
-The `[prompts]` table may be omitted when the standard files exist at
-`prompts/dmw_distiller.md` and `prompts/nsg_governor.md`. Write the table only
-to select different safe relative Markdown files. There are no abbreviated
-inline prompt fields.
+The `[prompts]` table may be omitted when the two standard maintenance files
+exist at `prompts/dmw_distiller.md` and `prompts/nsg_governor.md`; the Roleplay
+Director has a bundled audited default. Set `roleplay_director_file` only to
+choose a different safe relative Markdown file. There are no abbreviated inline
+prompt fields.
 
 The shipped prompt files combine the complete v1 Distiller rules with the v2
 discipline additions. TOML contains references rather than abbreviated inline
@@ -141,8 +161,9 @@ uses the same full bundled Markdown content.
 - Runtime maintenance intervals must be between 1 and 200 turns.
 - MO State limits must be inside the ranges documented above.
 - The vision prompt must contain 1 to 65,536 bytes.
-- Omitting `[prompts]` selects the two standard relative files; custom
-  references must provide both fields.
+- Omitting `[prompts]` selects the two standard maintenance files and the
+  bundled Roleplay Director; custom maintenance references must provide both
+  fields, while the role-play override is optional.
 - Each referenced prompt must be non-empty UTF-8 Markdown no larger than 256 KiB.
 - Secret-shaped fields and host-only top-level sections are rejected.
 
