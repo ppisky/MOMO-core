@@ -22,6 +22,10 @@ Execution requires an explicit `--allow-ai`. A candidate returns its natural per
 
 Create an offline blind plan and editable reviewer rows with `judge-plan` followed by `review-template --reviewer codex:rc2`. Fill `score`, `quote`, and `reason`, set each row's `status` to `ok`, then pass that single JSONL file to `score --votes`.
 
+For later double-blind experiments or calibration, the optional Qwen and
+DeepSeek judge presets remain under `configs/`. Both disable extended thinking
+to control token use, and no default script invokes them.
+
 Legacy diagnostic generators are available as `memory`, `acgn`, `momo`, `stress`, and `legacy-all`. Their reports are not MORP 1.0 role-playing scores and must not be mixed with the primary leaderboard.
 
 The public cases are original development material and are not yet broadly human-calibrated. Results are suitable for regression and product comparisons, not universal claims about role-play quality.

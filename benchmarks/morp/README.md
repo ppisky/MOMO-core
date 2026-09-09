@@ -97,6 +97,9 @@ python -m benchmarks.morp score target/morp-roleplay --plan target/morp-roleplay
 
 一份 `source: "reviewer"`、带稳定 `reviewer` 身份、引用和理由的评审票即可形成正式 case 分数。Codex 可以作为该可审计评审者，不应伪装成人类。旧的两个独立模型裁判仍可作为自动化兼容路径；若采用它们且相差超过 1 分，仍等待 reviewer 裁定。缺失、请求失败或格式错误的候选记 0 并保留执行状态；评审错误不会惩罚候选。
 
+需要双盲实验或校准时，可选启用仓库中的 `judge-a-qwen3.8-flash.json` 与
+`judge-b-deepseek-v4-flash.json`。两个预设都关闭长思考以控制 token；它们不会被默认脚本调用。
+
 聚合顺序为：评审 → case → 场景族 → 维度 → 八维等权总分。中英文、反事实分支和重复运行不会凭数量提高某个场景族的权重。置信区间以场景族为 bootstrap 单位。
 
 `score_summary.roleplay_score` 和兼容字段 `selected_score` 使用 0–100 标尺。只要成功回答仍未完成可审计评审，或计划中的预测尚未执行，总分就是 `null`；已实际发生的请求失败或格式错误按预注册规则记零。不能把 `null` 宣传成零分或满分。
