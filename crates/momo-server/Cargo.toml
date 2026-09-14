@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
 publish = false
+autotests = false
 
 [dependencies]
 axum.workspace = true

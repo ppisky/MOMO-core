@@ -1,0 +1,1 @@
+{"backend":"momo","base_url":"http://127.0.0.1:8765/v1","model":"qwen3.8-flash","revision":"302ai:qwen3.8-flash:rolling-alias:observed-2026-09-14","temperature":0,"max_output_tokens":512,"context_window":131072,"timeout_seconds":300,"history_mode":"recorded","memory":true,"semantic_graph":true,"mo_state":true,"thinking":"disabled"}

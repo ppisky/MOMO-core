@@ -464,4 +464,5 @@ fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/lib.rs"]
 mod tests;

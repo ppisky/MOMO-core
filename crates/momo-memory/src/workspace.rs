@@ -1109,11 +1109,6 @@ impl MemoryWorkspace {
         Ok(resolved)
     }
 
-    #[cfg(test)]
-    pub(super) fn index_path(&self) -> PathBuf {
-        self.root.join("indexes/memory_index.yaml")
-    }
-
     fn checked_index_path(&self) -> Result<PathBuf, MemoryError> {
         self.resolve(Path::new("indexes/memory_index.yaml"))
     }

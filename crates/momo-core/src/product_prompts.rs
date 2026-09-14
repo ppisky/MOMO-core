@@ -10,16 +10,5 @@ pub(crate) const SEMANTIC_GRAPH_GOVERNANCE: &str = include_str!("product_prompts
 pub(crate) const ROLEPLAY_DIRECTOR: &str = include_str!("product_prompts/roleplay_director.md");
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compiled_product_prompts_are_complete() {
-        assert!(MEMORY_DISTILLATION.contains("preserve the concrete outcome in DMW"));
-        assert!(SEMANTIC_GRAPH_GOVERNANCE.contains("Never create Canon"));
-        assert!(
-            ROLEPLAY_DIRECTOR.contains("Narration and dialogue have the same knowledge boundary")
-        );
-        assert!(ROLEPLAY_DIRECTOR.contains("Final audit: before emitting"));
-    }
-}
+#[path = "../tests/unit/product_prompts.rs"]
+mod tests;

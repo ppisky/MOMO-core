@@ -551,12 +551,12 @@ patches:
 fn empty_patch_is_a_valid_noop() {
     let root = tempfile::tempdir().expect("memory root");
     let workspace = MemoryWorkspace::initialize(root.path()).expect("initialize");
-    let index_before = fs::read(workspace.index_path()).expect("index");
+    let index_before = fs::read(workspace.root().join("indexes/memory_index.yaml")).expect("index");
 
     workspace.apply_patch("patches: []").expect("empty patch");
 
     assert_eq!(
-        fs::read(workspace.index_path()).expect("index after"),
+        fs::read(workspace.root().join("indexes/memory_index.yaml")).expect("index after"),
         index_before
     );
 }
@@ -601,7 +601,8 @@ fn whole_patch_is_prevalidated_before_any_write() {
     );
     workspace.rebuild_index().expect("rebuild index");
     let original_first = fs::read(root.path().join("events/first.md")).expect("first");
-    let original_index = fs::read(workspace.index_path()).expect("index");
+    let original_index =
+        fs::read(workspace.root().join("indexes/memory_index.yaml")).expect("index");
 
     let error = workspace
         .apply_patch(
@@ -627,7 +628,7 @@ patches:
         original_first
     );
     assert_eq!(
-        fs::read(workspace.index_path()).expect("index"),
+        fs::read(workspace.root().join("indexes/memory_index.yaml")).expect("index"),
         original_index
     );
 }
@@ -643,7 +644,8 @@ fn validate_patch_runs_full_validation_without_writing() {
     workspace.rebuild_index().expect("rebuild index");
     let document_path = root.path().join("events/approval.md");
     let original_document = fs::read(&document_path).expect("document");
-    let original_index = fs::read(workspace.index_path()).expect("index");
+    let original_index =
+        fs::read(workspace.root().join("indexes/memory_index.yaml")).expect("index");
     let patch = r#"
 patches:
   - target_file: events/approval.md
@@ -662,7 +664,7 @@ patches:
         original_document
     );
     assert_eq!(
-        fs::read(workspace.index_path()).expect("index"),
+        fs::read(workspace.root().join("indexes/memory_index.yaml")).expect("index"),
         original_index
     );
 
@@ -680,7 +682,7 @@ fn transaction_failure_rolls_back_document_and_index() {
     );
     workspace.rebuild_index().expect("rebuild index");
     let document_path = root.path().join("events/rollback.md");
-    let index_path = workspace.index_path();
+    let index_path = workspace.root().join("indexes/memory_index.yaml");
     let original_document = fs::read(&document_path).expect("document");
     let original_index = fs::read(&index_path).expect("index");
     let mut failed_once = false;
@@ -717,7 +719,7 @@ patches:
 fn failed_index_write_removes_a_newly_created_document() {
     let root = tempfile::tempdir().expect("memory root");
     let workspace = MemoryWorkspace::initialize(root.path()).expect("initialize");
-    let index_path = workspace.index_path();
+    let index_path = workspace.root().join("indexes/memory_index.yaml");
     let original_index = fs::read(&index_path).expect("index");
     let mut failed_once = false;
     let mut writer = |path: &Path, content: &[u8]| {
@@ -864,7 +866,11 @@ fn rebuild_index_recovers_from_corrupt_index_and_removes_stale_entries() {
         root.path(),
         &event_fixture("events/rebuild.md", "event_rebuild", &["rebuilt"]),
     );
-    atomic_write(&workspace.index_path(), "not: [valid").expect("corrupt index");
+    atomic_write(
+        &workspace.root().join("indexes/memory_index.yaml"),
+        "not: [valid",
+    )
+    .expect("corrupt index");
 
     assert_eq!(workspace.rebuild_index().expect("rebuild"), 1);
     let index = workspace.load_index().expect("valid index");
@@ -1232,7 +1238,11 @@ fn retrieval_rebuilds_corrupt_and_stale_indexes_from_memory_files() {
         root.path(),
         &event_fixture("events/recover.md", "event_recover", &["original"]),
     );
-    atomic_write(&workspace.index_path(), "not: [valid").expect("corrupt index");
+    atomic_write(
+        &workspace.root().join("indexes/memory_index.yaml"),
+        "not: [valid",
+    )
+    .expect("corrupt index");
 
     assert!(
         workspace
