@@ -1,0 +1,1 @@
+{"backend":"openai","base_url":"https://api.302.ai/v1","model":"qwen3.8-flash","api_key_env":"AI302_API_KEY","revision":"302ai:qwen3.8-flash:rolling-alias:observed-2026-09-14","temperature":0,"max_output_tokens":512,"context_window":131072,"timeout_seconds":120,"memory":false,"semantic_graph":false,"mo_state":false,"thinking":"disabled"}

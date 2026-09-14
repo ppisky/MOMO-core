@@ -569,4 +569,5 @@ fn encode_activity(activity: &MemoryActivity) -> Result<String, MemoryError> {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/workspace.rs"]
 mod tests;

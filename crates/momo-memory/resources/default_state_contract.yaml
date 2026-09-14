@@ -1,0 +1,63 @@
+version: 1
+dimensions:
+  relational_stance:
+    signal_source: "dmw"
+    match_mode: "first"
+    rules:
+      - id: "stance_conflict"
+        condition:
+          weight_min: 0.3
+          tags_any: ["conflict", "tension"]
+        directives:
+          - "Preserve established relationship tension; do not force a premature reconciliation."
+      - id: "stance_attachment"
+        condition:
+          weight_min: 0.6
+          tags_any: ["attachment", "trust", "dependency"]
+        directives:
+          - "Express established closeness and continuity in the relationship."
+  emotional_tone:
+    signal_source: "dmw"
+    match_mode: "first"
+    rules:
+      - id: "tone_loss"
+        condition:
+          signal_tags_any: ["loss", "farewell", "regret"]
+        directives:
+          - "Keep the tone measured; avoid flippancy or an abrupt subject change."
+      - id: "tone_danger"
+        condition:
+          signal_tags_any: ["danger", "fear", "threat"]
+        directives:
+          - "Remain alert and respond to the immediate risk first."
+  scene_constraint:
+    signal_source: "dmw+nsg"
+    match_mode: "accumulate"
+    rules: []
+  physiological_state:
+    signal_source: "dmw+nsg"
+    match_mode: "first"
+    rules:
+      - id: "phys_wounded"
+        condition:
+          dmw_event_tag: "wounded"
+          nsg_constraint_match: "injury"
+        directives:
+          - "Actions must reflect the delay and physical limits caused by injury."
+  epistemic_state:
+    signal_source: "dmw"
+    match_mode: "first"
+    rules:
+      - id: "epistemic_secret_absence"
+        condition:
+          mode: "absence"
+          event_tag: "secret"
+          required_witness_tag: "witness"
+        directives:
+          - "Do not give the character knowledge of a secret event they did not witness."
+conflict_priority:
+  - "scene_constraint"
+  - "physiological_state"
+  - "epistemic_state"
+  - "relational_stance"
+  - "emotional_tone"
