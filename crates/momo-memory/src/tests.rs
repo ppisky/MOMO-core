@@ -60,7 +60,7 @@ fn structured_tags_and_ids_do_not_match_shared_prefix_tokens() {
 }
 
 #[test]
-fn body_terms_retrieve_specific_english_and_chinese_facts() {
+fn body_terms_retrieve_specific_facts_across_multiple_languages() {
     let root = tempfile::tempdir().expect("root");
     let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
     write_fixture(
@@ -70,6 +70,14 @@ fn body_terms_retrieve_specific_english_and_chinese_facts() {
     write_fixture(
         root.path(),
         &event_fixture("events/chinese.md", "chinese_record", &[]),
+    );
+    write_fixture(
+        root.path(),
+        &event_fixture("events/japanese.md", "japanese_record", &[]),
+    );
+    write_fixture(
+        root.path(),
+        &event_fixture("events/arabic.md", "arabic_record", &[]),
     );
     let mut english = workspace.read("events/english.md").expect("english");
     english.body =
@@ -87,6 +95,20 @@ fn body_terms_retrieve_specific_english_and_chinese_facts() {
         chinese.encode().expect("encode chinese"),
     )
     .expect("write chinese");
+    let mut japanese = workspace.read("events/japanese.md").expect("japanese");
+    japanese.body = "# 記録二十四\n\nマーラの銀色の星盤はガラス書庫に保管されている。".to_owned();
+    fs::write(
+        root.path().join("events/japanese.md"),
+        japanese.encode().expect("encode japanese"),
+    )
+    .expect("write japanese");
+    let mut arabic = workspace.read("events/arabic.md").expect("arabic");
+    arabic.body = "# السجل الرابع والعشرون\n\nأسطرلاب مارا الفضي محفوظ في أرشيف الزجاج.".to_owned();
+    fs::write(
+        root.path().join("events/arabic.md"),
+        arabic.encode().expect("encode arabic"),
+    )
+    .expect("write arabic");
 
     let english_results = workspace
         .retrieve(
@@ -112,45 +134,22 @@ fn body_terms_retrieve_specific_english_and_chinese_facts() {
             .iter()
             .any(|item| item.id == "chinese_record")
     );
-}
-
-#[test]
-fn cross_language_fallback_is_bounded_and_preserves_same_language_negatives() {
-    let root = tempfile::tempdir().expect("root");
-    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
-    for (index, weight) in [(1, 0.9), (2, 0.8), (3, 0.7)] {
-        let id = format!("english_record_{index}");
-        let relative = format!("events/{id}.md");
-        write_fixture(root.path(), &event_fixture(&relative, &id, &[]));
-        let mut document = workspace.read(&relative).expect("read fixture");
-        document.metadata.weight = Some(weight);
-        document.body = format!("# Archive Record {index}\n\nMara stored an instrument safely.");
-        fs::write(
-            root.path().join(&relative),
-            document.encode().expect("encode fixture"),
+    let japanese_results = workspace
+        .retrieve(
+            "マーラの銀色の星盤はどこ？",
+            4096,
+            &ConservativeTokenCounter,
         )
-        .expect("write fixture");
-    }
-    workspace.rebuild_index().expect("index");
-
-    let cross_language = workspace
-        .retrieve("玛拉把星盘存放在哪里？", 4096, &ConservativeTokenCounter)
-        .expect("cross-language retrieval");
-    let ids = cross_language
-        .iter()
-        .filter(|item| item.path.starts_with("events"))
-        .map(|item| item.id.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["english_record_1", "english_record_2"]);
-
-    let same_language_negative = workspace
-        .retrieve("Where is Ivo's telescope?", 4096, &ConservativeTokenCounter)
-        .expect("same-language negative retrieval");
+        .expect("retrieve japanese");
     assert!(
-        same_language_negative
+        japanese_results
             .iter()
-            .all(|item| !item.path.starts_with("events"))
+            .any(|item| item.id == "japanese_record")
     );
+    let arabic_results = workspace
+        .retrieve("أين أسطرلاب مارا الفضي؟", 4096, &ConservativeTokenCounter)
+        .expect("retrieve arabic");
+    assert!(arabic_results.iter().any(|item| item.id == "arabic_record"));
 }
 
 #[test]

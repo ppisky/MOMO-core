@@ -36,13 +36,21 @@ fn mo_state_observation(operation_id: &str, event_fingerprint: &str) -> MoStateO
         nsg_fingerprint: "nsg-a".to_owned(),
         scene_fingerprint: "scene-a".to_owned(),
         scene_json: r#"{"scene_id":"scene_initial","status":"inactive"}"#.to_owned(),
+        source_observations: Vec::new(),
     }
 }
 
 #[tokio::test]
 async fn mo_state_runtime_versions_sources_and_replays_snapshots() {
     let store = LocalStore::in_memory().await.expect("store");
-    let observation = mo_state_observation("state-operation-1", "event-a");
+    let mut observation = mo_state_observation("state-operation-1", "event-a");
+    observation.source_observations = vec![MoStateSourceObservation {
+        space_id: "01900000-0000-7000-8000-000000000202".to_owned(),
+        dmw_fingerprint: "other-dmw-a".to_owned(),
+        nsg_fingerprint: "other-nsg-a".to_owned(),
+        scene_fingerprint: "other-scene-a".to_owned(),
+        scene_json: r#"{"scene_id":"other","status":"inactive"}"#.to_owned(),
+    }];
     let operation = store
         .observe_mo_state_operation(&observation)
         .await
@@ -50,29 +58,57 @@ async fn mo_state_runtime_versions_sources_and_replays_snapshots() {
     assert_eq!(operation.base_dmw_revision, 1);
     assert_eq!(operation.base_nsg_revision, 1);
     assert_eq!(operation.base_scene_revision, 1);
+    assert_eq!(operation.source_versions.len(), 2);
+    assert!(operation.source_versions.iter().all(|source| {
+        source.dmw_revision == 1 && source.nsg_revision == 1 && source.scene_revision == 1
+    }));
 
     let state_result = r#"{"context":"[STATE_CONTEXT]","audit":{"dimensions_active":2}}"#;
     let snapshot = store
-        .publish_mo_state_snapshot("state-operation-1", state_result, false, None)
+        .publish_mo_state_snapshot("state-operation-1", state_result, false, None, None)
         .await
         .expect("publish");
     assert_eq!(snapshot.snapshot_revision, 1);
     assert_eq!(snapshot.state_context, "[STATE_CONTEXT]");
+    assert_eq!(snapshot.source_versions, operation.source_versions);
 
     let replayed_operation = store
         .observe_mo_state_operation(&observation)
         .await
         .expect("replay observation");
     let replayed = store
-        .publish_mo_state_snapshot("state-operation-1", state_result, false, None)
+        .publish_mo_state_snapshot("state-operation-1", state_result, false, None, None)
         .await
         .expect("replay snapshot");
     assert!(replayed_operation.snapshot_json.is_some());
     assert_eq!(replayed, snapshot);
 
+    let mut changed_replay = observation.clone();
+    changed_replay.source_observations[0].dmw_fingerprint = "must-not-reobserve".to_owned();
+    let frozen_replay = store
+        .observe_mo_state_operation(&changed_replay)
+        .await
+        .expect("replay keeps original source versions");
+    assert_eq!(frozen_replay.source_versions, operation.source_versions);
+
+    // Simulate an upgraded database whose managed-Space revision history
+    // predates the per-source table. The first new observation must seed that
+    // source from the existing managed revisions instead of restarting at 1.
+    sqlx::query(
+        "DELETE FROM mo_state_source_versions \
+         WHERE managed_space_id=? AND source_space_id=?",
+    )
+    .bind(&observation.space_id)
+    .bind(&observation.space_id)
+    .execute(&store.pool)
+    .await
+    .expect("remove managed source version fixture");
+
     let mut second = mo_state_observation("state-operation-2", "event-b");
     second.dmw_fingerprint = "dmw-b".to_owned();
     second.scene_fingerprint = "scene-b".to_owned();
+    second.source_observations = observation.source_observations.clone();
+    second.source_observations[0].nsg_fingerprint = "other-nsg-b".to_owned();
     let operation = store
         .observe_mo_state_operation(&second)
         .await
@@ -80,6 +116,22 @@ async fn mo_state_runtime_versions_sources_and_replays_snapshots() {
     assert_eq!(operation.base_dmw_revision, 2);
     assert_eq!(operation.base_nsg_revision, 1);
     assert_eq!(operation.base_scene_revision, 2);
+    let managed_source = operation
+        .source_versions
+        .iter()
+        .find(|source| source.space_id == observation.space_id)
+        .expect("managed source version");
+    assert_eq!(managed_source.dmw_revision, operation.base_dmw_revision);
+    assert_eq!(managed_source.nsg_revision, operation.base_nsg_revision);
+    assert_eq!(managed_source.scene_revision, operation.base_scene_revision);
+    let other_source = operation
+        .source_versions
+        .iter()
+        .find(|source| source.space_id.ends_with("0202"))
+        .expect("other source version");
+    assert_eq!(other_source.dmw_revision, 1);
+    assert_eq!(other_source.nsg_revision, 2);
+    assert_eq!(other_source.scene_revision, 1);
 
     let status = store
         .mo_state_runtime_status(&observation.space_id)
@@ -88,6 +140,58 @@ async fn mo_state_runtime_versions_sources_and_replays_snapshots() {
         .expect("runtime");
     assert_eq!(status.snapshot_revision, 1);
     assert_eq!(status.current_snapshot, Some(snapshot));
+}
+
+#[tokio::test]
+async fn ddm_hysteresis_state_is_scoped_and_published_atomically() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let observation = mo_state_observation("ddm-state-operation", "event-ddm");
+    store
+        .observe_mo_state_operation(&observation)
+        .await
+        .expect("observe");
+    let update = DdmProjectionUpdate {
+        managed_space_id: observation.space_id.clone(),
+        conversation_id: "01900000-0000-7000-8000-000000000301".to_owned(),
+        character_id: "01900000-0000-7000-8000-000000000401".to_owned(),
+        profile_revision: 3,
+        source_fingerprint: "sha256:ddm-a".to_owned(),
+        bands: [("protect_companion".to_owned(), "salient".to_owned())]
+            .into_iter()
+            .collect(),
+    };
+    store
+        .publish_mo_state_snapshot(
+            "ddm-state-operation",
+            r#"{"context":"state","audit":{}}"#,
+            false,
+            None,
+            Some(&update),
+        )
+        .await
+        .expect("publish");
+    let state = store
+        .ddm_projection_state(
+            &update.managed_space_id,
+            &update.conversation_id,
+            &update.character_id,
+        )
+        .await
+        .expect("state")
+        .expect("persisted state");
+    assert_eq!(state.profile_revision, 3);
+    assert_eq!(state.bands, update.bands);
+    assert!(
+        store
+            .ddm_projection_state(
+                &update.managed_space_id,
+                "01900000-0000-7000-8000-000000000302",
+                &update.character_id,
+            )
+            .await
+            .expect("other conversation")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -357,6 +461,7 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
         nsg_fingerprint: "nsg-completion".to_owned(),
         scene_fingerprint: "scene-completion".to_owned(),
         scene_json: "{}".to_owned(),
+        source_observations: Vec::new(),
     };
     store
         .observe_mo_state_operation(&state_observation)
@@ -367,6 +472,7 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
             "request-completion",
             r#"{"context":"state","audit":{}}"#,
             false,
+            None,
             None,
         )
         .await

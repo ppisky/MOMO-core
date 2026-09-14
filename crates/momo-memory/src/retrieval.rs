@@ -135,46 +135,10 @@ pub(super) fn body_terms(body: &str) -> Vec<String> {
 }
 
 pub(super) fn is_generic_term(term: &str) -> bool {
+    // Natural-language stop-word lists make retrieval behavior depend on the
+    // implementation's preferred language. Only reject structurally empty
+    // one-character terms; relevance remains data-driven for every script.
     term.chars().count() <= 1
-        || matches!(
-            term,
-            "the"
-                | "a"
-                | "an"
-                | "and"
-                | "or"
-                | "you"
-                | "me"
-                | "i"
-                | "he"
-                | "she"
-                | "it"
-                | "they"
-                | "主角"
-                | "角色"
-                | "城市"
-                | "魔法"
-        )
-}
-
-pub(super) fn uses_non_ascii_words(value: &str) -> bool {
-    value
-        .chars()
-        .any(|character| character.is_alphanumeric() && !character.is_ascii())
-}
-
-pub(super) fn is_cross_language_fallback(query: &str, body: &str) -> bool {
-    let query_non_ascii = uses_non_ascii_words(query);
-    let body_non_ascii = uses_non_ascii_words(body);
-    let query_ascii_words = query
-        .chars()
-        .any(|character| character.is_ascii_alphabetic());
-    let body_ascii_words = body
-        .chars()
-        .any(|character| character.is_ascii_alphabetic());
-
-    (query_non_ascii && body_ascii_words && !body_non_ascii)
-        || (body_non_ascii && query_ascii_words && !query_non_ascii)
 }
 
 pub(super) fn explicit_memory_references(text: &str) -> HashSet<String> {

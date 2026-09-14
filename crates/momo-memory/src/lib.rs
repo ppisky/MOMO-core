@@ -1,5 +1,6 @@
 //! Dual-Mem Wiki workspace, deterministic retrieval, and YAML patch execution.
 
+pub mod ddm;
 pub mod nsg;
 pub mod scene;
 pub mod state;
@@ -21,9 +22,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
+pub use ddm::{
+    DdmAudit, DdmBand, DdmCalculationProfile, DdmProfile, DdmSignalSnapshot, DdmSignalValue,
+    EffectiveDisposition,
+};
 pub use momo_domain::SCHEMA_GENERATION;
 pub use scene::{MoStateSourceFingerprint, SceneSnapshot, SceneStatus};
-pub use state::{MoStateAudit, MoStateContext};
+pub use state::{DdmRuntimeInput, MoStateAudit, MoStateContext};
 
 use filesystem::*;
 use patch::*;
@@ -67,7 +72,6 @@ const MAX_EXPANSION_TOTAL: usize = 15;
 const HUB_THRESHOLD: usize = 15;
 const DIRECT_RESERVE_RATIO_NUMERATOR: usize = 60;
 const EXPANSION_MAX_RATIO_NUMERATOR: usize = 35;
-const CROSS_LANGUAGE_FALLBACK_LIMIT: usize = 2;
 const HIT_REFRESH_LIMIT: usize = 5;
 
 #[derive(Debug, Error)]

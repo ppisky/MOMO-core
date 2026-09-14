@@ -567,7 +567,8 @@ impl LocalStore {
         let mut transaction = self.pool.begin().await?;
         if let Some(row) = sqlx::query(
             "SELECT operation_id, space_id, event_type, event_fingerprint, phase, \
-             base_dmw_revision, base_nsg_revision, base_scene_revision, snapshot_json, error \
+             base_dmw_revision, base_nsg_revision, base_scene_revision, source_versions_json, \
+             observed_scene_json, snapshot_json, error \
              FROM mo_state_operations WHERE operation_id=?",
         )
         .bind(&observation.operation_id)
@@ -638,11 +639,123 @@ impl LocalStore {
         .bind(&observation.space_id)
         .execute(&mut *transaction)
         .await?;
+
+        let managed_source = MoStateSourceObservation {
+            space_id: observation.space_id.clone(),
+            dmw_fingerprint: observation.dmw_fingerprint.clone(),
+            nsg_fingerprint: observation.nsg_fingerprint.clone(),
+            scene_fingerprint: observation.scene_fingerprint.clone(),
+            scene_json: observation.scene_json.clone(),
+        };
+        let mut source_observations =
+            std::collections::BTreeMap::from([(managed_source.space_id.clone(), managed_source)]);
+        for source in &observation.source_observations {
+            if let Some(existing) =
+                source_observations.insert(source.space_id.clone(), source.clone())
+                && existing != *source
+            {
+                return Err(StorageError::MoStateOperationConflict(format!(
+                    "Space {} has conflicting source fingerprints",
+                    source.space_id
+                )));
+            }
+        }
+        let mut source_versions = Vec::with_capacity(source_observations.len());
+        for source in source_observations.values() {
+            let is_managed_source = source.space_id == observation.space_id;
+            let initial_dmw_revision = if is_managed_source { dmw_revision } else { 0 };
+            let initial_nsg_revision = if is_managed_source { nsg_revision } else { 0 };
+            let initial_scene_revision = if is_managed_source { scene_revision } else { 0 };
+            let initial_dmw_fingerprint = if is_managed_source {
+                source.dmw_fingerprint.as_str()
+            } else {
+                ""
+            };
+            let initial_nsg_fingerprint = if is_managed_source {
+                source.nsg_fingerprint.as_str()
+            } else {
+                ""
+            };
+            let initial_scene_fingerprint = if is_managed_source {
+                source.scene_fingerprint.as_str()
+            } else {
+                ""
+            };
+            sqlx::query(
+                "INSERT INTO mo_state_source_versions \
+                 (managed_space_id, source_space_id, dmw_revision, nsg_revision, scene_revision, \
+                  dmw_fingerprint, nsg_fingerprint, scene_fingerprint, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(managed_space_id, source_space_id) DO NOTHING",
+            )
+            .bind(&observation.space_id)
+            .bind(&source.space_id)
+            .bind(initial_dmw_revision)
+            .bind(initial_nsg_revision)
+            .bind(initial_scene_revision)
+            .bind(initial_dmw_fingerprint)
+            .bind(initial_nsg_fingerprint)
+            .bind(initial_scene_fingerprint)
+            .bind(&now)
+            .execute(&mut *transaction)
+            .await?;
+            let row = sqlx::query(
+                "SELECT dmw_revision, nsg_revision, scene_revision, dmw_fingerprint, \
+                 nsg_fingerprint, scene_fingerprint FROM mo_state_source_versions \
+                 WHERE managed_space_id=? AND source_space_id=?",
+            )
+            .bind(&observation.space_id)
+            .bind(&source.space_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let source_dmw_revision = next_revision(
+                row.try_get("dmw_revision")?,
+                row.try_get("dmw_fingerprint")?,
+                &source.dmw_fingerprint,
+            );
+            let source_nsg_revision = next_revision(
+                row.try_get("nsg_revision")?,
+                row.try_get("nsg_fingerprint")?,
+                &source.nsg_fingerprint,
+            );
+            let source_scene_revision = next_revision(
+                row.try_get("scene_revision")?,
+                row.try_get("scene_fingerprint")?,
+                &source.scene_fingerprint,
+            );
+            sqlx::query(
+                "UPDATE mo_state_source_versions SET dmw_revision=?, nsg_revision=?, \
+                 scene_revision=?, dmw_fingerprint=?, nsg_fingerprint=?, scene_fingerprint=?, \
+                 updated_at=? WHERE managed_space_id=? AND source_space_id=?",
+            )
+            .bind(source_dmw_revision)
+            .bind(source_nsg_revision)
+            .bind(source_scene_revision)
+            .bind(&source.dmw_fingerprint)
+            .bind(&source.nsg_fingerprint)
+            .bind(&source.scene_fingerprint)
+            .bind(&now)
+            .bind(&observation.space_id)
+            .bind(&source.space_id)
+            .execute(&mut *transaction)
+            .await?;
+            source_versions.push(MoStateSourceVersion {
+                space_id: source.space_id.clone(),
+                dmw_revision: to_revision(source_dmw_revision)?,
+                nsg_revision: to_revision(source_nsg_revision)?,
+                scene_revision: to_revision(source_scene_revision)?,
+                dmw_fingerprint: source.dmw_fingerprint.clone(),
+                nsg_fingerprint: source.nsg_fingerprint.clone(),
+                scene_fingerprint: source.scene_fingerprint.clone(),
+            });
+        }
+        let source_versions_json = serde_json::to_string(&source_versions)?;
         sqlx::query(
             "INSERT INTO mo_state_operations \
              (operation_id, space_id, event_type, event_fingerprint, phase, \
-              base_dmw_revision, base_nsg_revision, base_scene_revision, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, 'applying', ?, ?, ?, ?, ?)",
+              base_dmw_revision, base_nsg_revision, base_scene_revision, source_versions_json, \
+              observed_scene_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'applying', ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&observation.operation_id)
         .bind(&observation.space_id)
@@ -651,6 +764,8 @@ impl LocalStore {
         .bind(dmw_revision)
         .bind(nsg_revision)
         .bind(scene_revision)
+        .bind(&source_versions_json)
+        .bind(&observation.scene_json)
         .bind(&now)
         .bind(&now)
         .execute(&mut *transaction)
@@ -665,6 +780,8 @@ impl LocalStore {
             base_dmw_revision: to_revision(dmw_revision)?,
             base_nsg_revision: to_revision(nsg_revision)?,
             base_scene_revision: to_revision(scene_revision)?,
+            source_versions,
+            observed_scene: serde_json::from_str(&observation.scene_json)?,
             snapshot_json: None,
             error: None,
         })
@@ -678,11 +795,13 @@ impl LocalStore {
         state_result_json: &str,
         degraded: bool,
         error: Option<&str>,
+        ddm_update: Option<&DdmProjectionUpdate>,
     ) -> Result<MoStateSnapshot, StorageError> {
         let mut transaction = self.pool.begin().await?;
         let operation_row = sqlx::query(
             "SELECT operation_id, space_id, event_type, event_fingerprint, phase, \
-             base_dmw_revision, base_nsg_revision, base_scene_revision, snapshot_json, error \
+             base_dmw_revision, base_nsg_revision, base_scene_revision, source_versions_json, \
+             observed_scene_json, snapshot_json, error \
              FROM mo_state_operations WHERE operation_id=?",
         )
         .bind(operation_id)
@@ -709,7 +828,6 @@ impl LocalStore {
                 StorageError::MoStateOperationConflict("snapshot revision overflow".to_owned())
             })?;
         let created_at = Utc::now();
-        let scene_json: String = space_row.try_get("scene_json")?;
         let mut identity = Sha256::new();
         identity.update(operation_id.as_bytes());
         identity.update(snapshot_revision.to_le_bytes());
@@ -724,7 +842,8 @@ impl LocalStore {
             dmw_fingerprint: space_row.try_get("dmw_fingerprint")?,
             nsg_fingerprint: space_row.try_get("nsg_fingerprint")?,
             scene_fingerprint: space_row.try_get("scene_fingerprint")?,
-            scene: serde_json::from_str(&scene_json)?,
+            source_versions: operation.source_versions,
+            scene: operation.observed_scene.clone(),
             state_context: state_result
                 .get("context")
                 .and_then(serde_json::Value::as_str)
@@ -764,8 +883,68 @@ impl LocalStore {
         .bind(&operation.space_id)
         .execute(&mut *transaction)
         .await?;
+        if let Some(update) = ddm_update {
+            if update.managed_space_id != operation.space_id || update.profile_revision == 0 {
+                return Err(StorageError::MoStateOperationConflict(
+                    "DDM projection update does not match the MO State operation".to_owned(),
+                ));
+            }
+            let bands_json = serde_json::to_string(&update.bands)?;
+            sqlx::query(
+                "INSERT INTO ddm_projection_states \
+                 (managed_space_id, conversation_id, character_id, profile_revision, \
+                  source_fingerprint, bands_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(managed_space_id, conversation_id, character_id) DO UPDATE SET \
+                  profile_revision=excluded.profile_revision, \
+                  source_fingerprint=excluded.source_fingerprint, \
+                  bands_json=excluded.bands_json, updated_at=excluded.updated_at",
+            )
+            .bind(&update.managed_space_id)
+            .bind(&update.conversation_id)
+            .bind(&update.character_id)
+            .bind(i64::try_from(update.profile_revision).map_err(|_| {
+                StorageError::MoStateOperationConflict(
+                    "DDM profile revision exceeds SQLite range".to_owned(),
+                )
+            })?)
+            .bind(&update.source_fingerprint)
+            .bind(&bands_json)
+            .bind(&now)
+            .execute(&mut *transaction)
+            .await?;
+        }
         transaction.commit().await?;
         Ok(snapshot)
+    }
+
+    pub async fn ddm_projection_state(
+        &self,
+        managed_space_id: &str,
+        conversation_id: &str,
+        character_id: &str,
+    ) -> Result<Option<DdmProjectionState>, StorageError> {
+        let row = sqlx::query(
+            "SELECT managed_space_id, conversation_id, character_id, profile_revision, \
+             source_fingerprint, bands_json, updated_at FROM ddm_projection_states \
+             WHERE managed_space_id=? AND conversation_id=? AND character_id=?",
+        )
+        .bind(managed_space_id)
+        .bind(conversation_id)
+        .bind(character_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(DdmProjectionState {
+                managed_space_id: row.try_get("managed_space_id")?,
+                conversation_id: row.try_get("conversation_id")?,
+                character_id: row.try_get("character_id")?,
+                profile_revision: to_revision(row.try_get("profile_revision")?)?,
+                source_fingerprint: row.try_get("source_fingerprint")?,
+                bands: serde_json::from_str(&row.try_get::<String, _>("bands_json")?)?,
+                updated_at: parse_timestamp(row.try_get("updated_at")?)?,
+            })
+        })
+        .transpose()
     }
 
     pub async fn fail_mo_state_operation(
@@ -1446,6 +1625,19 @@ impl LocalStore {
         .await?)
     }
 
+    pub async fn delete_portable_metadata(
+        &self,
+        kind: &str,
+        object_id: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM portable_metadata WHERE kind=? AND object_id=?")
+            .bind(kind)
+            .bind(object_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn create_memory_patch_review(
         &self,
         scope_id: Uuid,
@@ -1696,6 +1888,8 @@ fn mo_state_operation_from_row(
         base_dmw_revision: to_revision(row.try_get("base_dmw_revision")?)?,
         base_nsg_revision: to_revision(row.try_get("base_nsg_revision")?)?,
         base_scene_revision: to_revision(row.try_get("base_scene_revision")?)?,
+        source_versions: serde_json::from_str(&row.try_get::<String, _>("source_versions_json")?)?,
+        observed_scene: serde_json::from_str(&row.try_get::<String, _>("observed_scene_json")?)?,
         snapshot_json: row.try_get("snapshot_json")?,
         error: row.try_get("error")?,
     })

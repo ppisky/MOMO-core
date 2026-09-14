@@ -1,10 +1,10 @@
 # MOMO Core 1.0.0 release contract
 
-**Status:** `v1.0.0-rc.2` authorized for GitHub prerelease publication; the
-existing local `v1.0.0` tag remains a historical candidate and must not be
-moved or published
+**Status:** `v1.0.0-rc.3` is published with a complete opt-in
+implementation of the experimental DDM contract. The existing `v1.0.0`,
+`v1.0.0-rc.1`, and `v1.0.0-rc.2` tags remain historical and must not move.
 
-**Updated:** 2026-09-09
+**Updated:** 2026-09-14
 
 The checks and artifact hashes below describe the existing tagged candidate,
 not later work made after that tag. Current contract precedence is
@@ -77,9 +77,10 @@ and cross-protocol tests are green.
 - [x] Expose host hand-off for unknown MOC modules: explicit validated claim on
   import and explicit extension-module contribution on export, without Core
   interpreting or executing extension payloads.
-- [x] Replace abbreviated inline maintenance prompts with bounded portable
-  Markdown references; ship complete DMW/NSG files and move them with the MOC
-  config module.
+- [x] Replace abbreviated inline maintenance prompts with complete tracked
+  Markdown sources under `momo_core` and embed the fixed DMW, NSG, and Roleplay
+  Director prompts at compile time. Do not expose replacement paths in
+  `momo.toml`, move them through MOC, or hot-reload them.
 - [x] Replace the unpublished MOC v2 shape with MOC v3 Space modules. Export
   selects character ownership, conversations, DMW, and NSG independently;
   import preserves source Space IDs unless an explicit one-to-one `space_map`
@@ -87,14 +88,14 @@ and cross-protocol tests are green.
 - [x] Validate the complete container and all known business payloads before
   committing imported data. Unknown host modules are reported and copied only
   after an explicit claim.
-- [x] Keep workspace and maintenance-prompt file access inside validated
-  filesystem boundaries; reject traversal, links, missing/empty prompt files,
-  and credential-like portable keys.
+- [x] Keep workspace file access inside validated filesystem boundaries and
+  reject credential-like portable keys. Product prompts have no runtime
+  filesystem access because they are compile-time Core inputs.
 
 ## Gate 4: release candidate reproducibility
 
-- [x] Provide aligned detailed `momo.example.toml` files, complete referenced
-  DMW/NSG Markdown prompts, and Simplified Chinese and English configuration
+- [x] Provide an English `momo.example.toml`, complete tracked DMW/NSG/Roleplay
+  Director Markdown assets, and Simplified Chinese and English configuration
   and Space/control guides.
 - [x] Re-run formatting, all-target/all-feature tests, strict Clippy, rustdoc,
   cross-repository fixture comparison, and Release builds from the final
@@ -113,6 +114,21 @@ and cross-protocol tests are green.
   Codex reviewer instead of requiring two external judge models.
 - [x] Receive owner authorization to publish `v1.0.0-rc.2` without moving the
   historical `v1.0.0` or `v1.0.0-rc.1` tags.
+- [x] Complete the optional experimental DDM projection: author-owned MOC
+  profile transport, management API, closed typed signals, deterministic
+  conflicts/top-k, persisted scoped hysteresis, source fingerprints, and
+  atomic MO State publication.
+- [x] Remove benchmark-derived product defaults from runtime policy.
+- [x] Record an rc.3 credentialed eight-case MORP smoke run with one case per
+  primary role-play dimension and an auditable Codex review.
+- [x] Record an eight-case mixed-context A/B run that exercises real retrieval
+  and MO State, with direct and MOMO arms both scoring 84.375. Treat the tie as
+  execution evidence, not evidence of benefit.
+- [ ] Complete broader release-grade longitudinal and DDM-specific credentialed
+  counterfactual behavior evidence before stable `v1.0.0`.
+- [x] Receive explicit owner authorization to commit, create
+  `v1.0.0-rc.3`, push, and publish the GitHub prerelease without moving earlier
+  tags.
 
 ## Explicitly outside 1.0
 

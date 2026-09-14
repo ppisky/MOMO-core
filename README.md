@@ -57,9 +57,11 @@ linked at pinned revisions rather than redistributed. See [character-card format
 for source precedence, licensing boundaries, terminology, and implementation status.
 See [experience-grounded character design](docs/character_design_mechanism.en.md)
 for the authoring model used by the original MORP-Bench cast.
-The experimental [Dynamic Disposition Model](DYNAMIC_DISPOSITION_MODEL_v1.md)
-defines how those stable tendencies could be modulated by current context and
-MO State without creating another memory store.
+The experimental [Dynamic Disposition Model](Dynamic_Disposition_Model_v1.md)
+proposes opt-in modulation of those stable tendencies from governed context and
+MO State signals without creating another memory store. Its
+[implementation status](docs/ddm_implementation_status.md) is tracked
+separately from the specification.
 
 ## Workspace
 
@@ -117,16 +119,20 @@ The local 1.0 candidate includes the Core image-input path: up to eight user
 images go directly to an image-capable conversation model, or through the
 optional logical `vision` description route when the conversation model is
 text-only. Resolved input and usage are persisted for deterministic request-ID
-replay. The `momo.responses/1.0` cross-repository fixtures are frozen, but this
-is published as the `v1.0.0-rc.2` prerelease; broader credentialed and MORP
-coverage remains the stable `v1.0.0` gate. See the
+replay. The `momo.responses/1.0` cross-repository fixtures are frozen.
+`v1.0.0-rc.3` adds the complete opt-in implementation of the experimental DDM
+projection, including character-owned MOC profiles, typed signals, deterministic
+selection, persisted hysteresis, and atomic audit state; broader credentialed
+and MORP coverage remains the stable `v1.0.0` gate. See the
 [1.0.0 release contract](docs/roadmap_1_0_0.md).
 Release-candidate changes are summarized in the
-[rc.2 release notes](docs/release_notes_1_0_0_rc2.md).
+[rc.3 release notes](docs/release_notes_1_0_0_rc3.md).
+DDM's implementation boundary and remaining experimental limitations are in
+the [DDM status report](docs/ddm_implementation_status.md).
 
-Background maintenance prompts are portable Markdown files rather than
-abbreviated inline TOML. Start from [momo.example.toml](momo.example.toml) and
-read the [English configuration guide](docs/maintenance_prompts.en.md) or the
+Product prompts are tracked Markdown source assets compiled into `momo_core`
+with `include_str!`; they are not runtime files or portable configuration.
+read the [English prompt-asset guide](docs/maintenance_prompts.en.md) or the
 [简体中文指南](docs/maintenance_prompts.zh-CN.md).
 
 ## Space identity
@@ -160,7 +166,7 @@ bash scripts/run-morp-model.sh \
 ```
 
 The runner supports lightweight selection by persona, dimension, scenario
-family, or exact case ID. The rc.2 deployment profile uses one Qwen model for
+family, or exact case ID. The rc.3 deployment profile uses one Qwen model for
 conversation, DMW distillation, and NSG governance across the three core arms,
 plus one embedding model. Reports expose a 0–100 role-play score after one
 identity-bound reviewer supplies grounded quotes and reasons; Codex may perform

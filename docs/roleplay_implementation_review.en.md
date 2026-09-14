@@ -4,7 +4,7 @@
 
 **Review date:** 2026-09-05
 
-**Scope:** current worktree, including uncommitted MO State v2, control-protocol,
+**Scope:** 1.0 release-candidate implementation, including MO State v2, control-protocol,
 and maintenance-batch changes
 
 **Nature:** non-normative engineering review; precedence remains defined by
@@ -20,6 +20,16 @@ and maintenance-batch changes
 > with three terminal gateway failures retained as zeroes. Relationship dynamics
 > was strongest; narrative coherence and world embodiment were the weakest
 > dimensions. This is a single provisional synthetic run, not human calibration.
+>
+> **2026-09-10 update:** a three-case, 12-turn diagnostic with the same
+> `qwen3.8-flash` model reproduced entity transliteration, truncated
+> maintenance output, verbose replies, and unsupported new conditions. Core
+> then added normal-finish validation, one bounded repair, multilingual
+> regression coverage, and moved the Roleplay Director after the asset evidence. The
+> observed MOMO candidates improved from about **66.7/100** to roughly
+> **75–83.3/100** across the post-fix runs. At 12 turns they still did not save
+> probe input tokens or show stable superiority over full context. This small
+> public set is a regression diagnostic only.
 
 ## Conclusion
 
@@ -49,10 +59,10 @@ interface or design.
 | Prompt and context assembly | 7.7 | Character, user, DMW, MO State, NSG, and history have an explicit order and hard budget while preserving the newest user turn. Governed runtime instructions no longer behave like trimmable history, and multi-Space memory retains provenance. At the original review point, all system sections were still trimmed as one unit without per-section loss audit; later progress below addresses this. |
 | DMW long-term memory | 8.8 | Retrieval, direct hits, one-hop expansion, budget isolation, `touch_at` versus injection time, decay, archive, forgetting tombstones, transaction rollback, and Patch permissions have strong deterministic implementations. Real long-dialogue false-write, missed-write, and recall-quality measurements are still absent. |
 | NSG narrative semantic graph | 8.6 | Draft isolation, Canon revision candidates, anchor/vector fusion, Auto-Zone, one-hop expansion, edge allowlists, and candidate deduplication are implemented and tested. Semantic quality still depends on the Governor model, with no precision/recall evidence on a conflict corpus. |
-| MO State v2 | 6.7 | Per-Space locks, source fingerprints, revisions, Operation Journal, Snapshot, Scene parsing, and recovery maintenance form a credible baseline. Independent multi-source versions, a shared DMW/NSG Saga, a truly bounded Reconciler, soft-timeout execution, and durable `run_id` pause/resume remain incomplete. |
+| MO State v2 | 7.4 | Per-Space locks, source fingerprints, revisions, Operation Journal, Snapshot, Scene parsing, recovery maintenance, and optional DDM projection form a credible baseline. Retrieved bodies, scenes, and source fingerprints now share one ordered lock window, and DDM hysteresis state publishes atomically with the snapshot. A shared DMW/NSG Saga, a truly bounded Reconciler, soft-timeout execution, and durable `run_id` pause/resume remain incomplete. |
 | Multimodal role playing | 7.6 | Capability discovery selects original-image passthrough or a governed description fallback, with count/size limits, persisted fallback usage, and retry-safe vision resolution. Direct images are visible only during the current turn; later history retains only an image-count marker, so long-term visual continuity still needs host or memory support. |
 | Tool calls and agent loop | 5.9 | Gateway tool deltas, call IDs, and input/output mappings work. Same-conversation and exact-pair validation now prevent tool JSON from masquerading as user history. The 1.0 wire still lacks `requires_action`, durable pause points, same-run resumption, enforced step/time limits, and complete typed tool history. |
-| Configuration governance and capability discovery | 8.1 | Allow/ignore/reject behavior, parameter allowlists, capability caps, vision fallback, and prompt-file boundaries are clear. Host fields that Core did not execute were removed from the official example, and portable preservation is explicitly distinct from execution. |
+| Configuration governance and capability discovery | 8.1 | Allow/ignore/reject behavior, parameter allowlists, capability caps, vision fallback, and the fixed product-prompt asset boundary are clear. Host fields that Core did not execute were removed from the official example, and portable preservation is explicitly distinct from execution. |
 | Portability, security, and recovery | 9.0 | MOC v3, encryption, LSB, path-traversal protection, single-instance locking, atomic file writes, persistent idempotency, and source preservation are the project's most mature areas. |
 | Testing and observability | 7.8 | Workspace tests cover many failure paths, boundaries, and mock end-to-end flows, with useful state/request audit data. Real-provider smoke tests, a fault-injection matrix, and actual role-playing behavior runs are still missing. |
 
@@ -63,10 +73,10 @@ interface or design.
 | Character Card v2 | High | Physical format, field boundaries, security validation, and compatible imports are substantially aligned. `opening.md` has a clear format role; runtime documentation now states that Core does not automatically insert it into a response. |
 | DMW v2 | High | Major constants and retrieval/lifecycle rules match the implementation. The specification mainly exceeds tests in qualitative SHOULD requirements and asynchronous policy, not contradictory behavior. |
 | NSG v2 | High | Canon/Draft, retrieval, Zone, edge, and vector-cache boundaries match the code. Model-governance quality still lacks dataset-level evidence. |
-| MO State v2 | Medium | The document describes the complete target architecture while the code implements a baseline. The implementation-status section now explicitly lists tool resumption, multi-source versions, and cross-system Saga behavior as unimplemented. |
+| MO State v2 | Medium-high | The implementation now binds persisted source versions to retrieved bodies under one lock window and includes scoped DDM hysteresis. Tool resumption and cross-system Saga behavior remain incomplete. |
 | Native response runtime | Medium-high | Idempotency, persistence, streaming, vision, and maintenance order align with the implementation. Message roles, instruction precedence, card hot updates, openings, image history, and tool-continuation semantics are now documented. |
 | Space model | High | Ownership and access responsibilities are clear. Documentation now matches the implementation: a Space weight divides the Space budget, while ranking occurs independently inside each Space. |
-| Portable runtime configuration | Medium-high | Core executes governance, maintenance, MO State, vision, and prompt fields. Host-owned routing, default-character, weight, and concurrency fields were removed from `momo.example.toml`; safe unknown fields are preserved but not executed. |
+| Portable runtime configuration | Medium-high | Core executes governance, maintenance, MO State, and vision fields. Product prompts are tracked Markdown sources compiled into `momo_core`; they are neither runtime configuration nor MOC content. Host-owned routing, default-character, weight, and concurrency fields were removed from `momo.example.toml`; safe unknown fields are preserved but not executed. |
 
 ## Corrections made during the review
 
@@ -100,8 +110,6 @@ new evaluation scripts exist.
 
 ### P1: directly affects long-dialogue reliability
 
-- Record independent DMW/NSG/Scene revisions for every read source in a
-  multi-Space MO State Snapshot, not only the managed Space.
 - Design next-generation typed conversation-event storage for tool calls,
   outputs, and authorized image descriptions. Until then, do not claim a fully
   resumable agent run.

@@ -1,6 +1,6 @@
 # MOMO native response runtime
 
-**Status:** 1.0 local release candidate; not published
+**Status:** 1.0 release-candidate contract
 **Updated:** 2026-09-05
 
 The production conversation entry point is the native `MomoApi` operation,
@@ -24,8 +24,8 @@ validate request and request ID
      describe them through logical route `vision` for a text-only model
   -> atomically persist the resolved user input
   -> in closed-autonomous mode, recover due per-Space maintenance
-  -> lock the managed Space, retrieve DMW/NSG, observe source revisions,
-     and publish or replay a durable MO State scene/state snapshot
+  -> retrieve DMW/NSG and source revisions under one ordered source-lock set
+  -> lock managed state, then publish or replay a durable MO State scene/state snapshot
   -> assemble a bounded context
   -> call the logical conversation route
   -> atomically persist the assistant result, maintenance turn, and completed
@@ -33,8 +33,9 @@ validate request and request ID
 ```
 
 The v2 MO State manager is request-woken rather than a permanently running
-thread. Its per-Space lease serializes responses with direct DMW/NSG mutation,
-while separate Spaces remain concurrent. A successful response completion and
+thread. Retrieval holds the complete ordered source-lock set until bodies,
+scene, and fingerprints are captured; the managed-Space lease then serializes
+state publication while separate Spaces remain concurrent. A successful response completion and
 the corresponding `projected -> completed` state operation transition commit
 in one SQLite transaction. The next event recovers pending maintenance before
 observing source fingerprints, so a closed chat host does not need to call DMW,
@@ -51,7 +52,10 @@ in trimmable conversation history.
 
 The system context is assembled in this logical order: governed runtime
 instructions, current character Markdown, character-relative user Markdown,
-retrieved DMW, MO State, then active NSG lore. Multi-Space DMW and NSG entries
+retrieved DMW, MO State, active NSG lore, then the product-owned Roleplay
+Director. Putting the execution policy after the evidence keeps long memory
+from diluting its final response constraints; it does not change the authority
+of the character or author-owned material. Multi-Space DMW and NSG entries
 retain their source label and Space ID in the rendered context so personal and
 shared facts are not silently presented as one owner. The complete system
 message and newest conversation messages share one hard input budget;
@@ -72,6 +76,12 @@ and NSG material from the explicit memory Spaces and sends that read-only contex
 the pending turns, and the current timestamp to the selected maintenance route.
 Context retrieval must succeed before a model may propose a patch; Core never
 falls back to transcript-only blind writes.
+The structured input preserves source text verbatim and does not infer a
+language or script as a control signal. Language preservation is covered by
+multilingual regression tests rather than a production CJK/Latin heuristic.
+Model output is accepted only after a normal `finish_reason = stop`; a
+length-truncated or missing finish reason triggers one bounded regeneration and
+is never staged.
 The generated maintenance patch is durably staged before file mutation. A
 crashed batch reuses that exact patch, whose DMW and NSG operations are
 idempotently replayable, and only then atomically acknowledges its source turns.
@@ -112,7 +122,7 @@ conversation or vision model route fails the operation.
 
 When the system content exceeds its available budget, Core allocates capped
 weighted shares to runtime instructions / character / user / memory / state /
-semantic graph in the ratio 4:4:2:3:3:2. Empty sections do not participate;
+semantic graph / Roleplay Director in the ratio 4:6:3:3:3:2:6. Empty sections do not participate;
 sections that fit return their unused share to the others. These are context
 allocation weights, independent of cross-Space retrieval weights. Rendering
 order stays unchanged. The newest turn retains its existing reservation, and

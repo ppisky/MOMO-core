@@ -10,7 +10,15 @@ use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 use super::{MemoryError, MemoryWorkspace, RetrievedMemory, TokenCounter};
-use crate::nsg::RetrievedNsg;
+use crate::{
+    SceneSnapshot,
+    ddm::{DdmAudit, DdmBand, DdmProfile},
+    nsg::RetrievedNsg,
+};
+
+mod ddm_projection;
+
+use ddm_projection::{context_cues as ddm_context_cues, signals as ddm_signals};
 
 const CONTRACT_MAX_SIZE: u64 = 65_536;
 const STATE_CONTEXT_TOKEN_RATIO: usize = 10;
@@ -26,13 +34,13 @@ dimensions:
           weight_min: 0.3
           tags_any: ["conflict", "tension"]
         directives:
-          - "保持关系张力，不要过快和解。"
+          - "Preserve established relationship tension; do not force a premature reconciliation."
       - id: "stance_attachment"
         condition:
           weight_min: 0.6
           tags_any: ["attachment", "trust", "dependency"]
         directives:
-          - "表达上保留亲近感与连续的关系记忆。"
+          - "Express established closeness and continuity in the relationship."
   emotional_tone:
     signal_source: "dmw"
     match_mode: "first"
@@ -41,12 +49,12 @@ dimensions:
         condition:
           signal_tags_any: ["loss", "farewell", "regret"]
         directives:
-          - "语气放轻，避免轻佻或突兀转移话题。"
+          - "Keep the tone measured; avoid flippancy or an abrupt subject change."
       - id: "tone_danger"
         condition:
           signal_tags_any: ["danger", "fear", "threat"]
         directives:
-          - "语气保持警觉，优先回应眼前风险。"
+          - "Remain alert and respond to the immediate risk first."
   scene_constraint:
     signal_source: "dmw+nsg"
     match_mode: "accumulate"
@@ -60,7 +68,7 @@ dimensions:
           dmw_event_tag: "wounded"
           nsg_constraint_match: "injury"
         directives:
-          - "行动描写必须体现受伤后的迟滞与体力限制。"
+          - "Actions must reflect the delay and physical limits caused by injury."
   epistemic_state:
     signal_source: "dmw"
     match_mode: "first"
@@ -71,7 +79,7 @@ dimensions:
           event_tag: "secret"
           required_witness_tag: "witness"
         directives:
-          - "不要让角色知道其未见证的秘密事件。"
+          - "Do not give the character knowledge of a secret event they did not witness."
 conflict_priority:
   - "scene_constraint"
   - "physiological_state"
@@ -80,7 +88,7 @@ conflict_priority:
   - "emotional_tone"
 "#;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MoStateAudit {
     pub timestamp: i64,
     pub contract_version: u32,
@@ -93,12 +101,36 @@ pub struct MoStateAudit {
     pub token_count: usize,
     pub degraded: bool,
     pub warnings: Vec<String>,
+    /// Retrieved DMW records that must remain in storage and state evaluation
+    /// but must not enter this character's generation prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_excluded_memory_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddm: Option<DdmAudit>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MoStateContext {
     pub context: String,
     pub audit: MoStateAudit,
+}
+
+/// Ephemeral, request-scoped inputs for a DDM projection. Previous bands are
+/// persisted by the MO State runtime; scene and request fields are governed
+/// signals, never inferred from free-form prose by the evaluator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DdmRuntimeInput {
+    #[serde(default)]
+    pub previous_bands: BTreeMap<String, DdmBand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<SceneSnapshot>,
+    #[serde(default)]
+    pub request_event_type: String,
+    #[serde(default)]
+    pub request_has_image: bool,
+    #[serde(default)]
+    pub request_evidence_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +238,28 @@ impl MemoryWorkspace {
         max_context_tokens: usize,
         counter: &impl TokenCounter,
     ) -> Result<MoStateContext, MemoryError> {
+        self.compile_mo_state_with_ddm(
+            retrieved_memory,
+            retrieved_nsg,
+            max_context_tokens,
+            counter,
+            None,
+            None,
+        )
+    }
+
+    /// Compile one version-consistent state projection and, when supplied,
+    /// evaluate an authored DDM profile immediately before context formatting.
+    /// DDM is therefore a projection of this snapshot rather than a new store.
+    pub fn compile_mo_state_with_ddm(
+        &self,
+        retrieved_memory: &[RetrievedMemory],
+        retrieved_nsg: &[RetrievedNsg],
+        max_context_tokens: usize,
+        counter: &impl TokenCounter,
+        ddm_profile: Option<&DdmProfile>,
+        ddm_runtime: Option<&DdmRuntimeInput>,
+    ) -> Result<MoStateContext, MemoryError> {
         let mut audit = MoStateAudit {
             timestamp: Utc::now().timestamp(),
             contract_version: 1,
@@ -239,6 +293,19 @@ impl MemoryWorkspace {
             &mut audit,
         );
         let mut ordered = order_directives(&contract, directives, &mut audit);
+        if let Some(profile) = ddm_profile {
+            profile.validate()?;
+            let ddm_signals = ddm_signals(&signals, retrieved_nsg, &ordered, ddm_runtime);
+            let previous_bands = ddm_runtime
+                .map(|runtime| runtime.previous_bands.clone())
+                .unwrap_or_default();
+            let ddm_audit = profile.evaluate_with_previous(&ddm_signals, &previous_bands);
+            let cues = ddm_context_cues(&ddm_audit);
+            if !cues.is_empty() {
+                ordered.push(("effective_dispositions".to_owned(), cues));
+            }
+            audit.ddm = Some(ddm_audit);
+        }
         let budget = max_context_tokens.saturating_mul(STATE_CONTEXT_TOKEN_RATIO) / 100;
         if trim_to_budget(&mut ordered, budget, counter) {
             audit.degraded = true;
@@ -247,7 +314,10 @@ impl MemoryWorkspace {
                     .to_owned(),
             );
         }
-        audit.dimensions_active = ordered.len();
+        audit.dimensions_active = ordered
+            .iter()
+            .filter(|(dimension, _)| dimension != "effective_dispositions")
+            .count();
         audit.directives_emitted = ordered.iter().map(|(_, values)| values.len()).sum();
         let context = format_state_context(&ordered);
         audit.token_count = counter.count(&context);
@@ -684,10 +754,13 @@ fn add_scene_constraints(
 ) {
     let mut output = Vec::new();
     for signal in signals.iter().filter(|signal| signal.id == "current_scene") {
-        if let Some(environment) = markdown_section(&signal.body, &["Environment", "环境"]) {
+        if let Some(environment) = markdown_section(&signal.body, &["Environment"]) {
             output.push((
                 "scene_environment".to_owned(),
-                format!("当前环境约束：{}。", collapse_whitespace(&environment)),
+                format!(
+                    "Current environment constraint: {}.",
+                    collapse_whitespace(&environment)
+                ),
             ));
         }
     }
@@ -731,6 +804,13 @@ fn evaluate_rules(
                 continue;
             }
             audit.matched_rules.push(rule.id.clone());
+            if dimension == "epistemic_state" {
+                audit
+                    .prompt_excluded_memory_ids
+                    .extend(epistemic_prompt_exclusions(&rule.condition, signals));
+                audit.prompt_excluded_memory_ids.sort();
+                audit.prompt_excluded_memory_ids.dedup();
+            }
             matched.extend(
                 rule.directives
                     .iter()
@@ -837,28 +917,7 @@ fn physiological_match(
 
 fn epistemic_match(condition: &RuleCondition, signals: &[DmwSignal]) -> bool {
     match condition.mode.as_deref().unwrap_or("absence") {
-        "absence" => {
-            let Some(event_tag) = condition.event_tag.as_deref().map(normalize) else {
-                return false;
-            };
-            let witness = condition
-                .required_witness_tag
-                .as_deref()
-                .map(normalize)
-                .unwrap_or_else(|| "witness".to_owned());
-            signals.iter().any(|signal| {
-                if signal.kind != "event" || !signal.tags.contains(&event_tag) {
-                    return false;
-                }
-                let has_witness_marker =
-                    signal.tags.contains(&witness) || normalize(&signal.body).contains(&witness);
-                let witness_is_target = condition
-                    .character_ref
-                    .as_deref()
-                    .is_none_or(|character| has_relation(signal, character));
-                !(has_witness_marker && witness_is_target)
-            })
-        }
+        "absence" => !unwitnessed_event_ids(condition, signals).is_empty(),
         "misconception" => signals.iter().any(|signal| {
             let Some(character) = condition.character_ref.as_deref() else {
                 return false;
@@ -876,6 +935,84 @@ fn epistemic_match(condition: &RuleCondition, signals: &[DmwSignal]) -> bool {
         }),
         _ => false,
     }
+}
+
+fn unwitnessed_event_ids(condition: &RuleCondition, signals: &[DmwSignal]) -> BTreeSet<String> {
+    let Some(event_tag) = condition.event_tag.as_deref().map(normalize) else {
+        return BTreeSet::new();
+    };
+    let witness = condition
+        .required_witness_tag
+        .as_deref()
+        .map(normalize)
+        .unwrap_or_else(|| "witness".to_owned());
+    signals
+        .iter()
+        .filter(|signal| signal.kind == "event" && signal.tags.contains(&event_tag))
+        .filter(|signal| {
+            let has_witness_marker =
+                signal.tags.contains(&witness) || normalize(&signal.body).contains(&witness);
+            let witness_is_target = condition
+                .character_ref
+                .as_deref()
+                .is_some_and(|character| has_relation(signal, character));
+            !(has_witness_marker && witness_is_target)
+        })
+        .map(|signal| signal.id.clone())
+        .collect()
+}
+
+fn epistemic_prompt_exclusions(condition: &RuleCondition, signals: &[DmwSignal]) -> Vec<String> {
+    if condition.mode.as_deref().unwrap_or("absence") != "absence" {
+        return Vec::new();
+    }
+    let mut excluded = unwitnessed_event_ids(condition, signals);
+    let unsafe_source_refs = signals
+        .iter()
+        .filter(|signal| excluded.contains(&signal.id))
+        .flat_map(|signal| source_refs(&signal.body))
+        .collect::<BTreeSet<_>>();
+    loop {
+        let linked = signals
+            .iter()
+            .filter(|signal| !excluded.contains(&signal.id))
+            .filter(|signal| {
+                signal
+                    .relations
+                    .values()
+                    .flatten()
+                    .any(|target| excluded.contains(target))
+                    || excluded
+                        .iter()
+                        .any(|target| signal.body.contains(&format!("[[{target}]]")))
+                    || source_refs(&signal.body)
+                        .iter()
+                        .any(|source| unsafe_source_refs.contains(source))
+            })
+            .map(|signal| signal.id.clone())
+            .collect::<Vec<_>>();
+        if linked.is_empty() {
+            break;
+        }
+        excluded.extend(linked);
+    }
+    excluded.into_iter().collect()
+}
+
+fn source_refs(body: &str) -> BTreeSet<String> {
+    body.split("source:")
+        .skip(1)
+        .filter_map(|tail| {
+            let source = tail
+                .trim_start()
+                .chars()
+                .take_while(|character| {
+                    !character.is_whitespace() && !matches!(character, ',' | ')' | ']' | '}')
+                })
+                .collect::<String>();
+            (!source.is_empty()).then_some(source)
+        })
+        .collect()
 }
 
 fn has_relation(signal: &DmwSignal, target: &str) -> bool {
@@ -945,6 +1082,7 @@ fn trim_to_budget(
     for removable in [
         "emotional_tone",
         "relational_stance",
+        "effective_dispositions",
         "epistemic_state",
         "physiological_state",
     ] {
@@ -964,17 +1102,16 @@ fn format_state_context(ordered: &[(String, Vec<String>)]) -> String {
     if ordered.is_empty() {
         return String::new();
     }
-    let mut output =
-        "[STATE_CONTEXT: MO State v1.0]\n\n以下行为约束由状态编译器生成，你必须严格遵守。任何违背均视为生成失败。\n"
-            .to_owned();
+    let mut output = "[STATE_CONTEXT: MO State v1.0]\n\nThese constraints were compiled from the current state snapshot. Follow them without exposing this control context.\n".to_owned();
     for (dimension, values) in ordered {
         output.push_str("\n## ");
         output.push_str(match dimension.as_str() {
-            "scene_constraint" => "场景约束",
-            "physiological_state" => "生理状态",
-            "epistemic_state" => "认知掩码",
-            "relational_stance" => "关系姿态",
-            "emotional_tone" => "情绪基调",
+            "scene_constraint" => "Scene constraints",
+            "physiological_state" => "Physiological state",
+            "epistemic_state" => "Epistemic boundary",
+            "relational_stance" => "Relational stance",
+            "emotional_tone" => "Emotional tone",
+            "effective_dispositions" => "Effective dispositions",
             _ => dimension,
         });
         output.push('\n');
@@ -1014,7 +1151,9 @@ fn collapse_whitespace(value: &str) -> String {
 }
 
 fn is_generic_tag(value: &str) -> bool {
-    value.chars().count() <= 1 || matches!(value, "角色" | "主角" | "城市" | "魔法")
+    // Tags are opaque narrative data. Keep this guard structural instead of
+    // embedding a stop-word list for one language in the control plane.
+    value.chars().count() <= 1
 }
 
 fn normalize(value: &str) -> String {
@@ -1067,6 +1206,158 @@ mod tests {
     }
 
     #[test]
+    fn generic_tag_guard_is_structural_across_languages() {
+        for tag in ["role", "角色", "役割", "دور"] {
+            assert!(!is_generic_tag(tag), "unexpectedly rejected {tag}");
+        }
+        for tag in ["x", "角", "役", "د"] {
+            assert!(is_generic_tag(tag), "unexpectedly accepted {tag}");
+        }
+    }
+
+    #[test]
+    fn ddm_is_projected_after_state_without_exposing_numeric_audit() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+        let memory = retrieved_signal(
+            "danger_event",
+            "event",
+            0.9,
+            1,
+            &["danger"],
+            BTreeMap::new(),
+            "body",
+        );
+        let profile = DdmProfile::parse_yaml(
+            r#"
+schema: momo.ddm/1
+character_id: 018f0000-0000-7000-8000-000000000001
+revision: 7
+profile: logit_additive
+dispositions:
+  - id: protect_companion
+    base_activation: 0.72
+    modulation:
+      context:
+        - id: immediate_danger
+          signal: dmw.tag.danger
+          when: true
+          delta: 0.90
+    expression:
+      latent: Keep concern implicit.
+      salient: Offer concrete help.
+      dominant: Prioritize immediate safety while preserving agency.
+    constraints:
+      - Never decide the companion's voluntary actions.
+"#,
+        )
+        .expect("profile");
+        let context = workspace
+            .compile_mo_state_with_ddm(
+                &[memory],
+                &[],
+                100_000,
+                &ConservativeTokenCounter,
+                Some(&profile),
+                None,
+            )
+            .expect("compile");
+        assert!(context.context.contains("## Effective dispositions"));
+        assert!(context.context.contains("Prioritize immediate safety"));
+        assert!(context.context.contains("Never decide the companion"));
+        assert!(!context.context.contains("0.72"));
+        let ddm = context.audit.ddm.expect("DDM audit");
+        assert_eq!(ddm.character_id, "018f0000-0000-7000-8000-000000000001");
+        assert_eq!(ddm.profile_revision, 7);
+        assert_eq!(
+            ddm.effective_dispositions[0].matched_rule_ids,
+            ["immediate_danger"]
+        );
+    }
+
+    #[test]
+    fn ddm_uses_governed_scene_request_and_previous_band_inputs() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+        let profile = DdmProfile::parse_yaml(
+            r#"
+schema: momo.ddm/1
+character_id: 018f0000-0000-7000-8000-000000000001
+revision: 8
+profile: logit_additive
+selection:
+  salient_threshold: 0.65
+  dominant_threshold: 0.85
+  hysteresis_margin: 0.05
+dispositions:
+  - id: scene_awareness
+    base_activation: 0.64
+    modulation:
+      context:
+        - id: active_scene
+          signal: scene.status
+          when: active
+          delta: 0.01
+        - id: image_request
+          signal: request.has_image
+          when: true
+          delta: 0.01
+    expression:
+      latent: Observe quietly.
+      salient: Check the current scene and visible evidence.
+      dominant: Respond to the immediate scene first.
+"#,
+        )
+        .expect("profile");
+        let runtime = DdmRuntimeInput {
+            previous_bands: [("scene_awareness".to_owned(), DdmBand::Salient)]
+                .into_iter()
+                .collect(),
+            scene: Some(SceneSnapshot {
+                scene_id: "scene-1".to_owned(),
+                status: crate::SceneStatus::Active,
+                location: None,
+                timeframe: None,
+                participants: vec!["character-1".to_owned()],
+                focus: None,
+                open_threads: Vec::new(),
+                constraints: Vec::new(),
+                source_refs: vec!["event-1".to_owned()],
+                source_hash: "scene-hash".to_owned(),
+            }),
+            request_event_type: "user_message".to_owned(),
+            request_has_image: true,
+            request_evidence_id: "request-1".to_owned(),
+        };
+        let output = workspace
+            .compile_mo_state_with_ddm(
+                &[],
+                &[],
+                100_000,
+                &ConservativeTokenCounter,
+                Some(&profile),
+                Some(&runtime),
+            )
+            .expect("compile");
+        let ddm = output.audit.ddm.expect("DDM audit");
+        assert_eq!(ddm.effective_dispositions[0].band, DdmBand::Salient);
+        assert_eq!(
+            ddm.effective_dispositions[0].matched_rule_ids,
+            ["active_scene", "image_request"]
+        );
+        assert!(
+            ddm.effective_dispositions[0]
+                .evidence_ids
+                .contains(&"scene:scene-hash".to_owned())
+        );
+        assert!(
+            ddm.effective_dispositions[0]
+                .evidence_ids
+                .contains(&"request:request-1".to_owned())
+        );
+    }
+
+    #[test]
     fn compiles_only_from_the_retrieval_snapshot() {
         let root = tempfile::tempdir().expect("root");
         let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
@@ -1082,7 +1373,11 @@ mod tests {
         let context = workspace
             .compile_mo_state(&[memory], &[], 100_000, &ConservativeTokenCounter)
             .expect("compile without re-reading missing path");
-        assert!(context.context.contains("保持关系张力"));
+        assert!(
+            context
+                .context
+                .contains("Preserve established relationship tension")
+        );
         assert!(!context.audit.degraded);
     }
 
@@ -1186,6 +1481,97 @@ conflict_priority:
             ..RuleCondition::default()
         };
         assert!(epistemic_match(&condition, &[event]));
+    }
+
+    #[test]
+    fn epistemic_absence_excludes_secret_event_and_linked_projection_from_prompt() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+        let event = retrieved_signal(
+            "secret_vote",
+            "event",
+            1.0,
+            1,
+            &["secret"],
+            BTreeMap::new(),
+            "The user disclosed the sealed vote while Sera was absent. (source: e0018)",
+        );
+        let scene = retrieved_signal(
+            "current_scene",
+            "current",
+            0.0,
+            2,
+            &[],
+            BTreeMap::new(),
+            "## Open Threads\n- [[secret_vote]] remains undisclosed to Sera.",
+        );
+        let character = retrieved_signal(
+            "char_sera",
+            "character",
+            1.0,
+            3,
+            &[],
+            BTreeMap::new(),
+            "Sera distinguishes evidence from guesses. (source: e0002)",
+        );
+        let contaminated_character = retrieved_signal(
+            "char_mara",
+            "character",
+            1.0,
+            4,
+            &[],
+            BTreeMap::new(),
+            "Mara privately disclosed the sealed vote. (source: e0018)",
+        );
+
+        let compiled = workspace
+            .compile_mo_state(
+                &[event, scene, character, contaminated_character],
+                &[],
+                100_000,
+                &ConservativeTokenCounter,
+            )
+            .expect("compile");
+
+        assert_eq!(
+            compiled.audit.prompt_excluded_memory_ids,
+            ["char_mara", "current_scene", "secret_vote"]
+        );
+        assert!(
+            compiled
+                .context
+                .contains("Do not give the character knowledge")
+        );
+    }
+
+    #[test]
+    fn epistemic_absence_does_not_assume_an_unspecified_character_is_a_witness() {
+        let event = DmwSignal {
+            id: "secret".to_owned(),
+            kind: "event".to_owned(),
+            weight: 1.0,
+            touch_at: 1,
+            tags: ["secret", "witness"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            relations: BTreeMap::from([(
+                "characters".to_owned(),
+                vec!["char_someone_else".to_owned()],
+            )]),
+            body: "A private disclosure. (source: e0009)".to_owned(),
+        };
+        let condition = RuleCondition {
+            mode: Some("absence".to_owned()),
+            event_tag: Some("secret".to_owned()),
+            required_witness_tag: Some("witness".to_owned()),
+            ..RuleCondition::default()
+        };
+
+        assert_eq!(
+            unwitnessed_event_ids(&condition, &[event]),
+            BTreeSet::from(["secret".to_owned()])
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # MOMO Core 1.0 specification index
 
 **Status:** normative document precedence index
-**Updated:** 2026-09-05
+**Updated:** 2026-09-12
 
 When documents disagree, the current contracts in this section take
 precedence. Historical records explain earlier designs but do not define Core
@@ -61,8 +61,13 @@ revisions. They never override a current contract.
 
 ## Design drafts
 
-- [`DYNAMIC_DISPOSITION_MODEL_v1.md`](../DYNAMIC_DISPOSITION_MODEL_v1.md)
-  ([简体中文说明](dynamic_disposition_model.zh-CN.md)) defines the proposed DDM
+- [`Dynamic_Disposition_Model_v1.md`](../Dynamic_Disposition_Model_v1.md)
+  ([简体中文说明](dynamic_disposition_model.zh-CN.md)) is an experimental
+  specification for the implemented, opt-in experimental DDM
   projection boundary between stable Character Card tendencies, MO State, and
-  model-facing expression guidance. It is not implemented by Core 1.0 and does
-  not override the current contracts above.
+  model-facing expression guidance. rc.3 conforms to this experimental draft;
+  it is not a stable Core 1.0 contract and
+  does not override the current contracts above. Repository progress is tracked
+  separately in the non-normative
+  [`DDM implementation status`](ddm_implementation_status.md)
+  ([简体中文](ddm_implementation_status.zh-CN.md)).

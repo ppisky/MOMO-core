@@ -21,12 +21,20 @@ pub struct MemorySpaceSource {
 #[serde(deny_unknown_fields)]
 struct ScopedMemoryJsonRequest {
     spaces: Vec<MemorySpaceSource>,
+    #[serde(default)]
+    observe_space_ids: Vec<String>,
     query: String,
     max_tokens: usize,
     vector_space_id: Option<String>,
     query_vector: Option<Vec<f64>>,
     #[serde(default)]
     embedding: Option<EmbeddingRequestConfig>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ScopedMemorySnapshot {
+    items: Vec<serde_json::Value>,
+    source_observations: Vec<momo_storage::MoStateSourceObservation>,
 }
 
 struct VectorQuery {
@@ -47,9 +55,38 @@ struct RetrievalPlan {
 /// source namespace on every result. The total token budget is divided by
 /// caller-provided weights; platform identity and ACL rules stay in the host.
 pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String, String> {
+    let snapshot = retrieve_scoped_memory_snapshot(request_json).await?;
+    serde_json::to_string(&snapshot.items).map_err(|error| error.to_string())
+}
+
+pub(crate) async fn retrieve_scoped_memory_snapshot_json(
+    request_json: String,
+) -> Result<String, String> {
+    let snapshot = retrieve_scoped_memory_snapshot(request_json).await?;
+    serde_json::to_string(&snapshot).map_err(|error| error.to_string())
+}
+
+async fn retrieve_scoped_memory_snapshot(
+    request_json: String,
+) -> Result<ScopedMemorySnapshot, String> {
     let request: ScopedMemoryJsonRequest =
         serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
-    validate_memory_spaces(&request.spaces)?;
+    if request.spaces.is_empty() {
+        if request.observe_space_ids.is_empty() {
+            return Err("memory retrieval requires at least one Space".to_owned());
+        }
+    } else {
+        validate_memory_spaces(&request.spaces)?;
+    }
+    let mut observed_space_ids = request
+        .spaces
+        .iter()
+        .map(|source| source.space_id.clone())
+        .chain(request.observe_space_ids.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    for space_id in &observed_space_ids {
+        uuid::Uuid::parse_str(space_id).map_err(|error| error.to_string())?;
+    }
     let has_semantic_graph = request.spaces.iter().any(|source| source.semantic_graph);
     match (&request.vector_space_id, &request.query_vector) {
         (Some(_), Some(_)) | (None, None) => {}
@@ -82,6 +119,15 @@ pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String,
         .as_ref()
         .map(|(_, vector)| vector)
         .or(request.query_vector.as_ref());
+
+    // All authoritative file-backed sources are held under the same ordered
+    // lock set from retrieval through fingerprinting. The single Core process
+    // owns the data directory, so writers cannot interleave a different
+    // revision between a returned body and its recorded source identity.
+    let mut state_guards = Vec::with_capacity(observed_space_ids.len());
+    for space_id in &observed_space_ids {
+        state_guards.push(lock_mo_state_space(space_id).await);
+    }
 
     let budgets = weighted_space_budgets(&request.spaces, request.max_tokens);
     let mut combined = Vec::new();
@@ -122,7 +168,29 @@ pub async fn retrieve_scoped_memory_json(request_json: String) -> Result<String,
             combined.push(value);
         }
     }
-    serde_json::to_string(&combined).map_err(|error| error.to_string())
+    let mut source_observations = Vec::with_capacity(observed_space_ids.len());
+    for space_id in std::mem::take(&mut observed_space_ids) {
+        let parsed_space_id =
+            uuid::Uuid::parse_str(&space_id).map_err(|error| error.to_string())?;
+        let source = core()?
+            .memory_for_space(parsed_space_id)
+            .map_err(|error| error.to_string())?
+            .mo_state_source_fingerprint()
+            .map_err(|error| error.to_string())?;
+        source_observations.push(momo_storage::MoStateSourceObservation {
+            space_id,
+            dmw_fingerprint: source.dmw,
+            nsg_fingerprint: source.nsg,
+            scene_fingerprint: source.scene,
+            scene_json: serde_json::to_string(&source.scene_snapshot)
+                .map_err(|error| error.to_string())?,
+        });
+    }
+    drop(state_guards);
+    Ok(ScopedMemorySnapshot {
+        items: combined,
+        source_observations,
+    })
 }
 
 fn validate_memory_spaces(sources: &[MemorySpaceSource]) -> Result<(), String> {
@@ -151,6 +219,9 @@ fn validate_memory_spaces(sources: &[MemorySpaceSource]) -> Result<(), String> {
 }
 
 fn weighted_space_budgets(sources: &[MemorySpaceSource], max_tokens: usize) -> Vec<usize> {
+    if sources.is_empty() {
+        return Vec::new();
+    }
     let total_weight = sources
         .iter()
         .map(|source| usize::from(source.weight))
@@ -301,20 +372,51 @@ pub async fn compile_mo_state_json(
     retrieved_nsg_json: String,
     max_context_tokens: usize,
 ) -> Result<String, String> {
+    compile_mo_state_with_ddm_json(
+        scope_id,
+        retrieved_memory_json,
+        retrieved_nsg_json,
+        max_context_tokens,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn compile_mo_state_with_ddm_json(
+    scope_id: String,
+    retrieved_memory_json: String,
+    retrieved_nsg_json: String,
+    max_context_tokens: usize,
+    ddm_profile_json: Option<String>,
+    ddm_runtime_json: Option<String>,
+) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let retrieved_memory: Vec<momo_memory::RetrievedMemory> =
         serde_json::from_str(&retrieved_memory_json).map_err(|error| error.to_string())?;
     let retrieved_nsg: Vec<momo_memory::nsg::RetrievedNsg> =
         serde_json::from_str(&retrieved_nsg_json).map_err(|error| error.to_string())?;
+    let ddm_profile = ddm_profile_json
+        .as_deref()
+        .map(serde_json::from_str::<momo_memory::DdmProfile>)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let ddm_runtime = ddm_runtime_json
+        .as_deref()
+        .map(serde_json::from_str::<momo_memory::DdmRuntimeInput>)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let workspace = core()?
         .memory_for_space(scope_id)
         .map_err(|error| error.to_string())?;
     let context = workspace
-        .compile_mo_state(
+        .compile_mo_state_with_ddm(
             &retrieved_memory,
             &retrieved_nsg,
             max_context_tokens,
             &momo_memory::ConservativeTokenCounter,
+            ddm_profile.as_ref(),
+            ddm_runtime.as_ref(),
         )
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&context).map_err(|error| error.to_string())

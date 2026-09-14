@@ -29,6 +29,12 @@ expected 和 rubric 不进入候选输入。
 | `dmw_nsg` | 开启 | 开启 | 关闭 |
 | `all_enabled` | 开启 | 开启 | 开启 |
 
+这些名称和组件矩阵只属于 `benchmarks/morp` 测试层。它们不是 Core 的产品模式、
+Cargo feature 或三套不同内核，也不会选择不同提示词。所有实验臂运行同一个 Core
+revision、同一个二进制和同一组编译期产品提示词，只通过已公开的运行时组件开关形成干预；
+否则编译差异或提示词差异会污染组件归因。仓库当前没有、也不宣称提供
+`basic_context` / `dmw_nsg` / `all_enabled` 专用编译选项。
+
 `history_mode: "recorded"` 使用 `momo-recorded-sessions/1`；live 预设使用
 `momo-dependency-scenarios/1`；旧的历史重放对照仍使用
 `momo-context-scenarios/1`。不要跨协议混榜。`extracted` 的预期不是两组绝对同分，
@@ -40,8 +46,9 @@ expected 和 rubric 不进入候选输入。
 选择性更正承诺、跨会话两跳关系推理、关系边界；默认中英双语、两个变体和三个长度。
 
 “全部”指上述三个开关。视觉、工具、LSB、格式导入等不属于本实验的干预变量。
-宿主仍须配置有效的 conversation、memory_distillation、semantic_graph_governance 路由、
-治理提示词及所需 embedding profile。开启请求标志不意味着宿主已经配置了这些能力。
+宿主仍须配置有效的 conversation、memory_distillation、semantic_graph_governance 路由
+及所需 embedding profile。DMW、NSG 和 Roleplay Director 使用 Core 仓库追踪的固定外部
+提示词资产，不由实验配置或宿主替换。开启请求标志不意味着宿主已经配置了模型能力。
 revision 应固定 Core、网关、模型和配置版本；运行期间不应更换路由映射。
 
 任何启用 DMW 或 NSG 的实验臂都在探针前调用本地管理端点 `POST /v1/momo/maintenance/drain`，

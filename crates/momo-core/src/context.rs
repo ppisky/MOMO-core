@@ -69,8 +69,9 @@ pub struct ContextRequest<'a> {
 }
 
 /// Builds a deterministic prompt and retains the newest complete messages that
-/// fit the configured input budget. The estimator deliberately over-counts CJK
-/// text so an unknown tokenizer is less likely to overflow the provider limit.
+/// fit the configured input budget. The estimator deliberately over-counts
+/// non-ASCII text so an unknown tokenizer is less likely to overflow the
+/// provider limit.
 #[must_use]
 pub fn prepare_context(request: ContextRequest<'_>) -> PreparedContext {
     prepare_context_with_counter(request, &estimate_text_tokens)
@@ -250,16 +251,6 @@ fn system_sections(sections: ContextSections<'_>) -> Vec<(&'static str, String, 
             4,
         ));
     }
-    if !sections.roleplay_director.trim().is_empty() {
-        output.push((
-            "roleplay_director",
-            format!(
-                "# Roleplay Direction\n{}",
-                sections.roleplay_director.trim()
-            ),
-            6,
-        ));
-    }
     if !sections.character.trim().is_empty() {
         output.push((
             "character",
@@ -285,6 +276,19 @@ fn system_sections(sections: ContextSections<'_>) -> Vec<(&'static str, String, 
             "semantic_graph",
             format!("# Active Lore Context\n{}", sections.semantic_graph.trim()),
             2,
+        ));
+    }
+    // Put the execution policy after all evidence. Long retrieved memory can
+    // otherwise dilute the most important generation constraints on models
+    // that attend more strongly to the end of a system message.
+    if !sections.roleplay_director.trim().is_empty() {
+        output.push((
+            "roleplay_director",
+            format!(
+                "# Roleplay Direction\n{}",
+                sections.roleplay_director.trim()
+            ),
+            6,
         ));
     }
     output
@@ -439,6 +443,28 @@ mod tests {
     }
 
     #[test]
+    fn roleplay_direction_follows_all_evidence_sections() {
+        let prepared = prepare_context(ContextRequest {
+            sections: ContextSections {
+                roleplay_director: "Do not invent unsupported history.",
+                character: "A careful engineer.",
+                memory: "The lamp failed once.",
+                state: "# Current State\nThe lamp is dark.",
+                semantic_graph: "The lighthouse faces the sea.",
+                ..ContextSections::default()
+            },
+            messages: &[message("Should we cancel?")],
+            budget: ContextBudget::default(),
+        });
+        let system = &prepared.messages[0].content;
+        let direction = system.find("# Roleplay Direction").expect("direction");
+        assert!(direction > system.find("# Character").expect("character"));
+        assert!(direction > system.find("# Relevant Memory").expect("memory"));
+        assert!(direction > system.find("# Current State").expect("state"));
+        assert!(direction > system.find("# Active Lore Context").expect("lore"));
+    }
+
+    #[test]
     fn drops_oldest_messages_when_budget_is_full() {
         let messages = vec![message(&"a".repeat(80)), message("newest")];
         let prepared = prepare_context(request(
@@ -456,9 +482,27 @@ mod tests {
     }
 
     #[test]
-    fn cjk_estimate_is_conservative() {
+    fn non_ascii_estimate_is_conservative_across_scripts() {
         assert_eq!(estimate_text_tokens("abcd"), 1);
         assert_eq!(estimate_text_tokens("你好"), 2);
+        assert_eq!(estimate_text_tokens("日本"), 2);
+        assert_eq!(estimate_text_tokens("عربي"), 4);
+    }
+
+    #[test]
+    fn context_preserves_multilingual_narrative_values_verbatim() {
+        for value in ["quiet room", "安静的房间", "静かな部屋", "غرفة هادئة"] {
+            let messages = [message(value)];
+            let prepared = prepare_context(request(
+                value,
+                value,
+                value,
+                &messages,
+                ContextBudget::default(),
+            ));
+            assert!(prepared.messages[0].content.contains(value));
+            assert_eq!(prepared.messages.last().expect("message").content, value);
+        }
     }
 
     #[test]

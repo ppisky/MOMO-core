@@ -119,7 +119,8 @@ Space、DMW Space 与 NSG Space。导入默认保留来源 UUID；只有显式 `
 
 ## 配置和完整提示词
 
-DMW 与 NSG 的维护 System Prompt 使用 Markdown 引用。使用标准文件名时可以省略
-`[prompts]`；Core 读取 `prompts/dmw_distiller.md` 与 `prompts/nsg_governor.md`。仓库中的
-两个文件是完整规范提示词，不是 TOML 中的简化摘要。自定义方法和安全限制见
-[维护提示词配置指南](maintenance_prompts.zh-CN.md)。
+DMW、NSG 与前台角色扮演提示词是
+`crates/momo-core/src/product_prompts/` 下的完整 Markdown 源码，通过
+`include_str!` 编译进 `momo_core`。它们不属于 `momo.toml`、MOC 或任何 Space，
+Core 运行期间不能替换。
+详见[产品提示词资产说明](maintenance_prompts.zh-CN.md)。

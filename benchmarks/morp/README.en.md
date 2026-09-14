@@ -20,7 +20,7 @@ python -m benchmarks.morp plan target/morp-roleplay --config path/to/candidate.j
 
 Execution requires an explicit `--allow-ai`. A candidate returns its natural performed turn as plain text; an answer-only JSON object remains accepted for adapter compatibility. One identity-bound reviewer scores each successful answer from 0 to 4 with a grounded quote and reason. Codex may fill this auditable reviewer role without being represented as a human. Two independent model judges remain an optional compatibility path, not a release dependency. Aggregation is review → case → family → dimension → equal-weight eight-dimension score. The 0–100 `roleplay_score` remains null while a successful answer is unreviewed or a planned prediction is missing; terminal candidate errors retain their registered zero penalty.
 
-Create an offline blind plan and editable reviewer rows with `judge-plan` followed by `review-template --reviewer codex:rc2`. Fill `score`, `quote`, and `reason`, set each row's `status` to `ok`, then pass that single JSONL file to `score --votes`.
+Create an offline blind plan and editable reviewer rows with `judge-plan` followed by `review-template --reviewer codex:rc3`. Fill `score`, `quote`, and `reason`, set each row's `status` to `ok`, then pass that single JSONL file to `score --votes`.
 
 For later double-blind experiments or calibration, the optional Qwen and
 DeepSeek judge presets remain under `configs/`. Both disable extended thinking

@@ -284,6 +284,111 @@ pub async fn local_character_json(character_id: String) -> Result<String, String
     serde_json::to_string(&character).map_err(|error| error.to_string())
 }
 
+const DDM_PROFILE_METADATA_KIND: &str = "character_ddm_profile";
+const MAX_DDM_PROFILE_BYTES: usize = 64 * 1024;
+
+pub async fn character_ddm_profile_json(character_id: String) -> Result<Option<String>, String> {
+    let character_id = uuid::Uuid::parse_str(&character_id).map_err(|error| error.to_string())?;
+    if core()?
+        .store()
+        .character_by_id(character_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("character does not exist".to_owned());
+    }
+    let Some(yaml) = core()?
+        .store()
+        .portable_metadata(DDM_PROFILE_METADATA_KIND, &character_id.to_string())
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let profile = momo_memory::DdmProfile::parse_yaml(&yaml).map_err(|error| error.to_string())?;
+    serde_json::to_string(&profile)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+pub async fn character_ddm_profile_yaml(character_id: String) -> Result<Option<String>, String> {
+    let character_id = uuid::Uuid::parse_str(&character_id).map_err(|error| error.to_string())?;
+    core()?
+        .store()
+        .portable_metadata(DDM_PROFILE_METADATA_KIND, &character_id.to_string())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn upsert_character_ddm_profile_json(
+    scope_id: String,
+    character_id: String,
+    profile_yaml: String,
+) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let character_id = uuid::Uuid::parse_str(&character_id).map_err(|error| error.to_string())?;
+    if profile_yaml.is_empty()
+        || profile_yaml.len() > MAX_DDM_PROFILE_BYTES
+        || profile_yaml.as_bytes().contains(&0)
+    {
+        return Err(
+            "DDM profile must be non-empty UTF-8 text no larger than 64 KiB without NUL bytes"
+                .to_owned(),
+        );
+    }
+    if core()?
+        .store()
+        .character_for_scope(scope_id, character_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("character does not belong to scope".to_owned());
+    }
+    let profile =
+        momo_memory::DdmProfile::parse_yaml(&profile_yaml).map_err(|error| error.to_string())?;
+    if profile.character_id != character_id.to_string() {
+        return Err("DDM profile character_id does not match the character".to_owned());
+    }
+    core()?
+        .store()
+        .save_portable_metadata(
+            DDM_PROFILE_METADATA_KIND,
+            &character_id.to_string(),
+            &profile_yaml,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&profile).map_err(|error| error.to_string())
+}
+
+pub async fn delete_character_ddm_profile(
+    scope_id: String,
+    character_id: String,
+) -> Result<(), String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let character_id = uuid::Uuid::parse_str(&character_id).map_err(|error| error.to_string())?;
+    if core()?
+        .store()
+        .character_for_scope(scope_id, character_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("character does not belong to scope".to_owned());
+    }
+    sqlx_delete_portable_metadata(DDM_PROFILE_METADATA_KIND, &character_id.to_string()).await
+}
+
+async fn sqlx_delete_portable_metadata(kind: &str, object_id: &str) -> Result<(), String> {
+    core()?
+        .store()
+        .delete_portable_metadata(kind, object_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub async fn local_conversations_json(scope_id: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let conversations = core()?

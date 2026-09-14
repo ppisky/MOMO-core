@@ -82,7 +82,7 @@ python -m benchmarks.morp run target/morp-roleplay `
 
 ```powershell
 python -m benchmarks.morp judge-plan target/morp-roleplay --predictions target/morp-roleplay-run/predictions.jsonl --out target/judge.plan.json
-python -m benchmarks.morp review-template --plan target/judge.plan.json --reviewer codex:rc2 --out target/reviews.jsonl
+python -m benchmarks.morp review-template --plan target/judge.plan.json --reviewer codex:rc3 --out target/reviews.jsonl
 # Codex 按 judge.plan.json 的冻结 rubric 填写 reviews.jsonl 中的 score、quote、reason，并把 status 改为 ok。
 python -m benchmarks.morp score target/morp-roleplay --plan target/morp-roleplay.plan.json --predictions target/morp-roleplay-run/predictions.jsonl --votes target/reviews.jsonl --out target/morp-roleplay.report.json
 ```
@@ -103,6 +103,26 @@ python -m benchmarks.morp score target/morp-roleplay --plan target/morp-roleplay
 聚合顺序为：评审 → case → 场景族 → 维度 → 八维等权总分。中英文、反事实分支和重复运行不会凭数量提高某个场景族的权重。置信区间以场景族为 bootstrap 单位。
 
 `score_summary.roleplay_score` 和兼容字段 `selected_score` 使用 0–100 标尺。只要成功回答仍未完成可审计评审，或计划中的预测尚未执行，总分就是 `null`；已实际发生的请求失败或格式错误按预注册规则记零。不能把 `null` 宣传成零分或满分。
+
+## 旧诊断工具
+
+## 12 轮上下文 A/B 试验
+
+同一候选模型下，可以单独比较“每次回放完整 12 轮原文”和“第 12 轮完成
+DMW/NSG 后，在新会话复用 MOMO 资产”。该试验不会调用第二个裁判模型；结果可
+生成匿名 A/B 数据，交给 Codex 或人工审查。
+
+```powershell
+python -m benchmarks.morp.context_ab plan --out target/context-ab.plan.json
+python -m benchmarks.morp.context_ab run --plan target/context-ab.plan.json `
+  --out target/context-ab.results.json --allow-ai
+python -m benchmarks.morp.context_ab review-bundle `
+  --results target/context-ab.results.json --out target/context-ab.review.json
+```
+
+网关 `/metrics` 的前后差值会分别记录 conversation、memory distillation、
+semantic graph governance 与 embedding，而不是把 MOMO 成本误写成只有最后一次
+回复。价格快照只用于可复核估算，实际账单仍以供应商为准。
 
 ## 旧诊断工具
 

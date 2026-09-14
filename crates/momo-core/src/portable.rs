@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -270,6 +270,8 @@ struct CharacterAuthor {
 }
 
 type ParsedCharacterMetadata = (CharacterMetadata, String);
+const DDM_PROFILE_METADATA_KIND: &str = "character_ddm_profile";
+const DDM_PROFILE_ASSET: &str = "extensions/momo-ddm/profile.yaml";
 
 pub fn export_momo_config(
     core: &MomoCore,
@@ -811,6 +813,7 @@ fn preflight_characters(directory: &Path) -> Result<HashSet<Uuid>, PortableError
         if let Some(path) = opening_file.as_deref() {
             read_markdown_asset(&asset_directory, path)?;
         }
+        read_ddm_profile_asset(&asset_directory, id)?;
     }
     if discovered != expected {
         return Err(PortableError::InvalidData(
@@ -975,83 +978,16 @@ fn import_config_bundle(
 
 fn copy_config_bundle(
     document: &ConfigDocument,
-    source_config: &Path,
+    _source_config: &Path,
     destination_config: &Path,
 ) -> Result<(), PortableError> {
     let text = document.to_toml_string()?;
     crate::validate_momo_document(&text)
         .map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    let config: crate::MomoConfig =
-        toml::from_str(&text).map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    let source_base = source_config.parent().unwrap_or_else(|| Path::new("."));
     let destination_base = destination_config
         .parent()
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(destination_base)?;
-    let canonical_source_base = fs::canonicalize(source_base).map_err(|error| {
-        PortableError::InvalidData(format!(
-            "cannot resolve portable config directory {}: {error}",
-            source_base.display()
-        ))
-    })?;
-    let canonical_destination_base = fs::canonicalize(destination_base)?;
-    let mut prompt_references = vec![
-        &config.prompts.memory_distillation_file,
-        &config.prompts.semantic_graph_governance_file,
-    ];
-    if let Some(reference) = config.prompts.roleplay_director_file.as_ref() {
-        prompt_references.push(reference);
-    }
-    for reference in prompt_references {
-        let relative = validate_asset_path(&reference.to_string_lossy())?;
-        let source = source_base.join(&relative);
-        let canonical_source = fs::canonicalize(&source).map_err(|error| {
-            PortableError::InvalidData(format!(
-                "cannot read referenced maintenance prompt {}: {error}",
-                source.display()
-            ))
-        })?;
-        if !canonical_source.starts_with(&canonical_source_base) {
-            return Err(PortableError::InvalidData(format!(
-                "maintenance prompt escapes the portable config directory: {}",
-                reference.display()
-            )));
-        }
-        let metadata = fs::metadata(&canonical_source)?;
-        if !metadata.is_file() || metadata.len() > 256 * 1024 {
-            return Err(PortableError::InvalidData(format!(
-                "maintenance prompt must be a regular file no larger than 262144 bytes: {}",
-                reference.display()
-            )));
-        }
-        let bytes = fs::read(&canonical_source)?;
-        let prompt = std::str::from_utf8(&bytes).map_err(|error| {
-            PortableError::InvalidData(format!(
-                "maintenance prompt is not UTF-8 ({}): {error}",
-                reference.display()
-            ))
-        })?;
-        if prompt.trim().is_empty() || bytes.contains(&0) {
-            return Err(PortableError::InvalidData(format!(
-                "maintenance prompt is empty or contains NUL bytes: {}",
-                reference.display()
-            )));
-        }
-        let destination = destination_base.join(relative);
-        let destination_parent = destination.parent().ok_or_else(|| {
-            PortableError::InvalidData("prompt destination has no parent".to_owned())
-        })?;
-        fs::create_dir_all(destination_parent)?;
-        if !fs::canonicalize(destination_parent)?.starts_with(&canonical_destination_base) {
-            return Err(PortableError::InvalidData(format!(
-                "maintenance prompt destination escapes the portable config directory: {}",
-                destination.display()
-            )));
-        }
-        if canonical_source != destination.canonicalize().unwrap_or_default() {
-            atomic_write(&destination, &bytes)?;
-        }
-    }
     document.save(destination_config)?;
     Ok(())
 }
@@ -1182,6 +1118,20 @@ async fn export_characters(
         }
         if let Some(opening) = card.opening_markdown {
             atomic_write(&directory.join("opening.md"), opening.as_bytes())?;
+        }
+        if let Some(profile_yaml) = core
+            .store()
+            .portable_metadata(DDM_PROFILE_METADATA_KIND, &card_id.to_string())
+            .await?
+        {
+            let profile = momo_memory::DdmProfile::parse_yaml(&profile_yaml)
+                .map_err(|error| PortableError::InvalidData(error.to_string()))?;
+            if profile.character_id != card_id.to_string() {
+                return Err(PortableError::InvalidData(format!(
+                    "DDM profile character_id does not match character {card_id}"
+                )));
+            }
+            atomic_write(&directory.join(DDM_PROFILE_ASSET), profile_yaml.as_bytes())?;
         }
         let compat_directory = root.join("tavern_compat").join(card_id.to_string());
         match compatibility {
@@ -1350,6 +1300,7 @@ async fn import_characters(
             .as_deref()
             .map(|path| read_markdown_asset(&directory, path))
             .transpose()?;
+        let ddm_profile = read_ddm_profile_asset(&directory, id)?;
         let now = Utc::now();
         let character = CharacterCard {
             id,
@@ -1372,6 +1323,15 @@ async fn import_characters(
         core.store()
             .save_portable_metadata("character", &id.to_string(), &portable_metadata)
             .await?;
+        if let Some(profile_yaml) = ddm_profile {
+            core.store()
+                .save_portable_metadata(DDM_PROFILE_METADATA_KIND, &id.to_string(), &profile_yaml)
+                .await?;
+        } else {
+            core.store()
+                .delete_portable_metadata(DDM_PROFILE_METADATA_KIND, &id.to_string())
+                .await?;
+        }
         report.characters_imported += 1;
     }
     Ok(())
@@ -1919,6 +1879,37 @@ fn validate_character_metadata(metadata: &CharacterMetadata) -> Result<(), Porta
     Ok(())
 }
 
+fn read_ddm_profile_asset(
+    character_directory: &Path,
+    character_id: Uuid,
+) -> Result<Option<String>, PortableError> {
+    let path = character_directory.join(DDM_PROFILE_ASSET);
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 64 * 1024 {
+        return Err(PortableError::InvalidData(format!(
+            "{DDM_PROFILE_ASSET} must be a non-empty regular file no larger than 64 KiB"
+        )));
+    }
+    let yaml = fs::read_to_string(path)?;
+    if yaml.as_bytes().contains(&0) {
+        return Err(PortableError::InvalidData(format!(
+            "{DDM_PROFILE_ASSET} must not contain NUL bytes"
+        )));
+    }
+    let profile = momo_memory::DdmProfile::parse_yaml(&yaml)
+        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
+    if profile.character_id != character_id.to_string() {
+        return Err(PortableError::InvalidData(format!(
+            "DDM profile character_id does not match character {character_id}"
+        )));
+    }
+    Ok(Some(yaml))
+}
+
 fn default_character_file() -> String {
     "character.md".to_owned()
 }
@@ -1927,28 +1918,6 @@ fn default_character_file() -> String {
 mod tests {
     use super::*;
     use momo_domain::{MessageRole, new_id};
-
-    fn write_prompt_bundle(core: &MomoCore) {
-        let base = momo_config_path(core)
-            .parent()
-            .expect("config directory")
-            .to_path_buf();
-        atomic_write(
-            &base.join("prompts/dmw_distiller.md"),
-            b"full DMW test prompt",
-        )
-        .expect("DMW prompt");
-        atomic_write(
-            &base.join("prompts/nsg_governor.md"),
-            b"full NSG test prompt",
-        )
-        .expect("NSG prompt");
-        atomic_write(
-            &base.join("prompts/roleplay_director.md"),
-            b"full roleplay director test prompt",
-        )
-        .expect("roleplay prompt");
-    }
 
     fn test_export_plan(
         space_id: Uuid,
@@ -2000,7 +1969,6 @@ mod tests {
         let source = MomoCore::initialize(source_directory.path())
             .await
             .expect("source core");
-        write_prompt_bundle(&source);
         let original_scope = new_id();
         let character_id = new_id();
         let now = Utc::now();
@@ -2055,13 +2023,25 @@ mod tests {
             .await
             .expect("message");
 
+        let ddm_profile = format!(
+            "schema: momo.ddm/1\ncharacter_id: {character_id}\nrevision: 1\nprofile: logit_additive\ndispositions:\n  - id: patient_help\n    base_activation: 0.7\n    expression:\n      latent: Wait.\n      salient: Offer help.\n      dominant: Stay present.\n"
+        );
+        source
+            .store()
+            .save_portable_metadata(
+                DDM_PROFILE_METADATA_KIND,
+                &character_id.to_string(),
+                &ddm_profile,
+            )
+            .await
+            .expect("DDM profile");
+
         let output = source_directory.path().join("backup.moc");
         let settings = serde_json::json!({
             "schema_version": 1,
             "model_use": { "chat": "primary" },
-            "prompts": {
-                "memory_distillation_file": "prompts/dmw_distiller.md",
-                "semantic_graph_governance_file": "prompts/nsg_governor.md"
+            "mo_state": {
+                "ddm": { "enabled": true }
             },
             "future": { "preserved": true }
         });
@@ -2115,24 +2095,13 @@ mod tests {
             true
         );
         assert_eq!(
-            fs::read_to_string(
-                momo_config_path(&destination)
-                    .parent()
-                    .expect("destination config directory")
-                    .join("prompts/dmw_distiller.md")
-            )
-            .expect("imported DMW prompt"),
-            "full DMW test prompt"
-        );
-        assert_eq!(
-            fs::read_to_string(
-                momo_config_path(&destination)
-                    .parent()
-                    .expect("destination config directory")
-                    .join("prompts/nsg_governor.md")
-            )
-            .expect("imported NSG prompt"),
-            "full NSG test prompt"
+            destination
+                .store()
+                .portable_metadata(DDM_PROFILE_METADATA_KIND, &character_id.to_string())
+                .await
+                .expect("profile metadata")
+                .expect("imported DDM profile"),
+            ddm_profile
         );
         let imported_cards = destination.store().list_characters().await.expect("cards");
         assert_eq!(imported_cards[0].scope_id, new_scope);
@@ -2183,6 +2152,19 @@ mod tests {
             )
             .expect("opening"),
             "Hello"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                inspected
+                    .path()
+                    .join("characters")
+                    .join("spaces")
+                    .join(new_scope.to_string())
+                    .join(character_id.to_string())
+                    .join(DDM_PROFILE_ASSET)
+            )
+            .expect("re-exported DDM profile"),
+            ddm_profile
         );
 
         let private_output = source_directory.path().join("private.moc");
@@ -2584,7 +2566,6 @@ name = "Tester"
     async fn refuses_credentials_in_momo_config() {
         let directory = tempfile::tempdir().expect("directory");
         let core = MomoCore::initialize(directory.path()).await.expect("core");
-        write_prompt_bundle(&core);
         let error = export_momo_config(
             &core,
             directory.path().join("unsafe.toml"),
@@ -2608,7 +2589,6 @@ name = "Tester"
     async fn momo_config_preserves_product_extensions_and_rejects_host_wiring() {
         let directory = tempfile::tempdir().expect("directory");
         let core = MomoCore::initialize(directory.path()).await.expect("core");
-        write_prompt_bundle(&core);
         let output = directory.path().join("portable.toml");
         export_momo_config(
             &core,
@@ -2617,11 +2597,6 @@ name = "Tester"
                 "schema_version": 1,
                 "model_use": { "chat": "primary" },
                 "runtime": { "memory_enabled": true },
-                "prompts": {
-                    "memory_distillation_file": "prompts/dmw_distiller.md",
-                    "semantic_graph_governance_file": "prompts/nsg_governor.md",
-                    "roleplay_director_file": "prompts/roleplay_director.md"
-                },
                 "extension": { "preserved": true }
             }),
         )
@@ -2630,21 +2605,6 @@ name = "Tester"
         assert!(document.values().contains_key("model_use"));
         assert!(document.values().contains_key("runtime"));
         assert!(document.values().contains_key("extension"));
-        assert_eq!(
-            fs::read_to_string(directory.path().join("prompts/dmw_distiller.md"))
-                .expect("exported DMW prompt"),
-            "full DMW test prompt"
-        );
-        assert_eq!(
-            fs::read_to_string(directory.path().join("prompts/nsg_governor.md"))
-                .expect("exported NSG prompt"),
-            "full NSG test prompt"
-        );
-        assert_eq!(
-            fs::read_to_string(directory.path().join("prompts/roleplay_director.md"))
-                .expect("exported roleplay prompt"),
-            "full roleplay director test prompt"
-        );
 
         let error = export_momo_config(
             &core,

@@ -125,8 +125,8 @@ character directory.
 
 ## Configuration and complete prompts
 
-DMW and NSG maintenance prompts are referenced Markdown files. With the
-standard names, `[prompts]` may be omitted and Core reads
-`prompts/dmw_distiller.md` and `prompts/nsg_governor.md`. These are complete
-normative prompts, not shortened TOML examples. See
-[the maintenance prompt guide](maintenance_prompts.en.md) for customization.
+DMW, NSG, and foreground role-play prompts are complete Markdown sources under
+`crates/momo-core/src/product_prompts/`, compiled into `momo_core` with
+`include_str!`. They are not part of `momo.toml`, MOC, or any Space and cannot
+be replaced while Core is running. See
+[the product prompt guide](maintenance_prompts.en.md).

@@ -110,17 +110,13 @@ directories during export. Core returns module metadata and claimed paths but
 does not interpret or execute those payloads. Without an explicit claim,
 temporary unknown payloads are discarded when import finishes.
 
-## Portable maintenance prompts
+## Compiled product prompt sources
 
-The DMW distillation and NSG governance system prompts are full Markdown files.
-`momo.toml` references them through `memory_distillation_file` and
-`semantic_graph_governance_file`; MOC config import/export moves those files
-with the TOML. Core rejects missing, unsafe, escaping, non-UTF-8, empty, or
-oversized references. It does not replace a missing file with an abbreviated
-compatibility prompt.
-
-`[prompts]` itself is optional: omission selects the standard relative files
-`prompts/dmw_distiller.md` and `prompts/nsg_governor.md`.
+The DMW Distiller, NSG Governor, and Roleplay Director are full Markdown files
+tracked under `crates/momo-core/src/product_prompts/` and embedded into
+`momo_core` with `include_str!`. They are not deployment files, fields or paths
+in `momo.toml`, request overrides, or MOC content. Changing them requires a Core
+source change and rebuild. A former `[prompts]` table must be removed.
 
 ## Wire compatibility
 

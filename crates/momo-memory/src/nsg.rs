@@ -246,12 +246,7 @@ impl NsgNode {
                 .unwrap_or(NsgZone::Auto),
             anchors: semantic
                 .remove("ANCHORS")
-                .unwrap_or_default()
-                .split([',', '，'])
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .collect(),
+                .map_or_else(Vec::new, |value| split_comma_separated(&value)),
             condition: semantic.remove("CONDITION").unwrap_or_default(),
             trigger: semantic.remove("TRIGGER").unwrap_or_default(),
             consequence: semantic.remove("CONSEQUENCE").unwrap_or_default(),
@@ -1308,11 +1303,9 @@ impl AnchorIndex {
 }
 
 fn is_generic_anchor(term: &str) -> bool {
+    // Anchor values are narrative data. A language-specific stop-word list in
+    // the control plane would weight otherwise equivalent languages unevenly.
     term.chars().count() <= 1
-        || matches!(
-            term,
-            "the" | "a" | "an" | "and" | "or" | "you" | "me" | "主角" | "角色" | "城市" | "魔法"
-        )
 }
 
 fn rrf_score(
@@ -1367,8 +1360,14 @@ fn normalize(value: &str) -> String {
 }
 
 fn split_anchors(value: &str) -> Vec<String> {
+    split_comma_separated(value)
+}
+
+fn split_comma_separated(value: &str) -> Vec<String> {
     value
-        .split([',', '，'])
+        .nfkc()
+        .collect::<String>()
+        .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
@@ -1376,13 +1375,7 @@ fn split_anchors(value: &str) -> Vec<String> {
 }
 
 fn split_csv(value: Option<String>) -> Vec<String> {
-    value
-        .unwrap_or_default()
-        .split([',', '，'])
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect()
+    value.map_or_else(Vec::new, |value| split_comma_separated(&value))
 }
 
 fn take_required(values: &mut HashMap<String, String>, key: &str) -> Result<String, MemoryError> {

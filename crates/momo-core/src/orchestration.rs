@@ -18,7 +18,7 @@ use crate::{
     GatewayVisionAdapter, GovernedOverrides, MoStateInjectionMode, MoStateProfile, MomoConfig,
     MomoResponse, MomoResponseMetadata, MomoResponseRequest, RequestedOverrides,
     ResponseOutputContent, ResponseOutputItem, ResponseUsage, VisionDescriptionAdapter,
-    VisionDescriptionRequest, api::simple,
+    VisionDescriptionRequest, api::simple, product_prompts,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +136,16 @@ fn validate_generated_opaque_identifiers(source: &str, generated: &str) -> Resul
 
 fn memory_patch_is_noop(patch: &str) -> bool {
     patch.split_whitespace().collect::<String>() == "patches:[]"
+}
+
+fn maintenance_finish_error(completion: &Value) -> Option<String> {
+    let finish_reason = completion.get("finish_reason").and_then(Value::as_str);
+    (finish_reason != Some("stop")).then(|| {
+        format!(
+            "maintenance model did not finish normally (finish_reason={})",
+            finish_reason.unwrap_or("missing")
+        )
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -377,11 +387,6 @@ impl MomoApiService {
             // consistency barrier when a caller needs one.
             self.schedule_maintenance(managed_space_id.to_owned());
         }
-        let _state_guard = if autonomous_mo_state {
-            Some(simple::lock_mo_state_space(managed_space_id).await)
-        } else {
-            None
-        };
         let capability = match self.gateway_response_budget().await {
             Ok(value) => value,
             Err(error) => {
@@ -832,24 +837,23 @@ impl MomoApiService {
             });
             let maintenance_source = maintenance_input.to_string();
             let (route, system) = match kind {
-                MaintenanceKind::Memory => (
-                    "memory_distillation",
-                    self.config.prompts.memory_distillation.as_str(),
-                ),
+                MaintenanceKind::Memory => {
+                    ("memory_distillation", product_prompts::MEMORY_DISTILLATION)
+                }
                 MaintenanceKind::SemanticGraph => (
                     "semantic_graph_governance",
-                    self.config.prompts.semantic_graph_governance.as_str(),
+                    product_prompts::SEMANTIC_GRAPH_GOVERNANCE,
                 ),
             };
             let maintenance_max_tokens = self
                 .gateway_generation_capability(route)
                 .await
-                // Maintenance output is a compact patch, and allowing a model
-                // to fill a large route limit turns pathological generations
-                // into multi-minute drain failures. Invalid or truncated DMW
-                // patches still use the bounded repair pass below.
-                .map(|capability| capability.max_output_tokens.min(1_024))
-                .unwrap_or(1_024);
+                .ok()
+                .map(|capability| capability.max_output_tokens);
+            let mut maintenance_parameters = json!({"momo_hop": 1});
+            if let Some(max_tokens) = maintenance_max_tokens {
+                maintenance_parameters["max_tokens"] = json!(max_tokens);
+            }
             let generated_patch = loop {
                 let user_content = repair_error.as_ref().map_or_else(
                     || maintenance_input.to_string(),
@@ -876,7 +880,7 @@ impl MomoApiService {
                             {"role": "system", "content": system},
                             {"role": "user", "content": user_content}
                         ],
-                        "request_parameters": {"max_tokens": maintenance_max_tokens, "momo_hop": 1}
+                        "request_parameters": maintenance_parameters
                     })
                     .to_string(),
                 )
@@ -888,6 +892,15 @@ impl MomoApiService {
                 drop(generation_permit);
                 let completion: Value = serde_json::from_str(&completion)
                     .map_err(|error| MomoApiError::model(error.to_string()))?;
+                if let Some(error) = maintenance_finish_error(&completion) {
+                    if repair_error.is_none() {
+                        repair_error = Some(format!(
+                            "{error}. Regenerate a smaller complete patch. Prefer fewer complete targets and concise sections; never continue or complete the truncated YAML fragment."
+                        ));
+                        continue;
+                    }
+                    return Err(MomoApiError::model(error));
+                }
                 let generated = completion
                     .get("content")
                     .and_then(Value::as_str)
@@ -1092,6 +1105,11 @@ impl MomoApiService {
 
         let context_window = governed.context_window;
         let reserve_output_tokens = governed.max_output_tokens;
+        let managed_space_id = request
+            .momo
+            .memory_write_space_id
+            .clone()
+            .unwrap_or_else(|| personal_space_id.clone());
         let include_memory = request
             .momo
             .memory_sources
@@ -1114,31 +1132,40 @@ impl MomoApiService {
             None
         };
         let retrieval_enabled = !request.momo.memory_sources.is_empty();
-        let (retrieved, retrieval_status) = if retrieval_enabled {
-            let payload = json!({
-                "spaces": request.momo.memory_sources,
-                "query": input,
-                "max_tokens": context_window
-                    .saturating_sub(reserve_output_tokens)
-                    .saturating_div(8)
-                    .clamp(128, 2_048),
-                "vector_space_id": query_embedding.as_ref().map(|value| &value.0),
-                "query_vector": query_embedding.as_ref().map(|value| &value.1),
-            });
-            match simple::retrieve_scoped_memory_json(payload.to_string()).await {
-                Ok(value) => (
-                    serde_json::from_str::<Value>(&value)
-                        .map_err(|error| MomoApiError::internal(error.to_string()))?,
-                    "ok",
-                ),
-                Err(error) => {
-                    warnings.push(format!("retrieval degraded: {error}"));
-                    (json!([]), "degraded")
+        let (retrieved, source_observations, retrieval_status) =
+            if retrieval_enabled || request.momo.mo_state {
+                let payload = json!({
+                    "spaces": request.momo.memory_sources,
+                    "observe_space_ids": [managed_space_id.clone()],
+                    "query": input,
+                    "max_tokens": context_window
+                        .saturating_sub(reserve_output_tokens)
+                        .saturating_div(8)
+                        .clamp(128, 2_048),
+                    "vector_space_id": query_embedding.as_ref().map(|value| &value.0),
+                    "query_vector": query_embedding.as_ref().map(|value| &value.1),
+                });
+                match simple::retrieve_scoped_memory_snapshot_json(payload.to_string()).await {
+                    Ok(value) => {
+                        let snapshot = serde_json::from_str::<Value>(&value)
+                            .map_err(|error| MomoApiError::internal(error.to_string()))?;
+                        (
+                            snapshot.get("items").cloned().unwrap_or_else(|| json!([])),
+                            snapshot
+                                .get("source_observations")
+                                .cloned()
+                                .unwrap_or_else(|| json!([])),
+                            if retrieval_enabled { "ok" } else { "disabled" },
+                        )
+                    }
+                    Err(error) => {
+                        warnings.push(format!("retrieval degraded: {error}"));
+                        (json!([]), json!([]), "degraded")
+                    }
                 }
-            }
-        } else {
-            (json!([]), "disabled")
-        };
+            } else {
+                (json!([]), json!([]), "disabled")
+            };
         let items = retrieved
             .as_array()
             .cloned()
@@ -1149,19 +1176,25 @@ impl MomoApiService {
             .into_iter()
             .partition(|item| item.get("graph_id").is_some());
         let state_input_audit = state_input_audit(&memory, &nsg, retrieval_status)?;
-        let managed_space_id = request
-            .momo
-            .memory_write_space_id
-            .clone()
-            .unwrap_or_else(|| personal_space_id.clone());
         let autonomous_mo_state = request.momo.mo_state
             && self.config.mo_state.profile == MoStateProfile::ClosedAutonomous;
+        // Retrieval obtains the complete ordered source-lock set while it reads
+        // bodies and fingerprints. Serialize managed-state publication only
+        // after that snapshot is complete to avoid recursively acquiring the
+        // managed Space lock and to preserve a global lock order.
+        let _state_guard = if autonomous_mo_state {
+            Some(simple::lock_mo_state_space(&managed_space_id).await)
+        } else {
+            None
+        };
         let mut mo_state_operation_id = None;
+        let mut mo_state_operation = None;
         let mut state_result = if request.momo.mo_state {
             let persisted_snapshot = if autonomous_mo_state {
                 match simple::observe_mo_state_runtime_json(
                     operation_key.to_owned(),
                     managed_space_id.clone(),
+                    source_observations.to_string(),
                     if request.input.has_function_outputs() {
                         "tool_result".to_owned()
                     } else {
@@ -1176,8 +1209,10 @@ impl MomoApiService {
                         let operation: momo_storage::MoStateOperation =
                             serde_json::from_str(&operation_json)
                                 .map_err(|error| MomoApiError::internal(error.to_string()))?;
-                        mo_state_operation_id = Some(operation.operation_id);
-                        operation.snapshot_json
+                        mo_state_operation_id = Some(operation.operation_id.clone());
+                        let snapshot_json = operation.snapshot_json.clone();
+                        mo_state_operation = Some(operation);
+                        snapshot_json
                     }
                     Err(error) => {
                         warnings.push(format!("MO State runtime degraded: {error}"));
@@ -1192,38 +1227,112 @@ impl MomoApiService {
                     .map_err(|error| MomoApiError::internal(error.to_string()))?;
                 state_result_from_snapshot(&snapshot)
             } else {
-                let (compiled, degraded, compile_error) = match simple::compile_mo_state_json(
-                    managed_space_id.clone(),
-                    serde_json::to_string(&memory)
-                        .map_err(|error| MomoApiError::internal(error.to_string()))?,
-                    serde_json::to_string(&nsg)
-                        .map_err(|error| MomoApiError::internal(error.to_string()))?,
-                    context_window,
-                )
-                .await
-                {
-                    Ok(value) => (
-                        serde_json::from_str::<Value>(&value)
-                            .map_err(|error| MomoApiError::internal(error.to_string()))?,
-                        false,
-                        None,
-                    ),
-                    Err(error) => {
-                        warnings.push(format!("MO State degraded: {error}"));
-                        (
-                            json!({"context": "", "audit": {"degraded": true}}),
-                            true,
-                            Some(error),
-                        )
-                    }
+                let ddm_profile_json = if self.config.mo_state.ddm.enabled {
+                    simple::character_ddm_profile_json(character_id.clone())
+                        .await
+                        .map_err(MomoApiError::internal)?
+                } else {
+                    None
                 };
+                let previous_ddm_state = if autonomous_mo_state && ddm_profile_json.is_some() {
+                    simple::ddm_projection_state_json(
+                        managed_space_id.clone(),
+                        conversation_id.clone(),
+                        character_id.clone(),
+                    )
+                    .await
+                    .map_err(MomoApiError::internal)?
+                    .map(|state| serde_json::from_str::<Value>(&state))
+                    .transpose()
+                    .map_err(|error| MomoApiError::internal(error.to_string()))?
+                } else {
+                    None
+                };
+                let profile_revision = ddm_profile_json
+                    .as_deref()
+                    .map(serde_json::from_str::<momo_memory::DdmProfile>)
+                    .transpose()
+                    .map_err(|error| MomoApiError::internal(error.to_string()))?
+                    .map(|profile| profile.revision);
+                let previous_bands =
+                    compatible_ddm_bands(previous_ddm_state.as_ref(), profile_revision);
+                let observed_scene = mo_state_operation
+                    .as_ref()
+                    .map(|operation| operation.observed_scene.clone())
+                    .or_else(|| {
+                        source_observations.as_array().and_then(|sources| {
+                            sources.iter().find_map(|source| {
+                                (source["space_id"].as_str() == Some(managed_space_id.as_str()))
+                                    .then(|| source["scene_json"].as_str())
+                                    .flatten()
+                                    .and_then(|scene| serde_json::from_str::<Value>(scene).ok())
+                            })
+                        })
+                    });
+                let ddm_runtime_json = ddm_profile_json.as_ref().map(|_| {
+                    json!({
+                        "previous_bands": previous_bands,
+                        "scene": observed_scene,
+                        "request_event_type": if request.input.has_function_outputs() {
+                            "tool_result"
+                        } else {
+                            "user_message"
+                        },
+                        "request_has_image": resolved_input.visual_input_count > 0,
+                        "request_evidence_id": operation_key,
+                    })
+                    .to_string()
+                });
+                let (compiled, degraded, compile_error) =
+                    match simple::compile_mo_state_with_ddm_json(
+                        managed_space_id.clone(),
+                        serde_json::to_string(&memory)
+                            .map_err(|error| MomoApiError::internal(error.to_string()))?,
+                        serde_json::to_string(&nsg)
+                            .map_err(|error| MomoApiError::internal(error.to_string()))?,
+                        context_window,
+                        ddm_profile_json,
+                        ddm_runtime_json,
+                    )
+                    .await
+                    {
+                        Ok(value) => (
+                            serde_json::from_str::<Value>(&value)
+                                .map_err(|error| MomoApiError::internal(error.to_string()))?,
+                            false,
+                            None,
+                        ),
+                        Err(error) => {
+                            warnings.push(format!("MO State degraded: {error}"));
+                            (
+                                json!({"context": "", "audit": {"degraded": true}}),
+                                true,
+                                Some(error),
+                            )
+                        }
+                    };
                 if let Some(state_operation_id) = mo_state_operation_id.as_ref() {
+                    let ddm_update_json = compiled
+                        .get("audit")
+                        .and_then(|audit| audit.get("ddm"))
+                        .map(|ddm| {
+                            json!({
+                                "managed_space_id": managed_space_id,
+                                "conversation_id": conversation_id,
+                                "character_id": character_id,
+                                "profile_revision": ddm["profile_revision"],
+                                "source_fingerprint": ddm["source_fingerprint"],
+                                "bands": ddm["next_bands"],
+                            })
+                            .to_string()
+                        });
                     match simple::publish_mo_state_snapshot_json(
                         state_operation_id.clone(),
                         serde_json::to_string(&compiled)
                             .map_err(|error| MomoApiError::internal(error.to_string()))?,
                         degraded,
                         compile_error.clone(),
+                        ddm_update_json,
                     )
                     .await
                     {
@@ -1273,6 +1382,9 @@ impl MomoApiService {
         if let Some(audit) = state_result.get_mut("audit").and_then(Value::as_object_mut) {
             audit.insert("injection_status".to_owned(), json!(state_injection_status));
         }
+        let (prompt_memory, memory_prompt_filter) =
+            filter_memory_for_prompt(&memory, &state_result, state_injection_status == "active");
+        governed.audit["memory_prompt_filter"] = memory_prompt_filter;
 
         let history = parse_json(
             simple::local_messages_json(conversation_space_id.clone(), conversation_id.clone())
@@ -1305,13 +1417,13 @@ impl MomoApiService {
                     && character.get("character_markdown").and_then(Value::as_str)
                         .is_some_and(|value| !value.trim().is_empty())
                 {
-                    self.config.prompts.roleplay_director.as_str()
+                    product_prompts::ROLEPLAY_DIRECTOR
                 } else {
                     ""
                 },
                 "character_markdown": character.get("character_markdown").and_then(Value::as_str).unwrap_or_default(),
                 "user_markdown": character.get("user_markdown").and_then(Value::as_str).unwrap_or_default(),
-                "memory_markdown": if include_memory { joined_bodies(&memory) } else { String::new() },
+                "memory_markdown": if include_memory { joined_bodies(&prompt_memory) } else { String::new() },
                 "state_context": state_context_for_prompt,
                 "nsg_markdown": if include_semantic_graph { joined_bodies(&nsg) } else { String::new() },
                 "messages": messages,
@@ -1726,6 +1838,7 @@ fn state_result_from_snapshot(snapshot: &momo_storage::MoStateSnapshot) -> Value
             "dmw_revision": snapshot.dmw_revision,
             "nsg_revision": snapshot.nsg_revision,
             "scene_revision": snapshot.scene_revision,
+            "source_versions": snapshot.source_versions,
             "snapshot_revision": snapshot.snapshot_revision,
             "scene": snapshot.scene,
             "degraded": snapshot.degraded,
@@ -1776,6 +1889,47 @@ fn joined_bodies(values: &[Value]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn filter_memory_for_prompt(
+    values: &[Value],
+    state_result: &Value,
+    state_injection_active: bool,
+) -> (Vec<Value>, Value) {
+    let requested = if state_injection_active {
+        state_result
+            .pointer("/audit/prompt_excluded_memory_ids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let mut excluded = Vec::new();
+    let retained = values
+        .iter()
+        .filter_map(|value| {
+            let id = value.get("id").and_then(Value::as_str);
+            if id.is_some_and(|id| requested.contains(id)) {
+                excluded.push(id.expect("checked id").to_owned());
+                None
+            } else {
+                Some(value.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+    excluded.sort();
+    (
+        retained,
+        json!({
+            "applied": !excluded.is_empty(),
+            "excluded_count": excluded.len(),
+            "excluded_ids": excluded,
+        }),
+    )
 }
 
 fn retrieval_audit(items: &[Value], enabled: bool, status: &str) -> Value {
@@ -1855,6 +2009,14 @@ fn state_context_for_prompt(
     )
 }
 
+fn compatible_ddm_bands(state: Option<&Value>, profile_revision: Option<u64>) -> Value {
+    state
+        .filter(|state| state["profile_revision"].as_u64() == profile_revision)
+        .and_then(|state| state.get("bands"))
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
 fn tools_to_chat(tools: &[crate::ResponseTool]) -> Result<Value, MomoApiError> {
     let tools = serde_json::to_value(tools)
         .map_err(|error| MomoApiError::bad_request(error.to_string()))?;
@@ -1923,12 +2085,42 @@ mod tests {
     }
 
     #[test]
+    fn ddm_previous_bands_reset_when_the_profile_revision_changes() {
+        let state = json!({
+            "profile_revision": 7,
+            "bands": {"protect_companion": "dominant"}
+        });
+        assert_eq!(
+            compatible_ddm_bands(Some(&state), Some(7)),
+            json!({"protect_companion": "dominant"})
+        );
+        assert_eq!(compatible_ddm_bands(Some(&state), Some(8)), json!({}));
+        assert_eq!(compatible_ddm_bands(None, Some(7)), json!({}));
+    }
+
+    #[test]
     fn maintenance_noop_detection_accepts_only_an_empty_patch() {
         assert!(memory_patch_is_noop("patches: []"));
         assert!(memory_patch_is_noop("patches:\n  []\n"));
         assert!(!memory_patch_is_noop(
             "patches:\n  - target_file: events/example.md"
         ));
+    }
+
+    #[test]
+    fn maintenance_accepts_only_a_normal_model_finish() {
+        assert_eq!(
+            maintenance_finish_error(&json!({"finish_reason": "stop"})),
+            None
+        );
+        assert_eq!(
+            maintenance_finish_error(&json!({"finish_reason": "length"})).as_deref(),
+            Some("maintenance model did not finish normally (finish_reason=length)")
+        );
+        assert_eq!(
+            maintenance_finish_error(&json!({})).as_deref(),
+            Some("maintenance model did not finish normally (finish_reason=missing)")
+        );
     }
 
     #[test]
@@ -1961,6 +2153,33 @@ mod tests {
         assert_eq!(audit["entries"][0]["space_id"], "space-1");
         assert_eq!(audit["status"], "ok");
         assert!(!audit.to_string().contains("private text"));
+    }
+
+    #[test]
+    fn active_epistemic_state_filters_only_named_prompt_records() {
+        let memory = [
+            json!({"id": "secret_event", "body": "hidden fact"}),
+            json!({"id": "current_scene", "body": "derived hidden summary"}),
+            json!({"id": "character", "body": "stable character evidence"}),
+        ];
+        let state = json!({"audit": {"prompt_excluded_memory_ids": [
+            "secret_event", "current_scene", "not_retrieved"
+        ]}});
+
+        let (filtered, audit) = filter_memory_for_prompt(&memory, &state, true);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["id"], "character");
+        assert_eq!(audit["applied"], true);
+        assert_eq!(audit["excluded_count"], 2);
+        assert_eq!(
+            audit["excluded_ids"],
+            json!(["current_scene", "secret_event"])
+        );
+
+        let (shadow, shadow_audit) = filter_memory_for_prompt(&memory, &state, false);
+        assert_eq!(shadow.len(), memory.len());
+        assert_eq!(shadow_audit["applied"], false);
     }
 
     #[test]

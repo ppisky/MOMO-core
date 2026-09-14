@@ -33,8 +33,12 @@ impl MemoryWorkspace {
         write_if_missing(&root.join("audit/memory.log"), "")?;
         let now = Utc::now().timestamp();
         for (name, id, title) in [
-            ("scene.md", "current_scene", "当前场景"),
-            ("active_threads.md", "current_active_threads", "活跃剧情线"),
+            ("scene.md", "current_scene", "Current Scene"),
+            (
+                "active_threads.md",
+                "current_active_threads",
+                "Active Threads",
+            ),
         ] {
             let path = root.join("current").join(name);
             if regular_file_exists(&path)? {
@@ -348,35 +352,6 @@ impl MemoryWorkspace {
         }
         direct_pool.sort_by(compare_direct);
         expansion_pool.sort_by(compare_documents);
-        // A distiller may preserve a fact while rendering it in a different
-        // language from a later query. With no embedding configured, exact
-        // lexical retrieval then has no possible hit. Only when there are no
-        // direct matches, admit a small number of high-value active documents
-        // whose script differs from the query. This keeps ordinary same-
-        // language negative queries exact and bounds unrelated context.
-        let mut cross_language_fallback = Vec::new();
-        if direct_pool.is_empty() {
-            for (id, entry) in &index.entries {
-                if !access.can_read(&entry.kind) {
-                    continue;
-                }
-                let document = self.read_unchecked(Path::new(&entry.path))?;
-                if document.metadata.id != *id {
-                    return Err(MemoryError::InvalidIndex(format!(
-                        "entry {id} points to document {}",
-                        document.metadata.id
-                    )));
-                }
-                if document.metadata.status == "active"
-                    && is_cross_language_fallback(&normalized_query, &document.body)
-                {
-                    cross_language_fallback.push((entry.path.clone(), document));
-                }
-            }
-            cross_language_fallback.sort_by(compare_documents);
-            cross_language_fallback.truncate(CROSS_LANGUAGE_FALLBACK_LIMIT);
-        }
-
         let remaining_memory_budget = max_tokens.saturating_sub(used);
         let direct_budget =
             remaining_memory_budget.saturating_mul(DIRECT_RESERVE_RATIO_NUMERATOR) / 100;
@@ -428,31 +403,6 @@ impl MemoryWorkspace {
             }
             used += tokens;
             expansion_used += tokens;
-            let id = document.metadata.id.clone();
-            loaded_ids.push(id.clone());
-            result.push(RetrievedMemory {
-                id,
-                path: PathBuf::from(path.clone()),
-                body: document.body.clone(),
-                estimated_tokens: tokens,
-                source_character_ids: document
-                    .metadata
-                    .relations
-                    .get("characters")
-                    .cloned()
-                    .unwrap_or_default(),
-                injection_scope: document.metadata.injection_scope.clone(),
-                injection_conversation_id: document.metadata.injection_conversation_id.clone(),
-                injection_character_id: document.metadata.injection_character_id.clone(),
-                state_signal: Some(retrieved_state_signal(document)),
-            });
-        }
-        for (path, document) in &cross_language_fallback {
-            let tokens = counter.count(&document.body);
-            if used.saturating_add(tokens) > max_tokens {
-                continue;
-            }
-            used += tokens;
             let id = document.metadata.id.clone();
             loaded_ids.push(id.clone());
             result.push(RetrievedMemory {
@@ -1318,7 +1268,7 @@ fn upgrade_empty_legacy_scene(path: &Path) -> Result<(), MemoryError> {
         .lines()
         .find_map(|line| line.trim().strip_prefix("# "))
         .filter(|title| !title.is_empty())
-        .unwrap_or("当前场景");
+        .unwrap_or("Current Scene");
     document.body = initial_scene_body(title);
     atomic_write(path, &document.encode()?)
 }

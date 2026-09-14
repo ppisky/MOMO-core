@@ -11,6 +11,7 @@ mod governance;
 mod lsb;
 mod orchestration;
 mod portable;
+mod product_prompts;
 mod response;
 mod vision;
 
@@ -53,7 +54,7 @@ pub use gateway::{
     GatewayMessageRole, OpenAiGateway, ProviderEndpoint, SseDecoder,
 };
 pub use governance::{
-    GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION, MaintenancePromptConfig,
+    DdmRuntimeConfig, GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION,
     MoStateInjectionMode, MoStateProfile, MoStateRuntimeConfig, MomoConfig, MomoRuntimeConfig,
     OverrideMode, RequestOverridePolicy, RequestedOverrides, RoleplayRuntimeConfig,
     VisionDescriptionConfig, validate_momo_document,

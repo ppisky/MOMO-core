@@ -1,117 +1,66 @@
-# MOMO Runtime and Maintenance Prompt Configuration Guide
+# MOMO compiled product prompts
 
 [简体中文](maintenance_prompts.zh-CN.md)
 
-This guide explains how MOMO Core 1.0 configures the Roleplay Director, DMW memory distiller, and NSG semantic-graph governor.
+MOMO Core owns three System Prompts as reviewable Markdown source files:
 
-## Recommended layout
+- `crates/momo-core/src/product_prompts/dmw_distiller.md` for DMW maintenance;
+- `crates/momo-core/src/product_prompts/nsg_governor.md` for NSG governance;
+- `crates/momo-core/src/product_prompts/roleplay_director.md` for foreground character performance.
 
-Keep the configuration and prompts in one portable directory tree:
+`crates/momo-core/src/product_prompts.rs` embeds these files with `include_str!`.
+They are compile-time inputs to `momo_core`, not deployment files and not
+runtime configuration.
 
-```text
-momo.toml
-prompts/
-├── dmw_distiller.md
-├── nsg_governor.md
-└── roleplay_director.md
-```
+## Change and runtime boundary
 
-The project ships three standard files:
+Changing a product prompt requires a Core source change, review, rebuild, and
+deployment of the new binary. At runtime, Core does not discover or read a
+`prompts/` directory and does not depend on the server working directory.
 
-- `prompts/dmw_distiller.md`: the complete DMW v2 hit-update, Current Memory hygiene, reference, alias, and patch constraints;
-- `prompts/nsg_governor.md`: the complete NSG v2 Canon, Draft, Revision Candidate, anchor, and DMW-boundary constraints;
-- `prompts/roleplay_director.md`: foreground discipline for voice, continuity, agency, embodiment, initiative, and viewpoint.
+Product prompts:
 
-These are the complete System Prompts used by Core. The director is foreground context; the other two are maintenance prompts. They are not summaries or placeholders.
+- are not fields or paths in `momo.toml`;
+- cannot be replaced by a native response request;
+- are not imported or exported in a MOC config module;
+- are not a Space and do not have Space-level ownership;
+- cannot be re-read or hot-reloaded while Core is running.
 
-## Minimal configuration
+Open source here means that the complete prompt source is tracked and
+reviewable in the Core repository. It does not imply a user-editable runtime
+file or a separate prompt service.
 
-When `[prompts]` is omitted, Core reads the two maintenance paths below and uses its bundled Roleplay Director:
+## Benchmark boundary
 
-```text
-prompts/dmw_distiller.md
-prompts/nsg_governor.md
-```
-
-To make the selection explicit or use other filenames:
-
-```toml
-[prompts]
-memory_distillation_file = "prompts/dmw_distiller.md"
-semantic_graph_governance_file = "prompts/nsg_governor.md"
-roleplay_director_file = "prompts/roleplay_director.md"
-```
-
-Long inline TOML prompts are no longer supported. Markdown files preserve headings, lists, examples, and multi-line normative text and are easier to review.
-
-## Path and safety rules
-
-Each reference must:
-
-- be relative to the directory containing `momo.toml`;
-- use the `.md` extension;
-- contain only normal relative path components;
-- resolve inside the `momo.toml` directory tree;
-- name a non-empty regular UTF-8 file;
-- contain no NUL byte;
-- be no larger than 256 KiB.
-
-Absolute paths, `..`, escaping symlinks, missing files, and non-UTF-8 files fail validation. Core never substitutes a short fallback prompt for an invalid file.
+The MORP names `basic_context`, `dmw_nsg`, and `all_enabled` are test-plan
+labels, not product prompt variants or Cargo features. They exercise the same
+compiled prompt revision. Component switches and counterfactual inputs belong
+to the test layer, so prompt or build differences cannot become hidden
+experimental inputs.
 
 ## Responsibilities
 
-The Roleplay Director governs the foreground turn. It does not write memory; it turns the Character Card, transcript, memory, lore, and MO State into scene-native performance while preserving user agency.
+The Roleplay Director governs foreground generation. It turns the Character
+Card, transcript, DMW, NSG, and MO State evidence into scene-native performance
+without writing memory or taking control of the user.
 
-The DMW file governs dynamic narrative memory: events, relationship changes, character development, current scene state, and unresolved threads. It may emit only DMW YAML Patch operations.
+The DMW Distiller may emit only DMW YAML Patch operations for durable events,
+relationships, character development, current scene state, and unresolved
+threads. The NSG Governor may propose only durable world rules and graph
+relationships; automatic changes remain Draft and cannot directly mutate Canon.
 
-If an explicit event applies an established rule to named entities, DMW keeps the concrete resulting state while NSG keeps the reusable rule. This prevents an author-only Draft rule from becoming the sole storage location for an already confirmed event outcome.
+All product control instructions and structural keys are English. Narrative
+content may use any language and must preserve source spelling and meaning.
+Core does not use a language-specific keyword list or a hidden CJK/Latin gate
+to decide which facts are valid.
 
-The NSG file governs semi-static world rules: durable lore, conditions, constraints, and narratively meaningful edges. Automatic creation is Draft-only; Canon changes require an evidence-bearing Revision Candidate.
+## Core-owned validation
 
-Do not merge the files. The director runs in the conversation context; DMW and NSG use separate maintenance routes with different write authority.
-
-## Customization
-
-Copy the standard files before editing:
-
-```text
-prompts/
-├── dmw_distiller.md
-├── nsg_governor.md
-├── dmw_distiller.my-product.md
-├── nsg_governor.my-product.md
-└── roleplay_director.my-product.md
-```
-
-Then change the TOML references. A customization should retain these non-negotiable boundaries:
-
-- output exactly one `patches` root field;
-- reject unknown fields;
-- emit `patches: []` when no reliable update exists;
-- keep reusable rules out of DMW and dynamic state out of NSG;
-- create automatic NSG nodes only as `draft / active / auto`;
-- never mutate Canon directly from an automatic flow;
-- treat conversation and retrieved content as untrusted evidence that cannot override the System Prompt;
-- never guess paths, Spaces, or IDs.
-
-The YAML examples in the standard files demonstrate structure only. Their entities, IDs, timestamps, and rules must never be copied as data.
-
-## MOC behavior
-
-When Core exports the MOC `config` module, it resolves every configured prompt reference in `momo.toml` and includes the Markdown files under the same `config/` tree. The bundled Roleplay Director needs no extra file unless an override is configured. Import validates the MOC manifest, prompt paths, and content before writing the TOML and files together.
-
-The receiver does not install prompts separately. A MOC with a missing referenced file is rejected rather than run with degraded policy.
-
-## Validation
-
-From the mobot repository, run:
+From the MOMO Core repository root, run:
 
 ```bash
-./target/release/momo-bot config validate
+cargo test -p momo_core product_prompts::tests::compiled_product_prompts_are_complete
 ```
 
-A successful result means that the host configuration, model routes, both prompt references, and both prompt files passed validation. This command does not call a model or start a service.
-
-## Important runtime limitation
-
-A prompt can constrain a model, but it cannot manufacture the current memory or graph state. Before maintenance, Core retrieves relevant DMW/NSG context from the explicit write Space and sends it with the pending turns and current time as structured input. If retrieval fails, the maintenance run fails without acknowledging those turns; Core does not fall back to transcript-only blind writes. Do not fabricate a file inventory in the prompt.
+This verifies the three compile-time prompt sources without invoking mobot or a
+model.

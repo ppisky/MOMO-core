@@ -95,6 +95,13 @@ struct CreateCharacterRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DdmProfileRequest {
+    owner_space_id: String,
+    profile_yaml: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportExternalCharacterRequest {
     owner_space_id: String,
     input_path: String,
@@ -462,6 +469,12 @@ fn api_routes() -> Router<AppState> {
                 .delete(delete_character),
         )
         .route(
+            "/characters/:id/ddm-profile",
+            get(get_character_ddm_profile)
+                .put(update_character_ddm_profile)
+                .delete(delete_character_ddm_profile),
+        )
+        .route(
             "/conversations",
             get(list_conversations).post(create_conversation),
         )
@@ -693,6 +706,49 @@ async fn delete_character(
     Ok(Json(OkResponse { ok: true }))
 }
 
+async fn get_character_ddm_profile(
+    Path(id): Path<String>,
+    Query(query): Query<SpaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let scope_id = validate_space_id(query.space_id)?;
+    let character = simple::local_character_json(id.clone())
+        .await
+        .map_err(scoped_api_error)?;
+    let character: CharacterCard =
+        serde_json::from_str(&character).map_err(|error| ApiError::internal(error.to_string()))?;
+    if character.scope_id.to_string() != scope_id {
+        return Err(ApiError::not_found("character does not belong to scope"));
+    }
+    let profile = simple::character_ddm_profile_yaml(id)
+        .await
+        .map_err(scoped_api_error)?;
+    Ok(Json(json!({"profile_yaml": profile})))
+}
+
+async fn update_character_ddm_profile(
+    Path(id): Path<String>,
+    Json(request): Json<DdmProfileRequest>,
+) -> Result<Json<Value>, ApiError> {
+    scoped_json_result(
+        simple::upsert_character_ddm_profile_json(
+            validate_space_id(request.owner_space_id)?,
+            id,
+            request.profile_yaml,
+        )
+        .await,
+    )
+}
+
+async fn delete_character_ddm_profile(
+    Path(id): Path<String>,
+    Query(query): Query<SpaceRequest>,
+) -> Result<Json<OkResponse>, ApiError> {
+    simple::delete_character_ddm_profile(validate_space_id(query.space_id)?, id)
+        .await
+        .map_err(scoped_api_error)?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
 async fn list_conversations(Query(query): Query<SpaceRequest>) -> Result<Json<Value>, ApiError> {
     json_result(simple::local_conversations_json(validate_space_id(query.space_id)?).await)
 }
@@ -901,9 +957,7 @@ async fn drain_momo_maintenance(
     Json(request): Json<SpaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let space_id = validate_space_id(request.space_id)?;
-    tokio::time::timeout(state.response_timeout, drain_momo_space(&state, &space_id))
-        .await
-        .map_err(|_| ApiError::gateway_timeout("maintenance drain timed out"))??;
+    drain_momo_space(&state, &space_id).await?;
     Ok(Json(json!({"completed": true, "space_id": space_id})))
 }
 
@@ -911,8 +965,21 @@ async fn drain_momo_space(state: &AppState, space_id: &str) -> Result<(), ApiErr
     // Commit each independently acknowledged maintenance lane before starting
     // the next. If the model gateway fails on NSG, a later drain resumes only
     // NSG instead of cancelling an otherwise successful DMW batch.
-    drain_momo_kind(state, space_id, momo_core::MaintenanceKind::Memory).await?;
-    drain_momo_kind(state, space_id, momo_core::MaintenanceKind::SemanticGraph).await?;
+    for kind in [
+        momo_core::MaintenanceKind::Memory,
+        momo_core::MaintenanceKind::SemanticGraph,
+    ] {
+        let lane = match kind {
+            momo_core::MaintenanceKind::Memory => "memory",
+            momo_core::MaintenanceKind::SemanticGraph => "semantic_graph",
+        };
+        tokio::time::timeout(
+            state.response_timeout,
+            drain_momo_kind(state, space_id, kind),
+        )
+        .await
+        .map_err(|_| ApiError::gateway_timeout(format!("maintenance {lane} drain timed out")))??;
+    }
     Ok(())
 }
 
@@ -1695,6 +1762,86 @@ mod tests {
             .as_str()
             .expect("created character id")
             .to_owned();
+
+        let ddm_profile = format!(
+            "schema: momo.ddm/1\ncharacter_id: {character_id}\nrevision: 1\nprofile: logit_additive\ndispositions:\n  - id: attentive\n    base_activation: 0.7\n    expression:\n      latent: Observe.\n      salient: Respond carefully.\n      dominant: Prioritize the immediate concern.\n"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/v1/characters/{character_id}/ddm-profile"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "owner_space_id": TEST_SCOPE_ID,
+                            "profile_yaml": ddm_profile,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("DDM update request"),
+            )
+            .await
+            .expect("DDM update response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/characters/{character_id}/ddm-profile?space_id={TEST_SCOPE_ID}"
+                    ))
+                    .body(Body::empty())
+                    .expect("DDM get request"),
+            )
+            .await
+            .expect("DDM get response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let stored_profile: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("DDM profile body"),
+        )
+        .expect("DDM profile JSON");
+        assert!(
+            stored_profile["profile_yaml"]
+                .as_str()
+                .is_some_and(|profile| profile.contains("id: attentive"))
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!(
+                        "/v1/characters/{character_id}/ddm-profile?space_id={TEST_SCOPE_ID}"
+                    ))
+                    .body(Body::empty())
+                    .expect("DDM delete request"),
+            )
+            .await
+            .expect("DDM delete response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/characters/{character_id}/ddm-profile?space_id={TEST_SCOPE_ID}"
+                    ))
+                    .body(Body::empty())
+                    .expect("DDM get-after-delete request"),
+            )
+            .await
+            .expect("DDM get-after-delete response");
+        let deleted_profile: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("DDM deleted profile body"),
+        )
+        .expect("DDM deleted profile JSON");
+        assert!(deleted_profile["profile_yaml"].is_null());
 
         let response = app
             .clone()
@@ -2610,6 +2757,15 @@ mod tests {
         )
         .expect("character JSON");
         let character_id = character["id"].as_str().expect("character ID").to_owned();
+        simple::upsert_character_ddm_profile_json(
+            TEST_SCOPE_ID.to_owned(),
+            character_id.clone(),
+            format!(
+                "schema: momo.ddm/1\ncharacter_id: {character_id}\nrevision: 1\nprofile: logit_additive\ndispositions:\n  - id: attentive\n    base_activation: 0.7\n    modulation:\n      context:\n        - id: user_turn\n          signal: request.event_type\n          when: user_message\n          delta: 0.2\n    expression:\n      latent: Observe.\n      salient: Respond carefully.\n      dominant: Prioritize the immediate concern.\n"
+            ),
+        )
+        .await
+        .expect("DDM profile");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2667,6 +2823,7 @@ mod tests {
                     _ => {
                         assert!(request.starts_with("POST /v1/chat/completions "));
                         assert!(request.contains("\"model\":\"conversation\""));
+                        assert!(request.contains("Respond carefully."));
                         json!({
                             "id": "chatcmpl-contract",
                             "choices": [{
@@ -2694,9 +2851,16 @@ mod tests {
             }
         });
 
+        let mut config = MomoConfig::default();
+        config.mo_state.ddm.enabled = true;
         let app = build_app(AppState {
             data_dir: initialized_dir,
-            momo_api: test_momo_api(format!("http://{address}/v1")),
+            momo_api: Arc::new(MomoApiService::new(
+                format!("http://{address}/v1"),
+                None,
+                reqwest::Client::new(),
+                Arc::new(config.clone()),
+            )),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
@@ -2706,13 +2870,22 @@ mod tests {
                 .expect("1.0 response fixture");
         request_body["momo"]["personal_space_id"] = json!(TEST_SCOPE_ID);
         request_body["momo"]["conversation_space_id"] = json!(TEST_SCOPE_ID);
-        request_body["momo"]["memory_sources"] = json!([{
-            "space_id": TEST_SCOPE_ID,
-            "label": "personal",
-            "weight": 100,
-            "memory": true,
-            "semantic_graph": true
-        }]);
+        request_body["momo"]["memory_sources"] = json!([
+            {
+                "space_id": TEST_SCOPE_ID,
+                "label": "personal",
+                "weight": 75,
+                "memory": true,
+                "semantic_graph": true
+            },
+            {
+                "space_id": "01900000-0000-7000-8000-000000000202",
+                "label": "shared",
+                "weight": 25,
+                "memory": true,
+                "semantic_graph": true
+            }
+        ]);
         request_body["momo"]["memory_write_space_id"] = json!(TEST_SCOPE_ID);
         request_body["momo"]["character_id"] = json!(character_id);
         let request_body = request_body.to_string();
@@ -2743,6 +2916,34 @@ mod tests {
             first["momo"]["state_audit"]["runtime_snapshot"]["snapshot_revision"],
             1
         );
+        assert_eq!(
+            first["momo"]["state_audit"]["runtime_snapshot"]["source_versions"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            first["momo"]["state_audit"]["ddm"]["effective_dispositions"][0]["id"],
+            "attentive"
+        );
+        assert_eq!(
+            first["momo"]["state_audit"]["ddm"]["effective_dispositions"][0]["matched_rule_ids"],
+            json!(["user_turn"])
+        );
+        let conversation_id = first["momo"]["conversation_id"]
+            .as_str()
+            .expect("conversation ID")
+            .to_owned();
+        let ddm_state = simple::ddm_projection_state_json(
+            TEST_SCOPE_ID.to_owned(),
+            conversation_id,
+            character_id.clone(),
+        )
+        .await
+        .expect("DDM state query")
+        .expect("persisted DDM state");
+        let ddm_state: Value = serde_json::from_str(&ddm_state).expect("DDM state JSON");
+        assert_eq!(ddm_state["bands"]["attentive"], "salient");
         let runtime = app
             .clone()
             .oneshot(
@@ -2762,11 +2963,22 @@ mod tests {
         .expect("runtime JSON");
         assert_eq!(runtime["profile"], "closed_autonomous");
         assert_eq!(runtime["snapshot_revision"], 1);
+        assert_eq!(
+            runtime["current_snapshot"]["source_versions"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
 
         drop(app);
         let restarted_app = build_app(AppState {
             data_dir: TEST_DATA_DIR.path().to_string_lossy().into_owned(),
-            momo_api: test_momo_api(format!("http://{address}/v1")),
+            momo_api: Arc::new(MomoApiService::new(
+                format!("http://{address}/v1"),
+                None,
+                reqwest::Client::new(),
+                Arc::new(config),
+            )),
             response_concurrency: Arc::new(Semaphore::new(8)),
             response_timeout: std::time::Duration::from_secs(120),
             metrics: Arc::new(Mutex::new(HashMap::new())),
@@ -2874,7 +3086,7 @@ mod tests {
             let request_text = String::from_utf8_lossy(&request[..read]);
             assert!(request_text.starts_with("POST /v1/chat/completions "));
             assert!(request_text.contains("Keep the roleplay voice."));
-            assert!(request_text.contains("Stay inside the fiction."));
+            assert!(request_text.contains("You perform the character defined below."));
             assert!(request_text.contains("https://example.test/original.png"));
             assert!(request_text.contains("\"type\":\"image_url\""));
             assert!(!request_text.contains("FALLBACK_ONLY_PROMPT"));
@@ -3290,7 +3502,7 @@ patches:
                     .1;
                 let request_json: Value =
                     serde_json::from_str(request_body).expect("maintenance request JSON");
-                assert_eq!(request_json["max_tokens"], 1024);
+                assert_eq!(request_json["max_tokens"], 2048);
                 let user_content: Value = serde_json::from_str(
                     request_json["messages"][1]["content"]
                         .as_str()
@@ -3446,6 +3658,117 @@ patches:
         )
         .await;
         assert!(result.is_ok(), "retry empty memory patch");
+        gateway.await.expect("mock gateway task");
+        let retrieved: Value = serde_json::from_str(
+            &simple::retrieve_memory_json(scope_id, "meeting".to_owned(), 4096)
+                .await
+                .expect("retrieve repaired memory"),
+        )
+        .expect("retrieval JSON");
+        assert!(
+            retrieved
+                .as_array()
+                .is_some_and(|items| { items.iter().any(|item| item["id"] == "event_meeting") })
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_retries_a_length_truncated_patch_before_staging() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let initialized_dir = initialize_test_core().await;
+        let scope_id = uuid::Uuid::now_v7().to_string();
+        simple::append_maintenance_turn_json(
+            json!({
+                "request_id": uuid::Uuid::now_v7().to_string(),
+                "scope_id": scope_id,
+                "user_content": "Remember that the meeting is at Glass-Archive-f41e9.",
+                "assistant_content": "Understood."
+            })
+            .to_string(),
+            true,
+            false,
+        )
+        .await
+        .expect("pending memory turn");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("maintenance gateway");
+        let address = listener.local_addr().expect("maintenance address");
+        let gateway = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept model discovery");
+            let request = read_test_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /v1/models/memory_distillation "));
+            write_test_json_response(
+                &mut socket,
+                json!({
+                    "momo": {
+                        "context_window": 8192,
+                        "max_output_tokens": 2048,
+                        "modalities": ["text"]
+                    }
+                }),
+            )
+            .await;
+
+            let patch = "patches:\n  - target_file: events/meeting.md\n    operations:\n      - type: create\n        frontmatter:\n          id: event_meeting\n          type: event\n          importance: 0.8\n          weight: 0.8\n          decay_at: 1\n          relations: {}\n          tags: [meeting]\n          aliases: []\n          status: active\n        content: |-\n          # Meeting\n\n          ## Current commitment\n\n          - Meet at Glass-Archive-f41e9.";
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept maintenance");
+                let request = read_test_http_request(&mut socket).await;
+                let request_body = request
+                    .split_once("\r\n\r\n")
+                    .expect("maintenance HTTP body")
+                    .1;
+                let request_json: Value =
+                    serde_json::from_str(request_body).expect("maintenance request JSON");
+                assert_eq!(request_json["max_tokens"], 2048);
+                let user_content: Value = serde_json::from_str(
+                    request_json["messages"][1]["content"]
+                        .as_str()
+                        .expect("maintenance user content"),
+                )
+                .expect("structured maintenance input");
+                if attempt == 0 {
+                    assert!(user_content.get("previous_output_error").is_none());
+                } else {
+                    assert!(
+                        user_content["previous_output_error"]
+                            .as_str()
+                            .is_some_and(|error| error.contains("finish_reason=length"))
+                    );
+                    assert!(
+                        user_content["required_correction"]
+                            .as_str()
+                            .is_some_and(|instruction| instruction.contains("complete patch"))
+                    );
+                }
+                write_test_json_response(
+                    &mut socket,
+                    json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": patch},
+                            "finish_reason": if attempt == 0 { "length" } else { "stop" }
+                        }]
+                    }),
+                )
+                .await;
+            }
+        });
+        let state = AppState {
+            data_dir: initialized_dir,
+            momo_api: test_momo_api(format!("http://{address}/v1")),
+            response_concurrency: Arc::new(Semaphore::new(8)),
+            response_timeout: std::time::Duration::from_secs(120),
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let result = drain_momo_maintenance(
+            State(state),
+            Json(SpaceRequest {
+                space_id: scope_id.clone(),
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "retry truncated memory patch");
         gateway.await.expect("mock gateway task");
         let retrieved: Value = serde_json::from_str(
             &simple::retrieve_memory_json(scope_id, "meeting".to_owned(), 4096)

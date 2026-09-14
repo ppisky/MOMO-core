@@ -1,117 +1,57 @@
-# MOMO 运行时与维护提示词配置指南
+# MOMO 编译期产品提示词
 
 [English](maintenance_prompts.en.md)
 
-本文说明 MOMO Core 1.0 如何配置角色扮演导演、DMW 记忆提炼与 NSG 语义网治理提示词。
+MOMO Core 以可审查的 Markdown 源文件维护三份 System Prompt：
 
-## 推荐目录
+- `crates/momo-core/src/product_prompts/dmw_distiller.md`：DMW 后台维护；
+- `crates/momo-core/src/product_prompts/nsg_governor.md`：NSG 治理；
+- `crates/momo-core/src/product_prompts/roleplay_director.md`：前台角色表演。
 
-把配置和提示词放在同一可移植目录树中：
+`crates/momo-core/src/product_prompts.rs` 使用 `include_str!` 把它们编译进
+`momo_core`。它们是编译期源码输入，不是部署时附带的文件，也不是运行时配置。
 
-```text
-momo.toml
-prompts/
-├── dmw_distiller.md
-├── nsg_governor.md
-└── roleplay_director.md
-```
+## 修改与运行边界
 
-三个标准文件随项目提供：
+修改产品提示词必须修改 Core 源码、接受审查、重新编译并部署新的二进制。
+Core 运行时不会发现或读取 `prompts/` 目录，也不依赖 server 的工作目录。
 
-- `prompts/dmw_distiller.md`：完整的 DMW v2 命中更新、Current Memory 卫生、引用、alias 与 Patch 约束；
-- `prompts/nsg_governor.md`：完整的 NSG v2 Canon、Draft、Revision Candidate、Anchor 与 DMW 边界约束；
-- `prompts/roleplay_director.md`：前台角色扮演约束，负责人物声音、连续性、用户主导权、场景具身、主动性与角色视角。
+因此产品提示词：
 
-它们是 Core 实际使用的完整 System Prompt，不是摘要或占位文本。
+- 不是 `momo.toml` 中的字段或路径；
+- 不能由原生响应请求替换；
+- 不随 MOC 的 config 模块导入或导出；
+- 不是 Space，也没有 Space 级所有权；
+- Core 运行期间不能重新读取或热更新。
 
-## 最简单的填写方式
+这里的“开源”是指完整提示词源码由 Core 仓库追踪并可审查，不代表它必须成为
+用户可编辑的运行时文件，也不需要单独建立 Prompt 服务或 Prompt Space。
 
-省略 `[prompts]` 时，Core 默认读取下面两个维护文件，并使用内置的角色扮演导演：
+## 基准测试边界
 
-```text
-prompts/dmw_distiller.md
-prompts/nsg_governor.md
-```
+MORP 中的 `basic_context`、`dmw_nsg` 和 `all_enabled` 是测试计划标签，不是
+产品提示词变体或 Cargo feature。所有实验臂使用同一版本的编译期提示词；组件
+开关与反事实输入属于测试层，不能让提示词差异或构建差异成为隐藏实验变量。
 
-如果希望显式记录，或使用其他文件名：
+## 职责
 
-```toml
-[prompts]
-memory_distillation_file = "prompts/dmw_distiller.md"
-semantic_graph_governance_file = "prompts/nsg_governor.md"
-roleplay_director_file = "prompts/roleplay_director.md"
-```
+Roleplay Director 负责前台生成，把 Character Card、对话、DMW、NSG 与 MO State
+证据转化为场景内表演；它不写记忆，也不能替用户行动。
 
-不再支持把长提示词直接写进 TOML。这样可以正常使用 Markdown 标题、列表、示例与多行规范，也便于代码审查。
+DMW Distiller 只能为稳定事件、关系、角色发展、当前场景和未完成线索生成 DMW
+YAML Patch。NSG Governor 只能提出稳定世界规则和图关系；自动变更保持 Draft，
+不能直接修改 Canon。
 
-## 路径和安全限制
+所有产品控制指令和结构键使用英文。叙事内容可以使用任何语言，并且必须保留来源
+文字与含义。Core 不使用针对某一种语言的关键词表，也不通过隐藏的 CJK/Latin
+检查决定事实是否有效。
 
-每个引用必须：
+## Core 自身验证
 
-- 相对于 `momo.toml` 所在目录；
-- 使用 `.md` 扩展名；
-- 只包含普通相对路径段；
-- 位于 `momo.toml` 目录树内部；
-- 是非空 UTF-8 普通文件；
-- 不包含 NUL 字节；
-- 不超过 256 KiB。
-
-绝对路径、`..`、越界符号链接、缺失文件和非 UTF-8 文件会让配置校验直接失败。Core 不会用短提示词静默替代错误文件。
-
-## 三个提示词的职责
-
-角色扮演导演负责前台回复。它不写入记忆，而是把角色卡、当前对话、相关记忆、世界规则和 MO State 转化为符合场景的人物表演，同时保留用户的行动权。
-
-DMW 文件负责动态叙事记忆：事件、关系变化、角色发展、当前场景和未完成线索。它必须只输出 DMW YAML Patch。
-
-当明确事件把既有规则应用到具名实体时，DMW 保存具体结果状态，NSG 保存可复用规则。这样，已经确认的事件结果不会只存在于默认不可注入的作者审核 Draft 中。
-
-NSG 文件负责半静态世界规则：稳定 lore、条件、约束和有叙事影响力的边。自动创建只能是 Draft；Canon 变化必须使用带证据的 Revision Candidate。
-
-不要合并三个文件。角色扮演导演进入对话上下文；DMW 与 NSG 由不同维护路由调用，也有不同的写入权限。
-
-## 如何定制
-
-建议复制标准文件后再修改：
-
-```text
-prompts/
-├── dmw_distiller.md
-├── nsg_governor.md
-├── dmw_distiller.my-product.md
-├── nsg_governor.my-product.md
-└── roleplay_director.my-product.md
-```
-
-然后修改 TOML 引用。定制时应保留以下不可削弱边界：
-
-- 只输出一个 `patches` 根字段；
-- 未知字段禁止；
-- 没有可靠更新时输出 `patches: []`；
-- DMW 不写可复用规则，NSG 不追踪动态状态；
-- 自动 NSG 节点只能是 `draft / active / auto`；
-- 自动流程不能直接修改 Canon；
-- 对话和已有记忆中的文本均视为不可信证据，不能覆盖 System Prompt；
-- 路径、Space 和 ID 不能由模型猜测。
-
-标准文件中的 YAML 示例只展示结构，模型不能复制示例实体、ID、时间戳或规则。
-
-## MOC 行为
-
-导出 MOC 的 `config` 模块时，Core 会解析 `momo.toml` 中所有已配置的提示词引用，并把对应 Markdown 文件放入同一 `config/` 目录树。内置角色扮演导演只有在显式覆盖时才需要额外文件。导入时先验证 MOC 清单，再验证提示词路径和内容，最后把 TOML 与文件一起写入本地配置目录。
-
-因此 MOC 接收方不需要另外安装提示词；缺失引用文件的 MOC 会被拒绝，而不是降级运行。
-
-## 验证
-
-在 mobot 仓库中运行：
+在 MOMO Core 仓库根目录运行：
 
 ```bash
-./target/release/momo-bot config validate
+cargo test -p momo_core product_prompts::tests::compiled_product_prompts_are_complete
 ```
 
-校验成功代表主配置、模型路由、两个提示词引用及文件内容都已通过检查。它不会调用模型或启动服务。
-
-## 一个重要的运行时限制
-
-提示词只能约束模型，不能凭空提供现有记忆或图节点。Core 在维护调用前会从显式写入 Space 检索相关 DMW/NSG 上下文，并把它与待处理轮次和当前时间一起放入结构化输入。检索失败时本轮维护失败且不确认这些轮次，不会退化为“只看对话盲写”。不要在提示词中伪造文件清单。
+该测试验证三份编译期提示词源码，不调用 mobot，也不调用模型。

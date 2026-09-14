@@ -1,6 +1,6 @@
-# Dynamic Disposition Model（DDM）设计说明
+# Dynamic Disposition Model（DDM）非规范性说明
 
-[English specification](../DYNAMIC_DISPOSITION_MODEL_v1.md)
+[English specification](../Dynamic_Disposition_Model_v1.md)
 
 DDM 的定位是 **MO State 内部的运行时投影组件**，不是新的记忆层：
 
@@ -22,9 +22,9 @@ DDM 的定位是 **MO State 内部的运行时投影组件**，不是新的记�
 - DDM 在该快照上计算一次性的有效倾向；
 - 对话模型决定最终措辞和动作。
 
-因此它最合适的位置是：**MO State 完成一致快照之后，State Projector
-生成 `[STATE_CONTEXT]` 之前**。第一版可以把结果作为 `## Effective
-dispositions` 子节注入现有状态上下文，不必立即新增 HTTP 字段或数据库。
+因此它的位置是：**MO State 完成一致快照之后，State Projector 生成
+`[STATE_CONTEXT]` 之前**。rc.3 把结果作为 `## Effective dispositions` 子节注入
+现有状态上下文，并把前一轮区间按 Space、会话和角色持久化，用迟滞避免阈值附近抖动。
 
 原始乘法公式可以保留：
 
@@ -52,5 +52,10 @@ E_i(t) = sigmoid(logit(B_i) + delta_context_i(t) + delta_state_i(t))
 这一次表现得愤怒，也不能因此永久提高角色的“易怒”基础值。持久性格变化
 必须经过独立且明确授权的角色编辑流程。
 
-完整的数据格式、表达阈值、迟滞、审计字段、验收测试和渐进落地顺序见英文
-规范。当前文档是设计稿，不代表 MOMO Core 1.0 已经实现 DDM。
+完整的数据格式、封闭信号族、表达阈值、迟滞、审计字段和稳定化要求见英文规范；
+实现证据与剩余限制单独记录在
+[DDM 实现状态](ddm_implementation_status.zh-CN.md)。
+
+rc.3 只在 `momo.toml` 保留全局启用开关。角色 profile 由管理 API 维护，并随角色在
+MOC 的 `extensions/momo-ddm/profile.yaml` 固定路径传输；它不进入 Character Card v2
+核心元数据，也不新增 DDM Space。实现符合性不改变规范的实验状态。

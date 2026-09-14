@@ -6,6 +6,7 @@ __pycache__/
 /.tools/
 /dist/
 /.codex-tmp/
+/.codex-index-check/
 /.momo-data/
 /.claude/
 

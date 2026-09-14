@@ -32,6 +32,9 @@ max_agent_steps = 8
 operation_timeout_ms = 30000
 injection_mode = "active"
 
+[mo_state.ddm]
+enabled = false
+
 [roleplay]
 enabled = true
 
@@ -47,11 +50,6 @@ allowed_parameters = []
 [vision]
 enabled = false
 prompt = "Describe only visible facts that are relevant to the conversation. Do not infer identity, intent, private attributes, or text that is not legible."
-
-[prompts]
-memory_distillation_file = "prompts/dmw_distiller.md"
-semantic_graph_governance_file = "prompts/nsg_governor.md"
-roleplay_director_file = "prompts/roleplay_director.md"
 ```
 
 ## Request governance
@@ -100,6 +98,30 @@ without exposing memory bodies. This supports safe rollout and causal
 evaluation without letting an uncertain state projection influence replies and
 later memory maintenance.
 
+### Experimental DDM projection
+
+`mo_state.ddm.enabled` is a deployment-wide opt-in. Per-character YAML profiles
+are author-owned character data, not runtime file paths: Core manages them at
+`GET`, `PUT`, and `DELETE /v1/characters/{id}/ddm-profile` and transports them
+inside that character's MOC module as
+`extensions/momo-ddm/profile.yaml`. Character Card v2 core metadata is
+unchanged. Missing profiles are neutral, and `momo.toml` cannot map characters
+to host files.
+
+The evaluator accepts only the closed, typed signal families documented in the
+[experimental DDM specification](../Dynamic_Disposition_Model_v1.md): DMW
+kind/tag, NSG node, active MO State dimension, governed scene status/
+participants/source references, and validated request event/image facts. It
+never infers numeric dispositions from conversation prose. Previous activation
+bands persist per managed Space, conversation, and character to provide
+hysteresis, and a profile revision change resets that history.
+
+Model-facing context receives only authored expression cues and hard
+constraints. Numeric activation, matched rules, evidence IDs, suppressed
+dispositions, previous/next bands, hysteresis decisions, and a normalized
+source fingerprint remain in state audit. See
+[`ddm_implementation_status.md`](ddm_implementation_status.md).
+
 ## Role-play runtime
 
 `roleplay.enabled = true` injects a product-owned Roleplay Director into every
@@ -108,6 +130,8 @@ character voice, emotional and relationship continuity, physical constraints,
 user agency, bounded initiative, and the character's knowledge boundary. The
 director is separate from the author-owned Character Card: the card defines who
 the character is; the director defines how the runtime performs that character.
+Core renders this director after character, DMW, MO State, and NSG evidence so
+its response-time constraints remain the final section of the system message.
 
 Set `enabled = false` only when a host intentionally supplies a different
 performance layer. Memory and MO State remain evidence sources and are not a
@@ -131,27 +155,18 @@ that advertises only text is an explicit model-adapter error only when the
 conversation route itself is text-only. The prompt is fallback policy, not an
 extra instruction for a multimodal conversation model.
 
-## Maintenance prompts
+## Product prompts are not runtime configuration
 
-`prompts.memory_distillation_file` and
-`prompts.semantic_graph_governance_file` reference the complete system
-instructions for Core-owned background maintenance.
-`prompts.roleplay_director_file` optionally replaces the bundled foreground
-Roleplay Director. Paths are relative to the
-directory containing `momo.toml`; they must be safe `.md` paths and cannot use
-absolute paths, `..`, symlinks that escape the directory, or files larger than
-256 KiB. A MOC config module carries the referenced files with `momo.toml`.
+The DMW Distiller, NSG Governor, and Roleplay Director are fixed Markdown source
+files under `crates/momo-core/src/product_prompts/`. `momo_core` embeds all three
+with `include_str!` at compile time. They are not deployment files, selected by
+`momo.toml`, accepted from a request, reloaded while the process is running, or
+carried by MOC import/export.
 
-The `[prompts]` table may be omitted when the two standard maintenance files
-exist at `prompts/dmw_distiller.md` and `prompts/nsg_governor.md`; the Roleplay
-Director has a bundled audited default. Set `roleplay_director_file` only to
-choose a different safe relative Markdown file. There are no abbreviated inline
-prompt fields.
-
-The shipped prompt files combine the complete v1 Distiller rules with the v2
-discipline additions. TOML contains references rather than abbreviated inline
-prompts. An embedding host that deliberately constructs `MomoConfig::default()`
-uses the same full bundled Markdown content.
+A `[prompts]` table is explicitly rejected because product prompts are not
+portable configuration.
+Compilation fails when a required prompt source is absent. See
+[MOMO compiled product prompts](maintenance_prompts.en.md).
 
 ## Compatibility
 
@@ -161,10 +176,7 @@ uses the same full bundled Markdown content.
 - Runtime maintenance intervals must be between 1 and 200 turns.
 - MO State limits must be inside the ranges documented above.
 - The vision prompt must contain 1 to 65,536 bytes.
-- Omitting `[prompts]` selects the two standard maintenance files and the
-  bundled Roleplay Director; custom maintenance references must provide both
-  fields, while the role-play override is optional.
-- Each referenced prompt must be non-empty UTF-8 Markdown no larger than 256 KiB.
+- Product prompts are not fields in `momo.toml` or payloads in a MOC config module.
 - Secret-shaped fields and host-only top-level sections are rejected.
 
 The former schema-v2 document that described `active_model_profile`, embedded

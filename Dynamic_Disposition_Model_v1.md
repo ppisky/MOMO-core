@@ -1,6 +1,6 @@
 # MOMO-RFC-0015: Dynamic Disposition Model (DDM) v1.0.0
 
-**Status:** design draft; not implemented by MOMO Core 1.0
+**Status:** experimental specification; not a stable Core 1.0 contract
 
 **Language:** English
 
@@ -48,10 +48,10 @@ MO State: current internal-state signals ------------------/               v
                                                          behavior
 ```
 
-DDM SHOULD be implemented inside MO State, immediately after a
-version-consistent snapshot has been assembled and before the State Projector
-formats model context. It MAY remain a separately named component and contract,
-but it MUST NOT become a fifth authoritative narrative store.
+DDM SHOULD be implemented inside MO State, after snapshot inputs have been
+assembled and before the State Projector formats model context. It MAY remain a
+separately named component and contract, but it MUST NOT become a fifth
+authoritative narrative store.
 
 The evaluation scope is `(managed_space_id, conversation_id, character_id)`.
 The same character can therefore have different effective dispositions in two
@@ -62,7 +62,7 @@ conversations without changing the character's base definition.
 | Information | Owner | Persistence |
 | --- | --- | --- |
 | Stable disposition and base activation | Character Card semantics | Portable and author-owned |
-| Machine-readable DDM profile | Optional MOC extension | Portable with the host extension |
+| Machine-readable DDM profile | Character-author-owned extension | MOC character asset `extensions/momo-ddm/profile.yaml`; management API outside Character Card v2 metadata |
 | Shared events and relationship evidence | DMW | Persistent evidence |
 | World rules and Canon | NSG | Persistent governed facts |
 | Current scene and internal state | MO State snapshot | Rebuildable runtime projection |
@@ -76,17 +76,17 @@ authorized character-editing workflow.
 
 Character Card v2 remains valid without DDM. Authors SHOULD still describe
 behavioral tendencies in `character.md`. Structured parameters MUST NOT be
-added to the Character Card v2 core metadata. A future implementation SHOULD
-use an optional MOC extension such as:
+added to the Character Card v2 core metadata. The optional machine-readable
+profile is instead a character-owned MOC extension at the fixed path
+`extensions/momo-ddm/profile.yaml`. Core management transports MAY expose that
+asset directly, but MUST validate its `character_id` against the managed
+character and its owner Space. `momo.toml` contains only the deployment enable
+switch; it MUST NOT map characters to host filesystem paths. DDM does not
+authorize a new Space or authoritative storage layer.
 
-```text
-extensions/momo.ddm/
-  dispositions.yaml
-```
-
-If the extension is absent, Core MUST preserve the existing Markdown-only
-behavior and MUST NOT invent numeric parameters from prose during an ordinary
-response.
+If no profile is configured for the active character, Core MUST preserve the
+existing Markdown-only behavior and MUST NOT invent numeric parameters from
+prose during an ordinary response.
 
 ## 3. Activation model
 
@@ -140,24 +140,32 @@ character_id: 018f0000-0000-7000-8000-000000000001
 revision: 1
 profile: logit_additive
 
+selection:
+  top_k: 3
+  salient_threshold: 0.65
+  dominant_threshold: 0.85
+  hysteresis_margin: 0.05
+
 dispositions:
   - id: protect_companion
     base_activation: 0.72
+    exclusive_group: immediate_response
     description: Prefer concrete protection over reassurance alone.
     modulation:
       context:
         - id: immediate_danger
-          signal: scene.danger
-          when: high
+          signal: dmw.tag.danger
+          when: true
+          missing: neutral
           delta: 0.90
         - id: refusal_of_help
-          signal: request.help_refused
+          signal: nsg.node.help_refused
           when: true
           delta: -0.55
       state:
         - id: exhausted
-          signal: physiological_state.exhaustion
-          when: high
+          signal: state.dimension.physiological_state
+          when: true
           delta: -0.35
     expression:
       latent: Keep concern implicit unless it becomes relevant.
@@ -177,10 +185,28 @@ precision or comparability between unrelated characters.
 Every modulation rule MUST reference a governed signal with:
 
 - a stable signal ID and type;
-- a source (`scene`, `request`, `dmw`, `nsg`, or a MO State dimension);
+- a source (`dmw`, `nsg`, or an active MO State dimension in the current
+  v1 profile);
 - the source revision or event ID;
 - an explicit missing-value policy, which defaults to neutral;
 - a bounded effect and deterministic conflict order.
+
+The v1 signal vocabulary is intentionally closed:
+
+- `dmw.tag.<tag>` and `dmw.kind.<kind>` are booleans derived from the bound DMW
+  retrieval snapshot;
+- `nsg.node.<node-id>` is a boolean derived from the bound NSG snapshot;
+- `state.dimension.<dimension>` is a boolean for an active MO State dimension;
+- `scene.status` is one of `inactive`, `active`, `transitioning`, or `closed`;
+- `scene.participant.<id>` and `scene.source_ref.<id>` are booleans from the
+  observed governed scene snapshot;
+- `request.event_type` is `user_message` or `tool_result`;
+- `request.has_image` is a boolean from validated request input.
+
+Identifiers following a dotted family use only lowercase ASCII letters, digits,
+`_`, `-`, `.`, and `:`. Unknown families, invalid enum values, and type mismatches MUST be
+rejected during profile validation. `missing` currently accepts only `neutral`;
+future policies require a schema revision.
 
 Free-form model interpretation MUST NOT silently update numeric state. A host
 may use a model to propose signals, but the proposal must pass the existing MO
@@ -194,24 +220,30 @@ gates, not dispositions. A high effective activation MUST NOT override them.
 DDM does not directly select dialogue. It compiles active dispositions into a
 small set of behavioral cues for the conversation model. The compiler SHOULD:
 
-1. apply hard constraints;
+1. apply authored hard constraints;
 2. compute all effective activations;
 3. resolve only explicitly declared conflicts;
-4. select at most a configured top `k` dispositions;
+4. choose the highest activation inside each explicitly named
+   `exclusive_group`, breaking ties by disposition ID, then select at most the
+   configured top `k` dispositions;
 5. map activation bands to authored expression guidance;
 6. emit source-free guidance to the model and source-rich detail to audit.
 
-Global normalization is NOT RECOMMENDED. Two compatible dispositions may both
-be salient. Softmax or winner selection MAY be used only inside an explicitly
+Global normalization is NOT RECOMMENDED. Two compatible dispositions may both be
+salient. Softmax or winner selection MAY be used only inside an explicitly
 mutually exclusive group.
 
-Activation bands SHOULD use hysteresis, for example entering `salient` at
-`0.65` and leaving it below `0.55`, so minor input changes do not make a
-character oscillate between styles on adjacent turns.
+A conforming evaluator MUST define band thresholds and hysteresis so small input
+changes cannot cause uncontrolled band oscillation. The previous bands MUST be
+persisted at `(managed_space_id, conversation_id, character_id)`, invalidated by
+a profile revision change, and updated atomically with the published MO State
+snapshot. Promotion of this specification from experimental still requires
+broader interoperability and behavior evidence; persisted hysteresis alone does
+not make it stable.
 
-The initial Core integration SHOULD append a `## Effective dispositions`
+An initial Core integration SHOULD append a `## Effective dispositions`
 subsection inside the existing `[STATE_CONTEXT]` block. A future wire revision
-may add a separate `[DISPOSITION_CONTEXT]` section if it receives its own token
+MAY add a separate `[DISPOSITION_CONTEXT]` section if it receives its own token
 budget and context audit entry.
 
 Example model-facing output:
@@ -228,7 +260,8 @@ complete mind or deterministically predict behavior.
 
 ## 7. Snapshot and audit
 
-Effective dispositions are a rebuildable projection. A snapshot SHOULD record:
+Effective dispositions are a rebuildable projection. A snapshot SHOULD record
+audit data equivalent to:
 
 ```yaml
 effective_dispositions:
@@ -239,18 +272,25 @@ effective_dispositions:
     effective_activation: 0.82
     band: salient
     matched_rule_ids: [immediate_danger, exhausted]
-    evidence_ids: [scene:7, event:01J...]
+    evidence_ids: [event:01J...]
 ddm_profile_revision: 1
+previous_bands: {protect_companion: latent}
+next_bands: {protect_companion: salient}
+hysteresis_applied: []
+suppressed_disposition_ids: []
 source_fingerprint: sha256:...
 ```
 
 The model-facing context MUST NOT expose private audit identifiers, numeric
 reasoning traces, or hidden control-plane data. The audit MUST preserve enough
-information for deterministic replay and diagnosis.
+information for deterministic replay and diagnosis. `source_fingerprint` MUST
+bind the normalized signal snapshot and the previous-band map used by the
+evaluation; the MO State source-version audit separately binds retrieved DMW,
+NSG, and scene bodies under one ordered lock window.
 
 ## 8. Required invariants and tests
 
-An implementation MUST verify at least:
+A conforming implementation MUST verify:
 
 - neutral modulation reproduces the base activation;
 - a missing signal is neutral rather than zero;
@@ -260,25 +300,27 @@ An implementation MUST verify at least:
 - duplicate events do not apply modulation twice;
 - hard constraints dominate disposition activation;
 - expected positive and negative effects are monotonic;
-- hysteresis prevents threshold oscillation;
 - projection never writes back into the base profile.
+
+Conformance tests MUST also cover persisted hysteresis, profile-revision reset,
+closed scene/request signal typing, deterministic exclusive-group selection,
+top-k suppression, and atomic publication of the snapshot and next-band state.
 
 MORP-Bench MAY evaluate DDM with counterfactual pairs: keep the character,
 history, request, and all other signals fixed, then change one context or state
 signal and score the expected direction of behavioral change. It SHOULD judge
 mechanism consistency and boundary preservation, not exact wording.
 
-## 9. Adoption plan
+## 9. Conformance and adoption
 
-DDM can be added without destabilizing the Core 1.0 contracts:
+This document defines the proposed DDM behavior and ownership boundary. It does
+not claim that the repository, a release, or a branch currently conforms.
+Implementation progress, test evidence, source-control state, and known gaps
+belong in the separate non-normative
+[`docs/ddm_implementation_status.md`](docs/ddm_implementation_status.md).
 
-1. keep this document and the profile schema experimental;
-2. add a pure evaluator with deterministic unit tests;
-3. attach its output to the existing MO State snapshot and `state` context;
-4. add opt-in MORP counterfactual cases;
-5. stabilize a portable extension only after profile round-trip and replay are
-   proven.
-
-This order reuses the current Character Card, DMW, NSG, MO State, and context
-boundaries. No new authoritative storage layer or immediate HTTP wire change is
-required.
+Adopting DDM does not require a new authoritative storage layer or a change to
+the frozen response wire. The fixed MOC extension and management endpoint are
+character-management surfaces; Character Card v2 core metadata is unchanged.
+Any future profile schema or stable-status promotion requires its own reviewed
+contract.

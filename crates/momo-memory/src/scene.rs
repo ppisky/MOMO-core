@@ -109,27 +109,16 @@ fn digest_text(value: &str) -> String {
 
 fn parse_scene(scene: &str, active_threads: &str, source_hash: &str) -> SceneSnapshot {
     let sections = markdown_sections(scene);
-    let scene_id = first_value(&sections, &["scene id", "scene_id", "场景 id", "场景id"])
+    let scene_id = first_value(&sections, &["scene id", "scene_id"])
         .unwrap_or_else(|| "scene_current".to_owned());
-    let focus = first_value(
-        &sections,
-        &["focus", "summary", "scene", "焦点", "摘要", "场景"],
-    )
-    .or_else(|| markdown_preamble(scene));
-    let status_text = first_value(&sections, &["status", "状态"]);
+    let focus =
+        first_value(&sections, &["focus", "summary", "scene"]).or_else(|| markdown_preamble(scene));
+    let status_text = first_value(&sections, &["status"]);
     let status = match status_text.as_deref().map(str::trim) {
-        Some(value) if value.eq_ignore_ascii_case("active") || value == "进行中" => {
-            SceneStatus::Active
-        }
-        Some(value) if value.eq_ignore_ascii_case("transitioning") || value == "切换中" => {
-            SceneStatus::Transitioning
-        }
-        Some(value) if value.eq_ignore_ascii_case("closed") || value == "已结束" => {
-            SceneStatus::Closed
-        }
-        Some(value) if value.eq_ignore_ascii_case("inactive") || value == "未开始" => {
-            SceneStatus::Inactive
-        }
+        Some(value) if value.eq_ignore_ascii_case("active") => SceneStatus::Active,
+        Some(value) if value.eq_ignore_ascii_case("transitioning") => SceneStatus::Transitioning,
+        Some(value) if value.eq_ignore_ascii_case("closed") => SceneStatus::Closed,
+        Some(value) if value.eq_ignore_ascii_case("inactive") => SceneStatus::Inactive,
         _ if focus
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty()) =>
@@ -138,7 +127,7 @@ fn parse_scene(scene: &str, active_threads: &str, source_hash: &str) -> SceneSna
         }
         _ => SceneStatus::Inactive,
     };
-    let mut open_threads = list_values(&sections, &["open threads", "开放线程", "未决事项"]);
+    let mut open_threads = list_values(&sections, &["open threads"]);
     open_threads.extend(markdown_list(active_threads));
     open_threads.sort();
     open_threads.dedup();
@@ -149,12 +138,12 @@ fn parse_scene(scene: &str, active_threads: &str, source_hash: &str) -> SceneSna
     SceneSnapshot {
         scene_id,
         status,
-        location: first_value(&sections, &["location", "地点", "位置"]),
-        timeframe: first_value(&sections, &["timeframe", "time", "时间"]),
-        participants: list_values(&sections, &["participants", "参与者", "角色"]),
+        location: first_value(&sections, &["location"]),
+        timeframe: first_value(&sections, &["timeframe", "time"]),
+        participants: list_values(&sections, &["participants"]),
         focus,
         open_threads,
-        constraints: list_values(&sections, &["constraints", "约束"]),
+        constraints: list_values(&sections, &["constraints"]),
         source_refs,
         source_hash: source_hash.to_owned(),
     }
@@ -257,5 +246,30 @@ mod tests {
         assert_eq!(snapshot.participants, vec!["momo", "user"]);
         assert_eq!(snapshot.open_threads, vec!["等待确认目的地"]);
         assert_eq!(snapshot.source_refs, vec!["rule_quiet"]);
+    }
+
+    #[test]
+    fn english_control_keys_preserve_multilingual_scene_values() {
+        for (location, focus, constraint) in [
+            ("客厅", "讨论出行", "保持安静"),
+            ("居間", "旅程について話す", "静かにする"),
+            ("غرفة المعيشة", "مناقشة الرحلة", "التزام الهدوء"),
+        ] {
+            let scene = format!(
+                "## Scene ID\nscene_home\n\n## Status\nactive\n\n## Location\n{location}\n\n## Focus\n{focus}\n\n## Constraints\n- {constraint}\n"
+            );
+            let snapshot = parse_scene(&scene, "", "hash");
+            assert_eq!(snapshot.location.as_deref(), Some(location));
+            assert_eq!(snapshot.focus.as_deref(), Some(focus));
+            assert_eq!(snapshot.constraints, [constraint]);
+        }
+    }
+
+    #[test]
+    fn localized_control_keys_are_not_protocol_aliases() {
+        let scene = "## 状态\n未开始\n\n## 地点\n客厅\n";
+        let snapshot = parse_scene(scene, "", "hash");
+        assert_eq!(snapshot.status, SceneStatus::Inactive);
+        assert!(snapshot.location.is_none());
     }
 }

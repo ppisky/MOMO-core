@@ -88,15 +88,17 @@ DMW/NSG 检索、MO State、上下文预算、逻辑路由和助手持久化，�
 
 本地 1.0 候选现已接入完整图片输入链路：单次最多八张用户图片；主对话模型声明
 `image` 时直接接收原图，纯文本主模型才使用可选的逻辑 `vision` 描述路由。解析结果与
-usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.responses/1.0` fixture 已冻结，
-当前以 `v1.0.0-rc.2` 预发布；更广的凭据测试与 MORP 覆盖仍是稳定版 `v1.0.0`
-发布门槛。详见
+usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.responses/1.0` fixture 已冻结。
+`v1.0.0-rc.3` 加入可选实验性 DDM 投影的完整实现，包括角色所有的 MOC profile、类型化
+信号、确定性选择、持久化迟滞和原子审计状态；更广的凭据测试与 MORP 覆盖仍是稳定版
+`v1.0.0` 发布门槛。详见
 [1.0.0 发布契约](docs/roadmap_1_0_0.md)。
-本次候选变更见 [rc.2 发布说明](docs/release_notes_1_0_0_rc2.md)。
+本次候选变更见 [rc.3 发布说明](docs/release_notes_1_0_0_rc3.md)。
+DDM 的实现边界与剩余实验性限制见 [DDM 状态报告](docs/ddm_implementation_status.zh-CN.md)。
 
-后台维护提示词使用可移植 Markdown 文件，不再把简化文本内联到 TOML。请从
-[momo.example.toml](momo.example.toml) 开始，并阅读
-[简体中文配置指南](docs/maintenance_prompts.zh-CN.md)或
+产品提示词是由仓库追踪、通过 `include_str!` 编译进 `momo_core` 的 Markdown
+源码资产，不是运行时文件，也不属于可移植配置；详见
+[简体中文提示词资产说明](docs/maintenance_prompts.zh-CN.md)或
 [English guide](docs/maintenance_prompts.en.md)。
 
 ## Space 标识
@@ -114,7 +116,7 @@ usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.respons
 人物一致性、情绪与关系延续、用户主导权、场景具身、主动性、叙事连贯和角色视角。
 记忆、检索与压力套件只作为需要显式选择的旧版诊断。Windows 运行
 `./scripts/test-morp.ps1`，Linux/macOS 运行 `bash scripts/test-morp.sh`；默认全程离线，
-需要模型的候选生成脚本只有显式 `--allow-ai` 才执行。rc.2 推荐只部署一个千问模型
+需要模型的候选生成脚本只有显式 `--allow-ai` 才执行。rc.3 推荐只部署一个千问模型
 （同时承担 conversation、DMW 提炼与 NSG 治理）和一个向量化模型，三场景 core 矩阵
 复用这两个部署。需要先检查调用计划时，可用
 `bash scripts/run-morp-model.sh --config <配置文件>`；它默认只生成数据、验证并打印预计调用数，

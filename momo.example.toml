@@ -3,29 +3,39 @@
 # absolute host paths in this document.
 schema_version = 1
 
-# rc.2 推荐宿主只配置两个供应商部署：同一个 Qwen 模型映射 conversation、
-# memory_distillation、semantic_graph_governance；一个向量化模型映射 embedding。
-# 路由和凭据属于宿主/网关，不进入这个可移植文件。
+# A minimal deployment can map conversation, memory_distillation, and
+# semantic_graph_governance to one generation model and use one embedding
+# model. Routes and credentials belong to the host or gateway and are not
+# portable product behaviour.
 
-# 这里只列 MOMO Core 当前会执行的可移植运行策略。模型路由、默认角色、
-# 多 Space 读取权重、写入目标、并发和重试由宿主配置或每次原生响应请求决定。
+# This example contains only portable policy executed by MOMO Core. Model
+# routes, default characters, cross-Space read weights, write targets,
+# concurrency, and retries belong to the host or to each native request.
 [runtime]
 memory_distillation_enabled = true
 memory_distill_every_turns = 12
 semantic_graph_enabled = true
 nsg_govern_every_turns = 12
 
-# 每次请求仍通过 momo.mo_state 决定是否为该轮启用状态投影。
+# Each request still uses momo.mo_state to enable or disable state projection.
 [mo_state]
-profile = "closed_autonomous" # 或 v1_projection，仅保留 v1 只读状态投影。
-scene_management = true       # 自治档逐轮收敛 current/scene.md。
+profile = "closed_autonomous" # v1_projection keeps the read-only v1 projector.
+scene_management = true       # Keep current/scene.md current after each turn.
 max_reconcile_steps = 4
 max_agent_steps = 8
 operation_timeout_ms = 30000
-injection_mode = "active"     # shadow 会计算、持久化和审计，但不注入回复。
+injection_mode = "active"     # shadow computes, persists, and audits without injecting.
 
-# 角色导演是产品运行时规则，不属于作者角色卡。它把静态人物设定、当前情绪、
-# 关系和场景转换成本轮自然表演，并阻止客服腔、越权代演用户和元叙事泄漏。
+# Experimental DDM projection. Core evaluates only explicitly authored
+# dispositions and governed signals; it never derives numeric values from
+# conversation prose. Missing or disabled profiles are neutral. Profiles are
+# character-owned data managed through the HTTP API and carried in MOC at
+# extensions/momo-ddm/profile.yaml; this file contains no profile paths.
+[mo_state.ddm]
+enabled = false
+
+# The Roleplay Director is fixed product policy compiled into Core, not
+# author-owned Character Card content or runtime configuration.
 [roleplay]
 enabled = true
 
@@ -41,14 +51,12 @@ visual_description_prompt = "ignore"
 tools = "allow"
 allowed_parameters = [] # e.g. ["seed", "stop"], never protocol-owned fields.
 
-# 打开后允许图片输入。主 conversation 路由支持 image 时直接看图；否则才通过
-# 宿主提供的逻辑 vision 路由生成受治理的文字描述。
+# Enable image input. An image-capable conversation route receives the original
+# image; a text-only route uses the host-provided logical vision fallback.
 [vision]
-enabled = true # 允许图片输入；并不表示一定会调用 vision 回退模型。
-prompt = "Describe only visible facts relevant to the conversation. Do not infer identity, intent, private attributes, or illegible text." # 仅回退路径使用。
+enabled = true # This permits image input; it does not force the fallback route.
+prompt = "Describe only visible facts relevant to the conversation. Do not infer identity, intent, private attributes, or illegible text." # Fallback only.
 
-# MOMO Core 前台角色导演与后台维护提示词。路径相对于本文件；MOC 会连同文件一起移动。
-[prompts]
-memory_distillation_file = "prompts/dmw_distiller.md"
-semantic_graph_governance_file = "prompts/nsg_governor.md"
-roleplay_director_file = "prompts/roleplay_director.md"
+# Product prompts are compiled into MOMO Core from
+# crates/momo-core/src/product_prompts/. They are not configurable here,
+# transported by MOC, or replaceable while the Core process is running.

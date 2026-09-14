@@ -1,6 +1,10 @@
 //! SQLite-backed local persistence for the local MOMO Rust core.
 
-use std::{collections::HashMap, path::Path, str::FromStr};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+    str::FromStr,
+};
 
 use chrono::{DateTime, Utc};
 use momo_domain::{CharacterCard, Conversation, Message, MessageRole};
@@ -76,6 +80,31 @@ pub struct MoStateObservation {
     pub nsg_fingerprint: String,
     pub scene_fingerprint: String,
     pub scene_json: String,
+    /// Read-only Space sources used to compile this state projection. The
+    /// managed Space may be omitted here because its authoritative values are
+    /// carried by the fields above.
+    pub source_observations: Vec<MoStateSourceObservation>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MoStateSourceObservation {
+    pub space_id: String,
+    pub dmw_fingerprint: String,
+    pub nsg_fingerprint: String,
+    pub scene_fingerprint: String,
+    #[serde(default)]
+    pub scene_json: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MoStateSourceVersion {
+    pub space_id: String,
+    pub dmw_revision: u64,
+    pub nsg_revision: u64,
+    pub scene_revision: u64,
+    pub dmw_fingerprint: String,
+    pub nsg_fingerprint: String,
+    pub scene_fingerprint: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -88,8 +117,33 @@ pub struct MoStateOperation {
     pub base_dmw_revision: u64,
     pub base_nsg_revision: u64,
     pub base_scene_revision: u64,
+    #[serde(default)]
+    pub source_versions: Vec<MoStateSourceVersion>,
+    #[serde(default)]
+    pub observed_scene: serde_json::Value,
     pub snapshot_json: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DdmProjectionState {
+    pub managed_space_id: String,
+    pub conversation_id: String,
+    pub character_id: String,
+    pub profile_revision: u64,
+    pub source_fingerprint: String,
+    pub bands: BTreeMap<String, String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DdmProjectionUpdate {
+    pub managed_space_id: String,
+    pub conversation_id: String,
+    pub character_id: String,
+    pub profile_revision: u64,
+    pub source_fingerprint: String,
+    pub bands: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -104,6 +158,8 @@ pub struct MoStateSnapshot {
     pub dmw_fingerprint: String,
     pub nsg_fingerprint: String,
     pub scene_fingerprint: String,
+    #[serde(default)]
+    pub source_versions: Vec<MoStateSourceVersion>,
     pub scene: serde_json::Value,
     pub state_context: String,
     pub state_audit: serde_json::Value,

@@ -64,11 +64,11 @@ modules are rejected.
 manifest.toml
 config/
   momo.toml
-  prompts/*.md
 characters/spaces/<owner-space-id>/
   index.json
   <character-id>/character.toml
   <character-id>/character.md
+  <character-id>/extensions/momo-ddm/profile.yaml  # optional
 conversations/spaces/<conversation-space-id>/
   index.json
   messages.json
@@ -88,6 +88,13 @@ ownership for management and export; it is not a second character identity.
 Conversations store their current optional character ID and may reference a
 character carried by another selected Space or omitted from the MOC. Missing
 characters become nullable references on import.
+
+`extensions/momo-ddm/profile.yaml` is the optional, character-owned transport
+for the experimental `momo.ddm/1` profile. It is part of the known `characters`
+module rather than a host extension module. Core validates the profile schema
+and requires its `character_id` to equal the containing character directory.
+Its presence does not add fields to Character Card v2 core metadata; consumers
+that do not implement DDM may ignore this extension file.
 
 DMW and NSG are independently selectable modules in the same memory Space.
 Their prefix partition is unchanged from v2.
@@ -145,20 +152,18 @@ unique character, conversation or message IDs.
 Import is validated completely before known business data is committed. A
 container with an undeclared Space path, invalid UUID directory, cross-Space
 path, duplicate resource, unsafe reference or inconsistent index is rejected.
-The preflight also reads every selected DMW/NSG file, validates referenced
-prompt assets, and checks host claim destinations. Individual SQLite and file
-writes are atomic. Because one import spans SQLite, prompt files, Space files,
-and optional host-owned directories, it is not represented as a single
-cross-filesystem crash transaction; an operational I/O failure is reported and
-the host must retry or restore its deployment snapshot.
+The preflight also reads every selected DMW/NSG file and checks host claim
+destinations. Individual SQLite and file writes are atomic. Because one import
+spans SQLite, Space files, and optional host-owned directories, it is not
+represented as a single cross-filesystem crash transaction; an operational I/O
+failure is reported and the host must retry or restore its deployment snapshot.
 
-## 7. Config and prompts
+## 7. Config
 
-The optional `config` module contains `config/momo.toml` and all referenced
-maintenance-prompt Markdown files. Paths are relative to `momo.toml`, stay
-inside `config/`, and are validated as regular non-empty UTF-8 files no larger
-than the configured prompt limit. Credentials and host-local adapter wiring are
-never included.
+The optional `config` module contains only `config/momo.toml`. Product prompts
+are compiled Core source and MUST NOT be included in MOC, referenced by
+`momo.toml`, or interpreted as Space-owned assets. Credentials and host-local
+adapter wiring are never included.
 
 Config is a portable behaviour profile selected for the package; it is not
 evidence that every Space in the package has one owner or identical access.
