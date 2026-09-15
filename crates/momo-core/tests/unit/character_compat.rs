@@ -256,6 +256,92 @@ async fn import_and_export_preserve_unknown_source_fields() {
     assert_eq!(round_trip["data"]["extensions"]["vendor"]["voice"], "one");
 }
 
+#[tokio::test]
+async fn moc_keep_existing_does_not_replace_the_preserved_source() {
+    let directory = tempfile::tempdir().expect("data directory");
+    let source_path = directory.path().join("incoming.json");
+    let incoming_bytes = serde_json::to_vec_pretty(&ccv2()).expect("incoming JSON");
+    fs::write(&source_path, &incoming_bytes).expect("incoming source");
+    let core = MomoCore::initialize(directory.path().join("core"))
+        .await
+        .expect("core");
+    let scope_id = momo_domain::new_id();
+    let imported = import_external_character(
+        &core,
+        scope_id,
+        &source_path,
+        ExternalCharacterImportFormat::Ccv2Json,
+    )
+    .await
+    .expect("import");
+    let moc = directory.path().join("incoming.moc");
+    crate::export_moc(
+        &core,
+        &moc,
+        &json!({}),
+        &crate::MocExportPlan {
+            include_config: false,
+            characters: vec![crate::MocCharacterSelection {
+                space_id: scope_id,
+                character_ids: vec![imported.character.id],
+            }],
+            conversations: vec![],
+            memory: vec![],
+            semantic_graph: vec![],
+            compatibility: crate::MocCompatibility::PreservedSource,
+        },
+    )
+    .await
+    .expect("MOC export");
+
+    let mut local_card = ccv2();
+    local_card["data"]["extensions"]["vendor"]["voice"] = json!("local");
+    let local_bytes = serde_json::to_vec_pretty(&local_card).expect("local JSON");
+    save_preserved_source(
+        &core,
+        imported.character.id,
+        ExternalCharacterImportFormat::Ccv2Json,
+        &local_bytes,
+    )
+    .expect("replace local preserved bytes");
+    let mut stored = load_stored_external_character(&core, imported.character.id)
+        .await
+        .expect("stored metadata");
+    stored.card = local_card;
+    stored.source = Some(StoredSourceFile {
+        sha256: hex::encode(Sha256::digest(&local_bytes)),
+        size: local_bytes.len() as u64,
+    });
+    core.store()
+        .save_portable_metadata(
+            EXTERNAL_METADATA_CATEGORY,
+            &imported.character.id.to_string(),
+            &serde_json::to_string(&stored).expect("stored JSON"),
+        )
+        .await
+        .expect("replace local metadata");
+
+    let report = crate::import_moc(
+        &core,
+        &moc,
+        &crate::MocImportPlan {
+            apply_config: false,
+            space_map: Default::default(),
+            conflict_mode: crate::ConflictMode::KeepExisting,
+        },
+    )
+    .await
+    .expect("keep-existing import");
+    assert_eq!(report.characters_imported, 0);
+    assert_eq!(report.skipped_conflicts, 1);
+
+    let output = directory.path().join("preserved.json");
+    export_preserved_character_source(&core, scope_id, imported.character.id, &output)
+        .await
+        .expect("preserved source export");
+    assert_eq!(fs::read(output).expect("preserved bytes"), local_bytes);
+}
+
 #[test]
 fn rejects_mismatched_png_chunk_and_spec() {
     let error = parse_external_json(

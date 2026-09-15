@@ -130,6 +130,14 @@ pub struct PreservedCharacterSourceExport {
     pub sha256: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreservedCharacterSource {
+    pub character_id: Uuid,
+    pub source_format: ExternalCharacterImportFormat,
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+}
+
 #[derive(Debug)]
 struct ParsedExternalCharacter {
     format: ExternalCharacterImportFormat,
@@ -206,6 +214,22 @@ pub async fn export_preserved_character_source(
     character_id: Uuid,
     output_path: impl AsRef<Path>,
 ) -> Result<PreservedCharacterSourceExport, CharacterCompatError> {
+    let source = read_preserved_character_source(core, scope_id, character_id).await?;
+    atomic_write_bytes(output_path.as_ref(), &source.bytes)?;
+    Ok(PreservedCharacterSourceExport {
+        character_id,
+        source_format: source_format_name(source.source_format).to_owned(),
+        output_path: output_path.as_ref().to_path_buf(),
+        bytes: source.bytes.len() as u64,
+        sha256: source.sha256,
+    })
+}
+
+pub async fn read_preserved_character_source(
+    core: &MomoCore,
+    scope_id: Uuid,
+    character_id: Uuid,
+) -> Result<PreservedCharacterSource, CharacterCompatError> {
     if !core
         .store()
         .list_characters_for_scope(scope_id)
@@ -219,17 +243,15 @@ pub async fn export_preserved_character_source(
     }
     let stored = load_stored_external_character(core, character_id).await?;
     let bytes = load_preserved_source(core, character_id, &stored)?;
-    atomic_write_bytes(output_path.as_ref(), &bytes)?;
     let source = stored.source.ok_or_else(|| {
         CharacterCompatError::Invalid(
             "the imported character predates exact source preservation".to_owned(),
         )
     })?;
-    Ok(PreservedCharacterSourceExport {
+    Ok(PreservedCharacterSource {
         character_id,
-        source_format: source_format_name(stored.source_format).to_owned(),
-        output_path: output_path.as_ref().to_path_buf(),
-        bytes: source.size,
+        source_format: stored.source_format,
+        bytes,
         sha256: source.sha256,
     })
 }

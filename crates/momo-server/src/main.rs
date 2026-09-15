@@ -1214,9 +1214,12 @@ async fn export_momo_config(
 }
 
 async fn import_momo_config(
+    State(state): State<AppState>,
     Json(request): Json<MomoConfigImportRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(simple::import_momo_config_json(request.input_path).await)
+    let result = json_result(simple::import_momo_config_json(request.input_path).await)?;
+    reload_runtime_config(&state)?;
+    Ok(result)
 }
 
 async fn export_moc(Json(request): Json<MocExportRequest>) -> Result<Json<Value>, ApiError> {
@@ -1232,8 +1235,12 @@ async fn export_moc(Json(request): Json<MocExportRequest>) -> Result<Json<Value>
     )
 }
 
-async fn import_moc(Json(request): Json<MocImportRequest>) -> Result<Json<Value>, ApiError> {
-    json_result(
+async fn import_moc(
+    State(state): State<AppState>,
+    Json(request): Json<MocImportRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let apply_config = request.plan.apply_config;
+    let result = json_result(
         simple::import_moc_json(
             request.input_path,
             request.plan,
@@ -1241,7 +1248,20 @@ async fn import_moc(Json(request): Json<MocImportRequest>) -> Result<Json<Value>
             request.claim_unknown_to,
         )
         .await,
-    )
+    )?;
+    if apply_config && !result.0["momo_config"].is_null() {
+        reload_runtime_config(&state)?;
+    }
+    Ok(result)
+}
+
+fn reload_runtime_config(state: &AppState) -> Result<(), ApiError> {
+    let config = MomoConfig::load(PathBuf::from(&state.data_dir).join("config/momo.toml"))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    state
+        .momo_api
+        .update_config(config)
+        .map_err(|error| ApiError::internal(error.to_string()))
 }
 
 async fn moc_is_encrypted(Query(query): Query<MocEncryptedQuery>) -> Result<Json<Value>, ApiError> {

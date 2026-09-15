@@ -82,7 +82,10 @@ TOML + Markdown 结构不是同一种线格式。
 | MOMO → 外部 CCv2/CCv3 JSON | 已实现；无来源快照时为有损转换 |
 | MOMO → 外部 CHARX | 已实现；无来源资产时输出仅含 `card.json` 的标准 ZIP |
 | 导入 CHARX → MOC → CHARX | 已实现；资产、`x_meta`、`module.risum` 与未知安全条目往返 |
-| MOMO → 外部 PNG/APNG | 不支持；LSB 载体是独立且显式的 PNG/无损 WebP 导出类型 |
+| MOMO → 新生成的外部 PNG/APNG | 不支持；LSB 载体是独立且显式的 PNG/无损 WebP 导出类型 |
+| 保存的原始外部 JSON/PNG/CHARX → 原样导出 | 已实现；输出与导入来源逐字节一致 |
+| 保存的原始外部 PNG → LSB 载体 | 已实现；明确按角色与所属 Space 选择，不改写保存的原图 |
+| 保存的原始外部 JSON/PNG/CHARX → LSB payload | 已实现；JSON/PNG 使用独立 payload type，CHARX 使用 Type 3 |
 | 外部未知字段与运行时字段保留 | 已实现；作为来源元数据保存并随 MOC 往返 |
 
 HTTP 接口使用 `POST /v1/characters/import-external` 导入本地文件，使用

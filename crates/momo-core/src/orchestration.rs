@@ -15,8 +15,8 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
     ChatUsage, DEFAULT_VISION_ROUTE, EmbeddingNormalization, EmbeddingProfile,
-    GatewayVisionAdapter, GovernedOverrides, MoStateInjectionMode, MoStateProfile, MomoConfig,
-    MomoResponse, MomoResponseMetadata, MomoResponseRequest, RequestedOverrides,
+    GatewayVisionAdapter, GovernanceError, GovernedOverrides, MoStateInjectionMode, MoStateProfile,
+    MomoConfig, MomoResponse, MomoResponseMetadata, MomoResponseRequest, RequestedOverrides,
     ResponseOutputContent, ResponseOutputItem, ResponseUsage, VisionDescriptionAdapter,
     VisionDescriptionRequest, api::simple, product_prompts,
 };
@@ -153,7 +153,7 @@ pub struct MomoApiService {
     gateway_origin: String,
     gateway_api_key: Option<String>,
     gateway_client: reqwest::Client,
-    config: Arc<MomoConfig>,
+    config: Arc<SyncMutex<MomoConfig>>,
     vision_adapter: Arc<dyn VisionDescriptionAdapter>,
     response_attempts: Arc<Mutex<HashMap<String, String>>>,
     operation_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
@@ -255,7 +255,7 @@ impl MomoApiService {
             gateway_origin,
             gateway_api_key,
             gateway_client,
-            config,
+            config: Arc::new(SyncMutex::new((*config).clone())),
             vision_adapter,
             response_attempts: Arc::new(Mutex::new(HashMap::new())),
             operation_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -272,14 +272,33 @@ impl MomoApiService {
         self
     }
 
+    /// Atomically replaces the portable runtime configuration used by future
+    /// response and maintenance operations.
+    pub fn update_config(&self, config: MomoConfig) -> Result<(), GovernanceError> {
+        config.validate()?;
+        *self
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
+        Ok(())
+    }
+
+    fn config_snapshot(&self) -> MomoConfig {
+        self.config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Maximum number of pending turns supplied to one maintenance-model call.
     /// Explicit drains use the same configured batch boundary as background
     /// maintenance instead of collapsing an entire backlog into one prompt.
     #[must_use]
     pub fn maintenance_batch_limit(&self, kind: MaintenanceKind) -> usize {
+        let config = self.config_snapshot();
         match kind {
-            MaintenanceKind::Memory => self.config.runtime.memory_distill_every_turns,
-            MaintenanceKind::SemanticGraph => self.config.runtime.nsg_govern_every_turns,
+            MaintenanceKind::Memory => config.runtime.memory_distill_every_turns,
+            MaintenanceKind::SemanticGraph => config.runtime.nsg_govern_every_turns,
         }
     }
 
@@ -331,6 +350,7 @@ impl MomoApiService {
         operation_key: &str,
         stream: Option<&dyn MomoResponseEventSink>,
     ) -> Result<MomoResponse, MomoApiError> {
+        let config = self.config_snapshot();
         self.ensure_active(operation_key)?;
         let request_lock = {
             let mut locks = self.operation_locks.lock().await;
@@ -360,15 +380,15 @@ impl MomoApiService {
                     .map_err(|error| MomoApiError::internal(error.to_string()));
             }
         }
-        if request.input.has_images() && !self.config.vision.enabled {
+        if request.input.has_images() && !config.vision.enabled {
             return Err(MomoApiError::bad_request(
                 "image input requires vision.enabled = true in the portable MOMO configuration",
             ));
         }
 
         let mut warnings = Vec::new();
-        let autonomous_mo_state = request.momo.mo_state
-            && self.config.mo_state.profile == MoStateProfile::ClosedAutonomous;
+        let autonomous_mo_state =
+            request.momo.mo_state && config.mo_state.profile == MoStateProfile::ClosedAutonomous;
         let managed_space_id = request
             .momo
             .memory_write_space_id
@@ -399,8 +419,7 @@ impl MomoApiService {
             }
         };
         let direct_multimodal = request.input.has_images() && capability.supports_images;
-        let mut governed = self
-            .config
+        let mut governed = config
             .govern(
                 capability.context_window,
                 capability.max_output_tokens,
@@ -641,16 +660,17 @@ impl MomoApiService {
     }
 
     fn schedule_maintenance(&self, scope_id: String) {
+        let config = self.config_snapshot();
         for (kind, enabled, threshold) in [
             (
                 MaintenanceKind::Memory,
-                self.config.runtime.memory_distillation_enabled,
-                self.config.runtime.memory_distill_every_turns,
+                config.runtime.memory_distillation_enabled,
+                config.runtime.memory_distill_every_turns,
             ),
             (
                 MaintenanceKind::SemanticGraph,
-                self.config.runtime.semantic_graph_enabled,
-                self.config.runtime.nsg_govern_every_turns,
+                config.runtime.semantic_graph_enabled,
+                config.runtime.nsg_govern_every_turns,
             ),
         ] {
             if !enabled {
@@ -735,6 +755,7 @@ impl MomoApiService {
         kind: MaintenanceKind,
         threshold: usize,
     ) -> Result<bool, MomoApiError> {
+        let config = self.config_snapshot();
         if threshold == 0 {
             return Err(MomoApiError::bad_request(
                 "maintenance threshold must be positive",
@@ -829,8 +850,8 @@ impl MomoApiService {
                 .map_err(|error| MomoApiError::internal(error.to_string()))?;
             let maintenance_input = json!({
                 "maintenance_kind": storage_kind,
-                "mo_state_profile": self.config.mo_state.profile.as_str(),
-                "scene_management": self.config.mo_state.scene_management,
+                "mo_state_profile": config.mo_state.profile.as_str(),
+                "scene_management": config.mo_state.scene_management,
                 "current_unix_timestamp": Utc::now().timestamp(),
                 "existing_context": existing_context,
                 "pending_turns": turns,
@@ -969,6 +990,7 @@ impl MomoApiService {
         request: &MomoResponseRequest,
         attempt: GovernedResponseAttempt<'_>,
     ) -> Result<(MomoResponse, Option<String>), MomoApiError> {
+        let config = self.config_snapshot();
         let GovernedResponseAttempt {
             request_id,
             operation_key,
@@ -1176,8 +1198,8 @@ impl MomoApiService {
             .into_iter()
             .partition(|item| item.get("graph_id").is_some());
         let state_input_audit = state_input_audit(&memory, &nsg, retrieval_status)?;
-        let autonomous_mo_state = request.momo.mo_state
-            && self.config.mo_state.profile == MoStateProfile::ClosedAutonomous;
+        let autonomous_mo_state =
+            request.momo.mo_state && config.mo_state.profile == MoStateProfile::ClosedAutonomous;
         // Retrieval obtains the complete ordered source-lock set while it reads
         // bodies and fingerprints. Serialize managed-state publication only
         // after that snapshot is complete to avoid recursively acquiring the
@@ -1201,7 +1223,7 @@ impl MomoApiService {
                         "user_message".to_owned()
                     },
                     request_fingerprint.to_owned(),
-                    self.config.mo_state.profile.as_str().to_owned(),
+                    config.mo_state.profile.as_str().to_owned(),
                 )
                 .await
                 {
@@ -1227,7 +1249,7 @@ impl MomoApiService {
                     .map_err(|error| MomoApiError::internal(error.to_string()))?;
                 state_result_from_snapshot(&snapshot)
             } else {
-                let ddm_profile_json = if self.config.mo_state.ddm.enabled {
+                let ddm_profile_json = if config.mo_state.ddm.enabled {
                     simple::character_ddm_profile_json(character_id.clone())
                         .await
                         .map_err(MomoApiError::internal)?
@@ -1365,19 +1387,19 @@ impl MomoApiService {
                 "manager".to_owned(),
                 json!({
                     "enabled": autonomous_mo_state,
-                    "profile": self.config.mo_state.profile.as_str(),
-                    "scene_management": self.config.mo_state.scene_management,
-                    "max_reconcile_steps": self.config.mo_state.max_reconcile_steps,
-                    "max_agent_steps": self.config.mo_state.max_agent_steps,
-                    "operation_timeout_ms": self.config.mo_state.operation_timeout_ms,
-                    "injection_mode": self.config.mo_state.injection_mode.as_str(),
+                    "profile": config.mo_state.profile.as_str(),
+                    "scene_management": config.mo_state.scene_management,
+                    "max_reconcile_steps": config.mo_state.max_reconcile_steps,
+                    "max_agent_steps": config.mo_state.max_agent_steps,
+                    "operation_timeout_ms": config.mo_state.operation_timeout_ms,
+                    "injection_mode": config.mo_state.injection_mode.as_str(),
                 }),
             );
         }
         let (state_context_for_prompt, state_injection_status) = state_context_for_prompt(
             &state_result,
             request.momo.mo_state,
-            self.config.mo_state.injection_mode,
+            config.mo_state.injection_mode,
         );
         if let Some(audit) = state_result.get_mut("audit").and_then(Value::as_object_mut) {
             audit.insert("injection_status".to_owned(), json!(state_injection_status));
@@ -1413,7 +1435,7 @@ impl MomoApiService {
         let prepared = parse_json(simple::prepare_context_json(
             json!({
                 "runtime_instructions": governed.instructions.as_deref().unwrap_or_default(),
-                "roleplay_director": if self.config.roleplay.enabled
+                "roleplay_director": if config.roleplay.enabled
                     && character.get("character_markdown").and_then(Value::as_str)
                         .is_some_and(|value| !value.trim().is_empty())
                 {

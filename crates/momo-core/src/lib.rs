@@ -34,8 +34,9 @@ pub use capability::{
 };
 pub use character_compat::{
     CharacterCompatError, ExternalCharacterExportFormat, ExternalCharacterImport,
-    ExternalCharacterImportFormat, PreservedCharacterSourceExport, export_external_character,
-    export_preserved_character_source, import_external_character, validate_external_charx,
+    ExternalCharacterImportFormat, PreservedCharacterSource, PreservedCharacterSourceExport,
+    export_external_character, export_preserved_character_source, import_external_character,
+    read_preserved_character_source, validate_external_charx,
 };
 pub use context::{
     ContextBudget, ContextRequest, ContextSectionAudit, ContextSections, PreparedContext,

@@ -58,6 +58,10 @@ operations. Their request and response shapes may evolve with the workspace and
 must not be used as a cross-version or remote public API without a host-owned
 adapter.
 
+Successful `/v1/momo-config/import` and MOC imports that actually apply a config
+atomically update the running response service for subsequent operations; a
+process restart is not required.
+
 `GET /v1/mo-state/runtime?space_id=<uuid>` exposes the local MO State manager
 status for diagnostics: the active profile, independent DMW/NSG/scene
 revisions, snapshot revision, degraded state, last error, and current durable

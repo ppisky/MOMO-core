@@ -29,6 +29,8 @@ pub enum LsbPayloadType {
     CharacterData = 1,
     Moc = 2,
     Charx = 3,
+    ExternalCharacterJson = 4,
+    ExternalCharacterPng = 5,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,6 +48,8 @@ impl TryFrom<u8> for LsbPayloadType {
             1 => Ok(Self::CharacterData),
             2 => Ok(Self::Moc),
             3 => Ok(Self::Charx),
+            4 => Ok(Self::ExternalCharacterJson),
+            5 => Ok(Self::ExternalCharacterPng),
             _ => Err(LsbCarrierError::UnknownPayloadType(value)),
         }
     }

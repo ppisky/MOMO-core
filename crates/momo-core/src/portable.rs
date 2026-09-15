@@ -600,6 +600,7 @@ pub async fn import_moc_with_passphrase_and_claims(
             report.momo_config = Some(import_momo_config(core, path)?);
         }
     }
+    let mut imported_character_ids = HashSet::new();
     for space in &payload_manifest.space_modules {
         let source_space = Uuid::parse_str(&space.space_id)?;
         let target_space = plan
@@ -610,7 +611,9 @@ pub async fn import_moc_with_passphrase_and_claims(
         let directory = extracted.join(&space.path);
         match space.module.as_str() {
             "characters" => {
-                import_characters(core, &directory, target_space, mode, &mut report).await?;
+                imported_character_ids.extend(
+                    import_characters(core, &directory, target_space, mode, &mut report).await?,
+                );
             }
             "conversations" => {
                 import_conversations(core, &directory, target_space, mode, &mut report).await?;
@@ -627,7 +630,7 @@ pub async fn import_moc_with_passphrase_and_claims(
             }
         }
     }
-    import_external_character_sources(core, extracted).await?;
+    import_external_character_sources(core, extracted, &imported_character_ids).await?;
     if let Some(claim_directory) = claim_directory {
         for module in &mut unknown_modules {
             let claimed = claim_unknown_module(extracted, claim_directory, module)?;
@@ -1229,9 +1232,9 @@ async fn import_characters(
     scope_id: Uuid,
     mode: ConflictMode,
     report: &mut ImportReport,
-) -> Result<(), PortableError> {
+) -> Result<HashSet<Uuid>, PortableError> {
     if !directory.exists() {
-        return Ok(());
+        return Ok(HashSet::new());
     }
     let existing = core
         .store()
@@ -1334,12 +1337,16 @@ async fn import_characters(
         }
         report.characters_imported += 1;
     }
-    Ok(())
+    Ok(imported_ids
+        .into_iter()
+        .filter(|id| !existing.contains(id) || mode == ConflictMode::Replace)
+        .collect())
 }
 
 async fn import_external_character_sources(
     core: &MomoCore,
     root: &Path,
+    imported_character_ids: &HashSet<Uuid>,
 ) -> Result<(), PortableError> {
     let directory = root.join("tavern_compat");
     if !directory.exists() {
@@ -1360,6 +1367,9 @@ async fn import_external_character_sources(
             ));
         }
         let id = Uuid::parse_str(&entry.file_name().to_string_lossy())?;
+        if !imported_character_ids.contains(&id) {
+            continue;
+        }
         if !character_ids.contains(&id) {
             return Err(PortableError::InvalidData(format!(
                 "tavern_compat source references unknown character {id}"

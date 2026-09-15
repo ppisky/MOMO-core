@@ -85,13 +85,21 @@ pub(super) async fn create_response(
                 )
                 .await
                 {
-                    Ok(response) => send_completed_events(&stream, &request_id, response),
+                    Ok(response) => {
+                        if let Err(message) =
+                            send_completed_events(&stream, &request_id, response).await
+                        {
+                            let _ = send_stream_limit_failure(&stream, &request_id, message).await;
+                        }
+                    }
                     Err(error) => {
-                        let _ = stream.send(json!({
-                            "type": "response.failed",
-                            "request_id": request_id,
-                            "error": error.error,
-                        }));
+                        let _ = stream
+                            .send_async(json!({
+                                "type": "response.failed",
+                                "request_id": request_id,
+                                "error": error.error,
+                            }))
+                            .await;
                     }
                 }
             }
@@ -104,30 +112,56 @@ pub(super) async fn create_response(
     Ok(Json(response).into_response())
 }
 
-fn send_completed_events(stream: &ResponseStream, request_id: &str, response: MomoResponse) {
+async fn send_stream_limit_failure(
+    stream: &ResponseStream,
+    request_id: &str,
+    message: String,
+) -> Result<(), String> {
+    stream
+        .send_async(json!({
+            "type": "response.failed",
+            "request_id": request_id,
+            "error": {
+                "type": "transport_error",
+                "code": "response_stream_limit",
+                "message": message,
+                "retryable": true,
+                "request_id": request_id,
+            },
+        }))
+        .await
+}
+
+async fn send_completed_events(
+    stream: &ResponseStream,
+    request_id: &str,
+    response: MomoResponse,
+) -> Result<(), String> {
     let message_id = format!("msg_{request_id}");
-    let _ = stream.send(json!({
-        "type": "response.output_text.done",
-        "request_id": request_id,
-        "item_id": message_id.as_str(),
-        "output_index": 0,
-        "content_index": 0,
-        "text": response.output_text.as_str(),
-    }));
-    let _ = stream.send(json!({
-        "type": "response.content_part.done",
-        "request_id": request_id,
-        "item_id": message_id.as_str(),
-        "output_index": 0,
-        "content_index": 0,
-        "part": {
-            "type": "output_text",
+    let mut events = vec![
+        json!({
+            "type": "response.output_text.done",
+            "request_id": request_id,
+            "item_id": message_id.as_str(),
+            "output_index": 0,
+            "content_index": 0,
             "text": response.output_text.as_str(),
-            "annotations": [],
-        },
-    }));
+        }),
+        json!({
+            "type": "response.content_part.done",
+            "request_id": request_id,
+            "item_id": message_id.as_str(),
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+                "type": "output_text",
+                "text": response.output_text.as_str(),
+                "annotations": [],
+            },
+        }),
+    ];
     if let Some(item) = response.output.first() {
-        let _ = stream.send(json!({
+        events.push(json!({
             "type": "response.output_item.done",
             "request_id": request_id,
             "output_index": 0,
@@ -136,7 +170,7 @@ fn send_completed_events(stream: &ResponseStream, request_id: &str, response: Mo
     }
     for (output_index, item) in response.output.iter().enumerate().skip(1) {
         if let ResponseOutputItem::FunctionCall { id, arguments, .. } = item {
-            let _ = stream.send(json!({
+            events.push(json!({
                 "type": "response.function_call_arguments.done",
                 "request_id": request_id,
                 "item_id": id,
@@ -144,18 +178,23 @@ fn send_completed_events(stream: &ResponseStream, request_id: &str, response: Mo
                 "arguments": arguments,
             }));
         }
-        let _ = stream.send(json!({
+        events.push(json!({
             "type": "response.output_item.done",
             "request_id": request_id,
             "output_index": output_index,
             "item": item,
         }));
     }
-    let _ = stream.send(json!({
+    events.push(json!({
         "type": "response.completed",
         "request_id": request_id,
         "response": response,
     }));
+    stream.validate_batch(&events)?;
+    for event in events {
+        stream.send_async(event).await?;
+    }
+    Ok(())
 }
 
 async fn execute_response_bounded(
@@ -300,4 +339,61 @@ pub(super) async fn cancel_response(
         "personal_space_id": request.personal_space_id,
         "cancelled": cancelled,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
+
+    #[tokio::test]
+    async fn oversized_completion_fails_before_emitting_a_partial_terminal_sequence() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let stream = ResponseStream {
+            tx,
+            sequence: Arc::new(AtomicU64::new(0)),
+            transmitted_bytes: Arc::new(AtomicUsize::new(0)),
+        };
+        let output_text = "x".repeat(momo_core::MAX_RESPONSE_SSE_EVENT_BYTES + 1);
+        let response = MomoResponse {
+            id: "resp_large".to_owned(),
+            object: "response".to_owned(),
+            status: "completed".to_owned(),
+            model: "conversation".to_owned(),
+            output: vec![ResponseOutputItem::Message {
+                id: "msg_large".to_owned(),
+                role: "assistant".to_owned(),
+                status: "completed".to_owned(),
+                content: vec![momo_core::ResponseOutputContent::OutputText {
+                    text: output_text.clone(),
+                    annotations: Vec::new(),
+                }],
+            }],
+            output_text,
+            usage: momo_core::ResponseUsage::default(),
+            finish_reason: Some("stop".to_owned()),
+            momo: momo_core::MomoResponseMetadata {
+                schema: momo_core::MOMO_RESPONSE_SCHEMA.to_owned(),
+                request_id: "large".to_owned(),
+                conversation_id: "conversation".to_owned(),
+                route: "conversation".to_owned(),
+                upstream_request_id: None,
+                warnings: Vec::new(),
+                state_audit: Value::Null,
+                request_audit: Value::Null,
+            },
+        };
+
+        let error = send_completed_events(&stream, "large", response)
+            .await
+            .expect_err("oversized terminal event");
+        assert!(rx.try_recv().is_err(), "terminal batch must be atomic");
+        send_stream_limit_failure(&stream, "large", error)
+            .await
+            .expect("failure event");
+        assert!(
+            rx.try_recv().is_ok(),
+            "failure event must remain deliverable"
+        );
+    }
 }

@@ -26,12 +26,28 @@ enum LsbExportPayload {
     Charx {
         input_path: String,
     },
+    PreservedCharacterSource {
+        owner_space_id: uuid::Uuid,
+        character_id: uuid::Uuid,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum LsbCarrierSource {
+    PreservedCharacterSource {
+        owner_space_id: uuid::Uuid,
+        character_id: uuid::Uuid,
+    },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmbedLsbImageRequest {
-    carrier_path: String,
+    #[serde(default)]
+    carrier_path: Option<String>,
+    #[serde(default)]
+    carrier: Option<LsbCarrierSource>,
     output_path: String,
     format: crate::LsbImageFormat,
     payload: LsbExportPayload,
@@ -54,20 +70,59 @@ struct LsbFileReport {
     format: crate::LsbImageFormat,
     payload_type: crate::LsbPayloadType,
     bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_format: Option<crate::ExternalCharacterImportFormat>,
 }
 
 pub async fn embed_lsb_image_json(request_json: String) -> Result<String, String> {
+    embed_lsb_image_json_with_core(core()?, request_json).await
+}
+
+async fn embed_lsb_image_json_with_core(
+    core: &crate::MomoCore,
+    request_json: String,
+) -> Result<String, String> {
     let request: EmbedLsbImageRequest =
         serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
-    validate_image_extension(&request.carrier_path, request.format)?;
     validate_image_extension(&request.output_path, request.format)?;
-    let carrier = read_bounded_file(&request.carrier_path, crate::MAX_LSB_IMAGE_BYTES as u64)?;
-    let (payload_type, payload) = match request.payload {
+    let carrier = match (request.carrier_path, request.carrier) {
+        (Some(path), None) => {
+            validate_image_extension(&path, request.format)?;
+            read_bounded_file(path, crate::MAX_LSB_IMAGE_BYTES as u64)?
+        }
+        (
+            None,
+            Some(LsbCarrierSource::PreservedCharacterSource {
+                owner_space_id,
+                character_id,
+            }),
+        ) => {
+            let source = crate::read_preserved_character_source(core, owner_space_id, character_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !matches!(
+                source.source_format,
+                crate::ExternalCharacterImportFormat::Ccv1Png
+                    | crate::ExternalCharacterImportFormat::Ccv2Png
+                    | crate::ExternalCharacterImportFormat::Ccv3Png
+            ) || request.format != crate::LsbImageFormat::Png
+            {
+                return Err(
+                    "a preserved LSB carrier must be an imported PNG and use format png".to_owned(),
+                );
+            }
+            source.bytes
+        }
+        _ => {
+            return Err("exactly one of carrier_path or carrier must be provided".to_owned());
+        }
+    };
+    let (payload_type, payload, source_format) = match request.payload {
         LsbExportPayload::MomoCharacter {
             owner_space_id,
             character_id,
         } => {
-            let character = core()?
+            let character = core
                 .store()
                 .list_characters_for_scope(owner_space_id)
                 .await
@@ -80,7 +135,7 @@ pub async fn embed_lsb_image_json(request_json: String) -> Result<String, String
                 "character": character,
             }))
             .map_err(|error| error.to_string())?;
-            (crate::LsbPayloadType::CharacterData, bytes)
+            (crate::LsbPayloadType::CharacterData, bytes, None)
         }
         LsbExportPayload::Moc { input_path } => {
             let path = Path::new(&input_path);
@@ -88,6 +143,7 @@ pub async fn embed_lsb_image_json(request_json: String) -> Result<String, String
             (
                 crate::LsbPayloadType::Moc,
                 read_bounded_file(path, MAX_LSB_SOURCE_FILE_BYTES)?,
+                None,
             )
         }
         LsbExportPayload::Charx { input_path } => {
@@ -96,7 +152,30 @@ pub async fn embed_lsb_image_json(request_json: String) -> Result<String, String
             (
                 crate::LsbPayloadType::Charx,
                 read_bounded_file(path, MAX_LSB_SOURCE_FILE_BYTES)?,
+                None,
             )
+        }
+        LsbExportPayload::PreservedCharacterSource {
+            owner_space_id,
+            character_id,
+        } => {
+            let source = crate::read_preserved_character_source(core, owner_space_id, character_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let payload_type = match source.source_format {
+                crate::ExternalCharacterImportFormat::Ccv1Json
+                | crate::ExternalCharacterImportFormat::Ccv2Json
+                | crate::ExternalCharacterImportFormat::Ccv3Json => {
+                    crate::LsbPayloadType::ExternalCharacterJson
+                }
+                crate::ExternalCharacterImportFormat::Ccv1Png
+                | crate::ExternalCharacterImportFormat::Ccv2Png
+                | crate::ExternalCharacterImportFormat::Ccv3Png => {
+                    crate::LsbPayloadType::ExternalCharacterPng
+                }
+                crate::ExternalCharacterImportFormat::Ccv3Charx => crate::LsbPayloadType::Charx,
+            };
+            (payload_type, source.bytes, Some(source.source_format))
         }
     };
     let output = crate::embed_lsb_image(
@@ -113,6 +192,7 @@ pub async fn embed_lsb_image_json(request_json: String) -> Result<String, String
         format: request.format,
         payload_type,
         bytes: output.len(),
+        source_format,
     })
     .map_err(|error| error.to_string())
 }
@@ -136,6 +216,7 @@ pub async fn extract_lsb_image_json(request_json: String) -> Result<String, Stri
         format: request.format,
         payload_type: payload.payload_type,
         bytes: payload.bytes.len(),
+        source_format: None,
     })
     .map_err(|error| error.to_string())
 }
@@ -190,3 +271,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| error.error.to_string())?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/api_simple_lsb.rs"]
+mod tests;

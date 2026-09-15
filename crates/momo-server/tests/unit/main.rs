@@ -143,6 +143,75 @@ async fn response_json_rejections_use_the_unified_error_envelope() {
 }
 
 #[tokio::test]
+async fn imported_momo_config_updates_the_live_service() {
+    let _test_guard = TEST_LOCK.lock().await;
+    let initialized_dir = initialize_test_core().await;
+    let live_config_path = std::path::Path::new(&initialized_dir).join("config/momo.toml");
+    let original_config = std::fs::read(&live_config_path).ok();
+    let momo_api = test_momo_api("http://127.0.0.1:9/v1");
+    let app = build_app(AppState {
+        data_dir: initialized_dir,
+        momo_api: Arc::clone(&momo_api),
+        response_concurrency: Arc::new(Semaphore::new(8)),
+        response_timeout: std::time::Duration::from_secs(120),
+        metrics: Arc::new(Mutex::new(HashMap::new())),
+    });
+    let input_path = TEST_DATA_DIR
+        .path()
+        .join(format!("runtime-{}.toml", simple::new_request_id()));
+    let export = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/momo-config/export")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "output_path": input_path,
+                        "settings": {
+                            "runtime": {
+                                "memory_distill_every_turns": 13,
+                                "nsg_govern_every_turns": 17
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("config export request"),
+        )
+        .await
+        .expect("config export response");
+    assert_eq!(export.status(), StatusCode::OK);
+
+    let imported = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/momo-config/import")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"input_path": input_path}).to_string()))
+                .expect("config import request"),
+        )
+        .await
+        .expect("config import response");
+    assert_eq!(imported.status(), StatusCode::OK);
+    assert_eq!(
+        momo_api.maintenance_batch_limit(momo_core::MaintenanceKind::Memory),
+        13
+    );
+    assert_eq!(
+        momo_api.maintenance_batch_limit(momo_core::MaintenanceKind::SemanticGraph),
+        17
+    );
+    if let Some(original_config) = original_config {
+        std::fs::write(live_config_path, original_config).expect("restore config");
+    } else if live_config_path.exists() {
+        std::fs::remove_file(live_config_path).expect("remove test config");
+    }
+}
+
+#[tokio::test]
 async fn http_core_contract_and_character_round_trip() {
     let _test_guard = TEST_LOCK.lock().await;
     let initialized_dir = initialize_test_core().await;

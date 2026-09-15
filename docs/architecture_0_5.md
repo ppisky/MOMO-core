@@ -114,9 +114,12 @@ profile), not a boolean. Unsupported combinations fail before any output file
 is created.
 
 `lsb_image` has one carrier and one payload. The payload is one of native MOMO
-character data, a complete MOC, or a complete CHARX. When the payload is MOC,
-no metadata is appended after the image and no second compatibility payload is
-embedded.
+character data, a complete MOC, a complete CHARX, or the exact preserved JSON/PNG
+source of an imported external character. A preserved imported PNG can also be
+selected directly as the carrier. The requested artifact kind is authoritative:
+Core does not silently substitute a converted character, MOC, or source format.
+When the payload is MOC, no metadata is appended after the image and no second
+compatibility payload is embedded.
 
 ## 5. Media and container formats
 

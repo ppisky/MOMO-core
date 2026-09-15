@@ -201,6 +201,27 @@ fn explicit_drain_uses_configured_maintenance_batch_limits() {
         11
     );
 }
+
+#[test]
+fn imported_runtime_config_replaces_the_live_service_snapshot() {
+    let service = MomoApiService::new(
+        "http://127.0.0.1:9/v1",
+        None,
+        reqwest::Client::new(),
+        Arc::new(MomoConfig::default()),
+    );
+    let mut imported = MomoConfig::default();
+    imported.runtime.memory_distill_every_turns = 13;
+    imported.runtime.nsg_govern_every_turns = 17;
+
+    service.update_config(imported).expect("valid live config");
+
+    assert_eq!(service.maintenance_batch_limit(MaintenanceKind::Memory), 13);
+    assert_eq!(
+        service.maintenance_batch_limit(MaintenanceKind::SemanticGraph),
+        17
+    );
+}
 use futures_util::{FutureExt, future::BoxFuture};
 
 #[derive(Debug)]
@@ -294,7 +315,7 @@ async fn governed_vision_adapter_resolves_images_to_retryable_text() {
     }))
     .expect("request");
     let governed = service
-        .config
+        .config_snapshot()
         .govern(
             8_192,
             1_024,
@@ -368,7 +389,7 @@ async fn multimodal_chat_uses_original_images_without_vision_prompt() {
     }))
     .expect("request");
     let governed = service
-        .config
+        .config_snapshot()
         .govern(
             8_192,
             1_024,

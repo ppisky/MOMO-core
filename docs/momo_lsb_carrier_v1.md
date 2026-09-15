@@ -20,14 +20,16 @@ alpha 通道不参与编码，也不在文件尾追加第二个文件或隐藏�
 | 0 | 8 | ASCII magic `MOMOLSB1` |
 | 8 | 1 | version，固定为 `1` |
 | 9 | 1 | flags；bit 0 表示使用 Zstandard 算法压缩载荷，其他位必须为 0 |
-| 10 | 1 | payload type：1=基线角色数据，2=MOC，3=CHARX |
+| 10 | 1 | payload type：1=基线角色数据，2=MOC，3=CHARX，4=原始外部角色 JSON，5=原始外部角色 PNG |
 | 11 | 1 | reserved，写 0 |
 | 12 | 4 | stored payload length |
 | 16 | 4 | original payload length |
 | 20 | 4 | 解压后载荷的 CRC32 |
 
-基线推荐 payload type 1，并使用 Zstandard 算法压缩。MOC 或 CHARX 只有在调用方明确选择且图片
-容量足够时才可嵌入。实现必须限制声明长度和解压后大小，先校验完整性再解析角色数据。
+基线推荐 payload type 1，并使用 Zstandard 算法压缩。MOC、CHARX 或保存的原始外部角色
+文件只有在调用方明确选择且图片容量足够时才可嵌入。Type 4/5 解压后的字节必须与导入时
+保存的 JSON/PNG 来源逐字节一致；CCv3 CHARX 来源继续使用 Type 3。实现必须限制声明长度和
+解压后大小，先校验完整性再解析角色数据。
 每张载体只含一个 payload；MOC payload 是完整 `.moc` 字节，图片尾部不追加 metadata
 或第二份兼容数据。
 
@@ -56,7 +58,33 @@ Type 1 的解压后字节必须是 UTF-8 JSON，结构固定为：
 
 `schema` 必须显式存在并精确等于 `momo.character/1.0`。未知顶层字段不属于该版本。
 `owner_space_id` 是管理与导出归属，不改变全局 `character.id`。Type 1 不携带 CHARX
-资产或来源扩展；需要完整来源往返时应使用 Type 2 MOC 或 Type 3 CHARX。
+资产或来源扩展；需要完整来源往返时应使用 Type 2 MOC、Type 3 CHARX，或 Type 4/5
+保存的原始来源。
+
+## 文件接口的显式来源选择
+
+`POST /v1/lsb/embed` 保留原有 `carrier_path`。调用方也可以用 `carrier` 明确选择已保存的
+外部角色 PNG；JSON/CHARX 不能充当图片载体：
+
+```json
+{
+  "carrier": {
+    "type": "preserved_character_source",
+    "owner_space_id": "<space-uuid>",
+    "character_id": "<png-character-uuid>"
+  },
+  "output_path": "D:/cards/carrier.png",
+  "format": "png",
+  "payload": {
+    "type": "preserved_character_source",
+    "owner_space_id": "<space-uuid>",
+    "character_id": "<source-character-uuid>"
+  }
+}
+```
+
+`carrier_path` 与 `carrier` 必须二选一。`payload.type` 仍可明确选择 `momo_character`、
+`moc`、`charx` 或 `preserved_character_source`；服务不会在这些产物之间隐式转换。
 
 ## 可移植性边界
 
