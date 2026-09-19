@@ -78,6 +78,22 @@ fn automatic_creation_requires_draft_and_rejects_unknown_fields() {
 }
 
 #[test]
+fn validation_checks_current_graph_without_writing() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");
+
+    workspace.validate_patch(CREATE_DRAFT).expect("valid patch");
+    assert!(!root.path().join("lore/black_flame.nsg").exists());
+
+    let unauthorized = CREATE_DRAFT.replace("mode: \"draft\"", "mode: \"canon\"");
+    assert!(matches!(
+        workspace.validate_patch(&unauthorized),
+        Err(MemoryError::InvalidPatch(_))
+    ));
+    assert!(!root.path().join("lore/black_flame.nsg").exists());
+}
+
+#[test]
 fn retrieval_matches_terms_inside_multiword_anchors() {
     let root = tempfile::tempdir().expect("root");
     let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");

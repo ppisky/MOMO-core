@@ -402,14 +402,25 @@ impl NsgWorkspace {
     }
 
     pub fn apply_patch(&self, yaml: &str) -> Result<(), MemoryError> {
-        self.apply_patch_inner(yaml, false)
+        let mutations = self.prepare_patch(yaml, false)?;
+        commit_mutations(&mutations)
     }
 
     pub fn apply_patch_authorized(&self, yaml: &str) -> Result<(), MemoryError> {
-        self.apply_patch_inner(yaml, true)
+        let mutations = self.prepare_patch(yaml, true)?;
+        commit_mutations(&mutations)
     }
 
-    fn apply_patch_inner(&self, yaml: &str, authorized: bool) -> Result<(), MemoryError> {
+    /// Checks an automatic patch against the current graph without writing it.
+    pub fn validate_patch(&self, yaml: &str) -> Result<(), MemoryError> {
+        self.prepare_patch(yaml, false).map(|_| ())
+    }
+
+    fn prepare_patch(
+        &self,
+        yaml: &str,
+        authorized: bool,
+    ) -> Result<Vec<FileMutation>, MemoryError> {
         let patch: NsgPatchDocument = yaml_serde::from_str(yaml)?;
         let mut touched = HashSet::new();
         let mut mutations = Vec::new();
@@ -503,7 +514,7 @@ impl NsgWorkspace {
                 content: node.encode()?.into_bytes(),
             });
         }
-        commit_mutations(&mutations)
+        Ok(mutations)
     }
 
     pub fn retrieve(
