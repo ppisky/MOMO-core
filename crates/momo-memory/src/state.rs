@@ -18,7 +18,10 @@ use crate::{
 
 mod ddm_projection;
 
-use ddm_projection::{context_cues as ddm_context_cues, signals as ddm_signals};
+use ddm_projection::{
+    constraint_cues as ddm_constraint_cues, disposition_cues as ddm_disposition_cues,
+    signals as ddm_signals,
+};
 
 const CONTRACT_MAX_SIZE: u64 = 65_536;
 const STATE_CONTEXT_TOKEN_RATIO: usize = 10;
@@ -236,23 +239,45 @@ impl MemoryWorkspace {
                 .map(|runtime| runtime.previous_bands.clone())
                 .unwrap_or_default();
             let ddm_audit = profile.evaluate_with_previous(&ddm_signals, &previous_bands);
-            let cues = ddm_context_cues(&ddm_audit);
+            let constraints = ddm_constraint_cues(&ddm_audit);
+            if !constraints.is_empty() {
+                ordered.push(("ddm_constraints".to_owned(), constraints));
+            }
+            let cues = ddm_disposition_cues(&ddm_audit);
             if !cues.is_empty() {
                 ordered.push(("effective_dispositions".to_owned(), cues));
             }
             audit.ddm = Some(ddm_audit);
         }
         let budget = max_context_tokens.saturating_mul(STATE_CONTEXT_TOKEN_RATIO) / 100;
-        if trim_to_budget(&mut ordered, budget, counter) {
+        let had_disposition_cues = ordered
+            .iter()
+            .any(|(dimension, _)| dimension == "effective_dispositions");
+        let constraints_overflowed = trim_to_budget(&mut ordered, budget, counter);
+        if constraints_overflowed {
             audit.degraded = true;
             audit.warnings.push(
-                "scene constraints alone exceed the MO State token budget; state context omitted"
+                "non-removable state constraints exceed the MO State token budget; state context omitted"
+                    .to_owned(),
+            );
+        } else if had_disposition_cues
+            && !ordered
+                .iter()
+                .any(|(dimension, _)| dimension == "effective_dispositions")
+        {
+            audit.warnings.push(
+                "optional DDM disposition cues were omitted to fit the MO State token budget"
                     .to_owned(),
             );
         }
         audit.dimensions_active = ordered
             .iter()
-            .filter(|(dimension, _)| dimension != "effective_dispositions")
+            .filter(|(dimension, _)| {
+                !matches!(
+                    dimension.as_str(),
+                    "ddm_constraints" | "effective_dispositions"
+                )
+            })
             .count();
         audit.directives_emitted = ordered.iter().map(|(_, values)| values.len()).sum();
         let context = format_state_context(&ordered);

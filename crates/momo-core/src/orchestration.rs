@@ -1270,14 +1270,14 @@ impl MomoApiService {
                 } else {
                     None
                 };
-                let profile_revision = ddm_profile_json
+                let profile_identity = ddm_profile_json
                     .as_deref()
                     .map(serde_json::from_str::<momo_memory::DdmProfile>)
                     .transpose()
                     .map_err(|error| MomoApiError::internal(error.to_string()))?
-                    .map(|profile| profile.revision);
+                    .map(|profile| (profile.revision, profile.profile_fingerprint()));
                 let previous_bands =
-                    compatible_ddm_bands(previous_ddm_state.as_ref(), profile_revision);
+                    compatible_ddm_bands(previous_ddm_state.as_ref(), profile_identity.as_ref());
                 let observed_scene = mo_state_operation
                     .as_ref()
                     .map(|operation| operation.observed_scene.clone())
@@ -1343,6 +1343,7 @@ impl MomoApiService {
                                 "conversation_id": conversation_id,
                                 "character_id": character_id,
                                 "profile_revision": ddm["profile_revision"],
+                                "profile_fingerprint": ddm["profile_fingerprint"],
                                 "source_fingerprint": ddm["source_fingerprint"],
                                 "bands": ddm["next_bands"],
                             })
@@ -2031,9 +2032,14 @@ fn state_context_for_prompt(
     )
 }
 
-fn compatible_ddm_bands(state: Option<&Value>, profile_revision: Option<u64>) -> Value {
+fn compatible_ddm_bands(state: Option<&Value>, profile_identity: Option<&(u64, String)>) -> Value {
     state
-        .filter(|state| state["profile_revision"].as_u64() == profile_revision)
+        .filter(|state| {
+            profile_identity.is_some_and(|(revision, fingerprint)| {
+                state["profile_revision"].as_u64() == Some(*revision)
+                    && state["profile_fingerprint"].as_str() == Some(fingerprint.as_str())
+            })
+        })
         .and_then(|state| state.get("bands"))
         .cloned()
         .unwrap_or_else(|| json!({}))

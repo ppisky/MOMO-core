@@ -131,6 +131,8 @@ pub struct DdmProjectionState {
     pub conversation_id: String,
     pub character_id: String,
     pub profile_revision: u64,
+    #[serde(default)]
+    pub profile_fingerprint: String,
     pub source_fingerprint: String,
     pub bands: BTreeMap<String, String>,
     pub updated_at: DateTime<Utc>,
@@ -142,6 +144,7 @@ pub struct DdmProjectionUpdate {
     pub conversation_id: String,
     pub character_id: String,
     pub profile_revision: u64,
+    pub profile_fingerprint: String,
     pub source_fingerprint: String,
     pub bands: BTreeMap<String, String>,
 }

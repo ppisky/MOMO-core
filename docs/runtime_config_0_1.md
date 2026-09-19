@@ -114,12 +114,16 @@ kind/tag, NSG node, active MO State dimension, governed scene status/
 participants/source references, and validated request event/image facts. It
 never infers numeric dispositions from conversation prose. Previous activation
 bands persist per managed Space, conversation, and character to provide
-hysteresis, and a profile revision change resets that history.
+hysteresis. A profile revision or deterministic typed-profile fingerprint
+change resets that history, and deleting the profile clears it.
 
 Model-facing context receives only authored expression cues and hard
-constraints. Numeric activation, matched rules, evidence IDs, suppressed
-dispositions, previous/next bands, hysteresis decisions, and a normalized
-source fingerprint remain in state audit. See
+constraints. Hard constraints have non-removable state-budget priority;
+optional disposition cues are trimmed first, and a constraint overflow degrades
+the projection instead of being reported as active. Numeric activation, matched
+rules, evidence IDs, suppressed dispositions, previous/next bands, hysteresis
+decisions, a deterministic profile fingerprint, and a normalized source
+fingerprint remain in state audit. See
 [`ddm_implementation_status.md`](ddm_implementation_status.md).
 
 ## Role-play runtime

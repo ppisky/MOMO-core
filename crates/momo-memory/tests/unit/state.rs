@@ -100,9 +100,41 @@ dispositions:
     let ddm = context.audit.ddm.expect("DDM audit");
     assert_eq!(ddm.character_id, "018f0000-0000-7000-8000-000000000001");
     assert_eq!(ddm.profile_revision, 7);
+    assert_eq!(ddm.profile_fingerprint, profile.profile_fingerprint());
     assert_eq!(
         ddm.effective_dispositions[0].matched_rule_ids,
         ["immediate_danger"]
+    );
+}
+
+#[test]
+fn ddm_constraints_survive_optional_cue_budget_trimming() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    let profile = DdmProfile::parse_yaml(&format!(
+        "schema: momo.ddm/1\ncharacter_id: character-1\nrevision: 1\nprofile: logit_additive\ndispositions:\n  - id: focus\n    base_activation: 0.7\n    expression:\n      latent: {cue}\n      salient: {cue}\n      dominant: {cue}\n    constraints:\n      - preserve_user_agency\n",
+        cue = "optional_cue ".repeat(100)
+    ))
+    .expect("profile");
+    let context = workspace
+        .compile_mo_state_with_ddm(
+            &[],
+            &[],
+            2_000,
+            &ConservativeTokenCounter,
+            Some(&profile),
+            None,
+        )
+        .expect("compile");
+    assert!(context.context.contains("preserve_user_agency"));
+    assert!(!context.context.contains("optional_cue"));
+    assert!(!context.audit.degraded);
+    assert!(
+        context
+            .audit
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("optional DDM disposition cues"))
     );
 }
 

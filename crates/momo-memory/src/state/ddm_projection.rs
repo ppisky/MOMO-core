@@ -118,19 +118,25 @@ fn signal_component(value: &str) -> Option<String> {
     (!value.is_empty() && value.len() <= 128).then_some(value)
 }
 
-pub(super) fn context_cues(audit: &DdmAudit) -> Vec<String> {
-    let mut output = audit
+pub(super) fn constraint_cues(audit: &DdmAudit) -> Vec<String> {
+    audit
         .constraints
         .iter()
         .map(|constraint| format!("Constraint — {}", constraint.trim()))
-        .collect::<Vec<_>>();
-    output.extend(audit.effective_dispositions.iter().map(|disposition| {
-        let band = match disposition.band {
-            DdmBand::Latent => "Latent",
-            DdmBand::Salient => "Salient",
-            DdmBand::Dominant => "Dominant",
-        };
-        format!("{band} — {}: {}", disposition.id, disposition.cue)
-    }));
-    output
+        .collect()
+}
+
+pub(super) fn disposition_cues(audit: &DdmAudit) -> Vec<String> {
+    audit
+        .effective_dispositions
+        .iter()
+        .map(|disposition| {
+            let band = match disposition.band {
+                DdmBand::Latent => "Latent",
+                DdmBand::Salient => "Salient",
+                DdmBand::Dominant => "Dominant",
+            };
+            format!("{band} — {}: {}", disposition.id, disposition.cue)
+        })
+        .collect()
 }

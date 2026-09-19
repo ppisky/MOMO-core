@@ -17,14 +17,25 @@ fn maintenance_rejects_mutated_opaque_identifiers() {
 fn ddm_previous_bands_reset_when_the_profile_revision_changes() {
     let state = json!({
         "profile_revision": 7,
+        "profile_fingerprint": "sha256:profile-a",
         "bands": {"protect_companion": "dominant"}
     });
     assert_eq!(
-        compatible_ddm_bands(Some(&state), Some(7)),
+        compatible_ddm_bands(Some(&state), Some(&(7, "sha256:profile-a".to_owned()))),
         json!({"protect_companion": "dominant"})
     );
-    assert_eq!(compatible_ddm_bands(Some(&state), Some(8)), json!({}));
-    assert_eq!(compatible_ddm_bands(None, Some(7)), json!({}));
+    assert_eq!(
+        compatible_ddm_bands(Some(&state), Some(&(8, "sha256:profile-a".to_owned()))),
+        json!({})
+    );
+    assert_eq!(
+        compatible_ddm_bands(Some(&state), Some(&(7, "sha256:profile-b".to_owned()))),
+        json!({})
+    );
+    assert_eq!(
+        compatible_ddm_bands(None, Some(&(7, "sha256:profile-a".to_owned()))),
+        json!({})
+    );
 }
 
 #[test]

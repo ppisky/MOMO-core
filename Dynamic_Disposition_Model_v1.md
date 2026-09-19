@@ -175,6 +175,14 @@ dispositions:
       - Never decide the companion's voluntary actions for them.
 ```
 
+`revision` MUST be an integer in `1..=9223372036854775807` so profiles remain
+portable across stores with signed 64-bit integer revisions. Implementations
+MUST reject a multiplicative profile when the product of all independently
+matchable amplifying rules could overflow a finite runtime number. The encoded
+profile MUST be non-empty UTF-8 no larger than 64 KiB and MUST NOT contain NUL
+bytes. Disposition IDs, rule IDs, and exclusive-group IDs use lowercase ASCII
+letters, digits, `_`, `-`, `.`, and `:`, with a maximum of 128 bytes.
+
 Numbers are authoring controls, not universal psychological measurements.
 Profiles MAY expose qualitative values such as `low`, `medium`, and `high` and
 compile them to documented defaults. Exact values MUST NOT imply scientific
@@ -236,10 +244,16 @@ mutually exclusive group.
 A conforming evaluator MUST define band thresholds and hysteresis so small input
 changes cannot cause uncontrolled band oscillation. The previous bands MUST be
 persisted at `(managed_space_id, conversation_id, character_id)`, invalidated by
-a profile revision change, and updated atomically with the published MO State
-snapshot. Promotion of this specification from experimental still requires
-broader interoperability and behavior evidence; persisted hysteresis alone does
-not make it stable.
+a profile revision or deterministic typed-profile fingerprint change, and updated
+atomically with the published MO State snapshot. Deleting a profile MUST delete
+its persisted band history. Promotion of this specification from experimental
+still requires broader interoperability and behavior evidence; persisted
+hysteresis alone does not make it stable.
+
+Authored hard constraints MUST be budgeted separately from optional disposition
+cues. A compiler MAY drop optional cues to fit its state-context budget, but it
+MUST NOT silently drop hard constraints; inability to fit the non-removable
+constraints is a degraded projection and MUST be visible in audit.
 
 An initial Core integration SHOULD append a `## Effective dispositions`
 subsection inside the existing `[STATE_CONTEXT]` block. A future wire revision
@@ -267,13 +281,14 @@ audit data equivalent to:
 effective_dispositions:
   - id: protect_companion
     base_activation: 0.72
-    context_delta: 0.90
-    state_delta: -0.35
+    context_effect: 0.90
+    state_effect: -0.35
     effective_activation: 0.82
     band: salient
     matched_rule_ids: [immediate_danger, exhausted]
     evidence_ids: [event:01J...]
-ddm_profile_revision: 1
+profile_revision: 1
+profile_fingerprint: sha256:...
 previous_bands: {protect_companion: latent}
 next_bands: {protect_companion: salient}
 hysteresis_applied: []
@@ -281,12 +296,18 @@ suppressed_disposition_ids: []
 source_fingerprint: sha256:...
 ```
 
+`context_effect` and `state_effect` contain summed deltas for the
+logit-additive profile and multiplier products for the multiplicative profile.
+
 The model-facing context MUST NOT expose private audit identifiers, numeric
 reasoning traces, or hidden control-plane data. The audit MUST preserve enough
-information for deterministic replay and diagnosis. `source_fingerprint` MUST
-bind the normalized signal snapshot and the previous-band map used by the
-evaluation; the MO State source-version audit separately binds retrieved DMW,
-NSG, and scene bodies under one ordered lock window.
+information for deterministic replay and diagnosis. `profile_fingerprint` MUST
+bind a deterministic serialization of the validated typed profile.
+`source_fingerprint` MUST bind the profile, normalized signal snapshot, and
+previous-band map used by the evaluation;
+logically set-valued evidence IDs MUST be ordered before hashing. The MO State
+source-version audit separately binds retrieved DMW, NSG, and scene bodies under
+one ordered lock window.
 
 ## 8. Required invariants and tests
 
@@ -302,9 +323,11 @@ A conforming implementation MUST verify:
 - expected positive and negative effects are monotonic;
 - projection never writes back into the base profile.
 
-Conformance tests MUST also cover persisted hysteresis, profile-revision reset,
+Conformance tests MUST also cover persisted hysteresis, profile-identity reset,
+profile deletion, revision storage bounds, finite multiplicative aggregation,
 closed scene/request signal typing, deterministic exclusive-group selection,
-top-k suppression, and atomic publication of the snapshot and next-band state.
+top-k suppression, hard-constraint budget priority, and atomic publication of
+the snapshot and next-band state.
 
 MORP-Bench MAY evaluate DDM with counterfactual pairs: keep the character,
 history, request, and all other signals fixed, then change one context or state

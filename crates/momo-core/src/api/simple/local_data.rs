@@ -378,13 +378,9 @@ pub async fn delete_character_ddm_profile(
     {
         return Err("character does not belong to scope".to_owned());
     }
-    sqlx_delete_portable_metadata(DDM_PROFILE_METADATA_KIND, &character_id.to_string()).await
-}
-
-async fn sqlx_delete_portable_metadata(kind: &str, object_id: &str) -> Result<(), String> {
     core()?
         .store()
-        .delete_portable_metadata(kind, object_id)
+        .delete_character_ddm_profile(&character_id.to_string())
         .await
         .map_err(|error| error.to_string())
 }

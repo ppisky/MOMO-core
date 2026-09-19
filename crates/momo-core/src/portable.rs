@@ -1332,7 +1332,7 @@ async fn import_characters(
                 .await?;
         } else {
             core.store()
-                .delete_portable_metadata(DDM_PROFILE_METADATA_KIND, &id.to_string())
+                .delete_character_ddm_profile(&id.to_string())
                 .await?;
         }
         report.characters_imported += 1;

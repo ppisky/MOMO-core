@@ -813,6 +813,7 @@ impl LocalStore {
             return serde_json::from_str(&snapshot).map_err(Into::into);
         }
         let state_result: serde_json::Value = serde_json::from_str(state_result_json)?;
+        validate_ddm_projection_update(&operation, &state_result, ddm_update)?;
         let space_row = sqlx::query(
             "SELECT profile, dmw_revision, nsg_revision, scene_revision, snapshot_revision, \
              dmw_fingerprint, nsg_fingerprint, scene_fingerprint, scene_json \
@@ -893,9 +894,11 @@ impl LocalStore {
             sqlx::query(
                 "INSERT INTO ddm_projection_states \
                  (managed_space_id, conversation_id, character_id, profile_revision, \
-                  source_fingerprint, bands_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) \
+                  profile_fingerprint, source_fingerprint, bands_json, updated_at) \
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(managed_space_id, conversation_id, character_id) DO UPDATE SET \
                   profile_revision=excluded.profile_revision, \
+                  profile_fingerprint=excluded.profile_fingerprint, \
                   source_fingerprint=excluded.source_fingerprint, \
                   bands_json=excluded.bands_json, updated_at=excluded.updated_at",
             )
@@ -907,6 +910,7 @@ impl LocalStore {
                     "DDM profile revision exceeds SQLite range".to_owned(),
                 )
             })?)
+            .bind(&update.profile_fingerprint)
             .bind(&update.source_fingerprint)
             .bind(&bands_json)
             .bind(&now)
@@ -925,7 +929,8 @@ impl LocalStore {
     ) -> Result<Option<DdmProjectionState>, StorageError> {
         let row = sqlx::query(
             "SELECT managed_space_id, conversation_id, character_id, profile_revision, \
-             source_fingerprint, bands_json, updated_at FROM ddm_projection_states \
+             profile_fingerprint, source_fingerprint, bands_json, updated_at \
+             FROM ddm_projection_states \
              WHERE managed_space_id=? AND conversation_id=? AND character_id=?",
         )
         .bind(managed_space_id)
@@ -939,6 +944,7 @@ impl LocalStore {
                 conversation_id: row.try_get("conversation_id")?,
                 character_id: row.try_get("character_id")?,
                 profile_revision: to_revision(row.try_get("profile_revision")?)?,
+                profile_fingerprint: row.try_get("profile_fingerprint")?,
                 source_fingerprint: row.try_get("source_fingerprint")?,
                 bands: serde_json::from_str(&row.try_get::<String, _>("bands_json")?)?,
                 updated_at: parse_timestamp(row.try_get("updated_at")?)?,
@@ -1638,6 +1644,25 @@ impl LocalStore {
         Ok(())
     }
 
+    pub async fn delete_character_ddm_profile(
+        &self,
+        character_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM portable_metadata WHERE kind='character_ddm_profile' AND object_id=?",
+        )
+        .bind(character_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM ddm_projection_states WHERE character_id=?")
+            .bind(character_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn create_memory_patch_review(
         &self,
         scope_id: Uuid,
@@ -1860,6 +1885,64 @@ impl LocalStore {
         transaction.commit().await?;
         Ok(())
     }
+}
+
+fn validate_ddm_projection_update(
+    operation: &MoStateOperation,
+    state_result: &serde_json::Value,
+    update: Option<&DdmProjectionUpdate>,
+) -> Result<(), StorageError> {
+    let audit = state_result
+        .pointer("/audit/ddm")
+        .filter(|value| !value.is_null());
+    let Some(update) = update else {
+        return if audit.is_none() {
+            Ok(())
+        } else {
+            Err(StorageError::MoStateOperationConflict(
+                "DDM audit is missing its atomic projection update".to_owned(),
+            ))
+        };
+    };
+    let Some(audit) = audit else {
+        return Err(StorageError::MoStateOperationConflict(
+            "DDM projection update has no matching audit".to_owned(),
+        ));
+    };
+    let bands = serde_json::to_value(&update.bands)?;
+    let matches_audit = update.managed_space_id == operation.space_id
+        && update.profile_revision > 0
+        && valid_sha256_fingerprint(&update.profile_fingerprint)
+        && valid_sha256_fingerprint(&update.source_fingerprint)
+        && update.bands.iter().all(|(id, band)| {
+            !id.trim().is_empty() && matches!(band.as_str(), "latent" | "salient" | "dominant")
+        })
+        && audit
+            .get("profile_revision")
+            .and_then(serde_json::Value::as_u64)
+            == Some(update.profile_revision)
+        && audit
+            .get("profile_fingerprint")
+            .and_then(serde_json::Value::as_str)
+            == Some(update.profile_fingerprint.as_str())
+        && audit
+            .get("source_fingerprint")
+            .and_then(serde_json::Value::as_str)
+            == Some(update.source_fingerprint.as_str())
+        && audit.get("next_bands") == Some(&bands);
+    if matches_audit {
+        Ok(())
+    } else {
+        Err(StorageError::MoStateOperationConflict(
+            "DDM projection update does not match the MO State audit".to_owned(),
+        ))
+    }
+}
+
+fn valid_sha256_fingerprint(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 fn next_revision(current: i64, previous_fingerprint: String, fingerprint: &str) -> i64 {

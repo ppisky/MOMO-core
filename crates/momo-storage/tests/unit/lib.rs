@@ -155,15 +155,28 @@ async fn ddm_hysteresis_state_is_scoped_and_published_atomically() {
         conversation_id: "01900000-0000-7000-8000-000000000301".to_owned(),
         character_id: "01900000-0000-7000-8000-000000000401".to_owned(),
         profile_revision: 3,
-        source_fingerprint: "sha256:ddm-a".to_owned(),
+        profile_fingerprint: format!("sha256:{}", "a".repeat(64)),
+        source_fingerprint: format!("sha256:{}", "b".repeat(64)),
         bands: [("protect_companion".to_owned(), "salient".to_owned())]
             .into_iter()
             .collect(),
     };
+    let state_result = serde_json::json!({
+        "context": "state",
+        "audit": {
+            "ddm": {
+                "profile_revision": update.profile_revision,
+                "profile_fingerprint": update.profile_fingerprint,
+                "source_fingerprint": update.source_fingerprint,
+                "next_bands": update.bands,
+            }
+        }
+    })
+    .to_string();
     store
         .publish_mo_state_snapshot(
             "ddm-state-operation",
-            r#"{"context":"state","audit":{}}"#,
+            &state_result,
             false,
             None,
             Some(&update),
@@ -190,6 +203,93 @@ async fn ddm_hysteresis_state_is_scoped_and_published_atomically() {
             )
             .await
             .expect("other conversation")
+            .is_none()
+    );
+    store
+        .save_portable_metadata(
+            "character_ddm_profile",
+            &update.character_id,
+            "profile fixture",
+        )
+        .await
+        .expect("save DDM profile metadata");
+    assert_eq!(state.profile_fingerprint, update.profile_fingerprint);
+    store
+        .delete_character_ddm_profile(&update.character_id)
+        .await
+        .expect("delete DDM profile state");
+    assert!(
+        store
+            .ddm_projection_state(
+                &update.managed_space_id,
+                &update.conversation_id,
+                &update.character_id,
+            )
+            .await
+            .expect("deleted state query")
+            .is_none()
+    );
+    assert!(
+        store
+            .portable_metadata("character_ddm_profile", &update.character_id)
+            .await
+            .expect("deleted profile query")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn ddm_projection_update_must_match_the_published_audit() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let observation = mo_state_observation("ddm-mismatch-operation", "event-ddm-mismatch");
+    store
+        .observe_mo_state_operation(&observation)
+        .await
+        .expect("observe");
+    let update = DdmProjectionUpdate {
+        managed_space_id: observation.space_id.clone(),
+        conversation_id: "01900000-0000-7000-8000-000000000311".to_owned(),
+        character_id: "01900000-0000-7000-8000-000000000411".to_owned(),
+        profile_revision: 3,
+        profile_fingerprint: format!("sha256:{}", "a".repeat(64)),
+        source_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        bands: [("protect_companion".to_owned(), "salient".to_owned())]
+            .into_iter()
+            .collect(),
+    };
+    let mismatched = serde_json::json!({
+        "context": "state",
+        "audit": {
+            "ddm": {
+                "profile_revision": update.profile_revision,
+                "profile_fingerprint": update.profile_fingerprint,
+                "source_fingerprint": format!("sha256:{}", "c".repeat(64)),
+                "next_bands": update.bands,
+            }
+        }
+    })
+    .to_string();
+    assert!(matches!(
+        store
+            .publish_mo_state_snapshot(
+                &observation.operation_id,
+                &mismatched,
+                false,
+                None,
+                Some(&update),
+            )
+            .await,
+        Err(StorageError::MoStateOperationConflict(_))
+    ));
+    assert!(
+        store
+            .ddm_projection_state(
+                &update.managed_space_id,
+                &update.conversation_id,
+                &update.character_id,
+            )
+            .await
+            .expect("state query")
             .is_none()
     );
 }

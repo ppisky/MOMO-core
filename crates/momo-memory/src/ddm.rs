@@ -15,6 +15,8 @@ const DEFAULT_TOP_K: usize = 3;
 const DEFAULT_SALIENT_THRESHOLD: f64 = 0.65;
 const DEFAULT_DOMINANT_THRESHOLD: f64 = 0.85;
 const DEFAULT_HYSTERESIS_MARGIN: f64 = 0.05;
+const MAX_PROFILE_REVISION: u64 = i64::MAX as u64;
+const MAX_PROFILE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -147,6 +149,8 @@ pub struct EffectiveDisposition {
 pub struct DdmAudit {
     pub character_id: String,
     pub profile_revision: u64,
+    #[serde(default)]
+    pub profile_fingerprint: String,
     pub constraints: Vec<String>,
     pub effective_dispositions: Vec<EffectiveDisposition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -179,12 +183,18 @@ impl DdmSignalSnapshot {
         let evidence = self.evidence.entry(id).or_default();
         if !evidence.contains(&evidence_id) {
             evidence.push(evidence_id);
+            evidence.sort();
         }
     }
 }
 
 impl DdmProfile {
     pub fn parse_yaml(text: &str) -> Result<Self, MemoryError> {
+        if text.is_empty() || text.len() > MAX_PROFILE_BYTES || text.as_bytes().contains(&0) {
+            return Err(invalid(
+                "DDM profile must be non-empty UTF-8 text no larger than 64 KiB without NUL bytes",
+            ));
+        }
         let profile: Self = yaml_serde::from_str(text)
             .map_err(|error| MemoryError::InvalidAccess(format!("invalid DDM profile: {error}")))?;
         profile.validate()?;
@@ -195,9 +205,12 @@ impl DdmProfile {
         if self.schema != "momo.ddm/1" {
             return Err(invalid("DDM schema must be momo.ddm/1"));
         }
-        if self.character_id.trim().is_empty() || self.revision == 0 {
+        if self.character_id.trim().is_empty()
+            || self.revision == 0
+            || self.revision > MAX_PROFILE_REVISION
+        {
             return Err(invalid(
-                "DDM character_id must be non-empty and revision must be positive",
+                "DDM character_id must be non-empty and revision must fit the positive signed 64-bit persistence range",
             ));
         }
         if self.dispositions.is_empty() || self.dispositions.len() > 64 {
@@ -218,7 +231,8 @@ impl DdmProfile {
         let mut disposition_ids = std::collections::BTreeSet::new();
         let mut rule_ids = std::collections::BTreeSet::new();
         for disposition in &self.dispositions {
-            if disposition.id.trim().is_empty()
+            let mut multiplicative_upper_bound = 1.0;
+            if !valid_identifier(&disposition.id)
                 || !disposition_ids.insert(disposition.id.as_str())
                 || !valid_activation(disposition.base_activation)
                 || disposition
@@ -256,7 +270,7 @@ impl DdmProfile {
                             && rule.delta.is_none()
                     }
                 };
-                if rule.id.trim().is_empty()
+                if !valid_identifier(&rule.id)
                     || rule.signal.trim().is_empty()
                     || !rule_ids.insert(rule.id.as_str())
                     || !valid_signal(&rule.signal, &rule.when)
@@ -265,9 +279,25 @@ impl DdmProfile {
                 {
                     return Err(invalid(format!("invalid DDM rule {}", rule.id)));
                 }
+                if let Some(multiplier) = rule.multiplier.filter(|value| *value > 1.0) {
+                    multiplicative_upper_bound *= multiplier;
+                    if !multiplicative_upper_bound.is_finite() {
+                        return Err(invalid(format!(
+                            "multiplicative DDM effects can overflow for disposition {}",
+                            disposition.id
+                        )));
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn profile_fingerprint(&self) -> String {
+        let bytes =
+            serde_json::to_vec(self).expect("serializing a validated DDM profile cannot fail");
+        format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
     }
 
     pub fn evaluate(&self, signals: &DdmSignalSnapshot) -> DdmAudit {
@@ -312,9 +342,9 @@ impl DdmProfile {
         let hysteresis_applied = effective
             .iter()
             .filter_map(|disposition| {
-                let previous = previous_bands.get(&disposition.id)?;
+                previous_bands.get(&disposition.id)?;
                 let raw = raw_band(self, disposition.effective_activation);
-                (*previous != raw && disposition.band == *previous).then(|| disposition.id.clone())
+                (disposition.band != raw).then(|| disposition.id.clone())
             })
             .collect::<Vec<_>>();
         let groups = self
@@ -353,6 +383,7 @@ impl DdmProfile {
         DdmAudit {
             character_id: self.character_id.clone(),
             profile_revision: self.revision,
+            profile_fingerprint: self.profile_fingerprint(),
             constraints,
             effective_dispositions: effective,
             suppressed_disposition_ids,
@@ -380,9 +411,13 @@ fn evaluate_disposition(
     evidence_ids.dedup();
     let effective_activation = match profile.profile {
         DdmCalculationProfile::LogitAdditive => {
-            let base = disposition.base_activation.clamp(1e-6, 1.0 - 1e-6);
-            let logit = (base / (1.0 - base)).ln();
-            1.0 / (1.0 + (-(logit + context_effect + state_effect)).exp())
+            if context_effect == 0.0 && state_effect == 0.0 {
+                disposition.base_activation
+            } else {
+                let base = disposition.base_activation.clamp(1e-6, 1.0 - 1e-6);
+                let logit = (base / (1.0 - base)).ln();
+                1.0 / (1.0 + (-(logit + context_effect + state_effect)).exp())
+            }
         }
         DdmCalculationProfile::Multiplicative => {
             (disposition.base_activation * context_effect * state_effect).clamp(0.0, 1.0)

@@ -41,6 +41,18 @@ fn neutral_and_missing_signals_preserve_base_activation() {
     let output = profile().evaluate(&DdmSignalSnapshot::default());
     let activation = output.effective_dispositions[0].effective_activation;
     assert!((activation - 0.72).abs() < 1e-9);
+
+    for boundary in [0.0, 1.0] {
+        let mut profile = profile();
+        profile.dispositions[0].base_activation = boundary;
+        assert_eq!(
+            profile
+                .evaluate(&DdmSignalSnapshot::default())
+                .effective_dispositions[0]
+                .effective_activation,
+            boundary
+        );
+    }
 }
 
 #[test]
@@ -84,6 +96,79 @@ fn persisted_previous_band_prevents_threshold_oscillation() {
     let exited = profile.evaluate_with_previous(&DdmSignalSnapshot::default(), &previous);
     assert_eq!(exited.effective_dispositions[0].band, DdmBand::Latent);
     assert!(exited.hysteresis_applied.is_empty());
+
+    profile.dispositions[0].base_activation = 0.62;
+    let previous = BTreeMap::from([("protect_companion".to_owned(), DdmBand::Dominant)]);
+    let partially_demoted =
+        profile.evaluate_with_previous(&DdmSignalSnapshot::default(), &previous);
+    assert_eq!(
+        partially_demoted.effective_dispositions[0].band,
+        DdmBand::Salient
+    );
+    assert_eq!(partially_demoted.hysteresis_applied, ["protect_companion"]);
+}
+
+#[test]
+fn multiplicative_profile_is_bounded_and_rejects_aggregate_overflow() {
+    let yaml = r#"
+schema: momo.ddm/1
+character_id: character-1
+revision: 1
+profile: multiplicative
+dispositions:
+  - id: focus
+    base_activation: 0.4
+    modulation:
+      context:
+        - id: image
+          signal: request.has_image
+          when: true
+          multiplier: 4.0
+      state:
+        - id: tired
+          signal: state.dimension.physiological_state
+          when: true
+          multiplier: 0.5
+    expression:
+      latent: Observe.
+      salient: Focus.
+      dominant: Prioritize.
+"#;
+    let profile = DdmProfile::parse_yaml(yaml).expect("multiplicative profile");
+    let mut signals = DdmSignalSnapshot::default();
+    signals.insert("request.has_image", DdmSignalValue::Bool(true), "request:1");
+    signals.insert(
+        "state.dimension.physiological_state",
+        DdmSignalValue::Bool(true),
+        "state:physiological_state",
+    );
+    let disposition = &profile.evaluate(&signals).effective_dispositions[0];
+    assert_eq!(disposition.context_effect, 4.0);
+    assert_eq!(disposition.state_effect, 0.5);
+    assert_eq!(disposition.effective_activation, 0.8);
+
+    let mut overflowing = profile;
+    let rule = overflowing.dispositions[0].modulation.context[0].clone();
+    overflowing.dispositions[0].modulation.context = (0..513)
+        .map(|index| {
+            let mut rule = rule.clone();
+            rule.id = format!("amplify_{index}");
+            rule
+        })
+        .collect();
+    assert!(overflowing.validate().is_err());
+}
+
+#[test]
+fn profile_revision_must_fit_persistent_storage() {
+    let too_large_revision = profile()
+        .revision
+        .checked_add(i64::MAX as u64)
+        .expect("revision fixture");
+    let text = format!(
+        "schema: momo.ddm/1\ncharacter_id: character-1\nrevision: {too_large_revision}\nprofile: logit_additive\ndispositions:\n  - id: focus\n    base_activation: 0.5\n    expression:\n      latent: Observe.\n      salient: Focus.\n      dominant: Prioritize.\n"
+    );
+    assert!(DdmProfile::parse_yaml(&text).is_err());
 }
 
 #[test]
@@ -115,6 +200,9 @@ dispositions:
     assert!(DdmProfile::parse_yaml(yaml).is_ok());
     assert!(DdmProfile::parse_yaml(&yaml.replace("request.has_image", "request.intent")).is_err());
     assert!(DdmProfile::parse_yaml(&yaml.replace("when: true", "when: image")).is_err());
+    assert!(DdmProfile::parse_yaml(&yaml.replace("visual_alertness", "Visual Alertness")).is_err());
+    assert!(DdmProfile::parse_yaml(&yaml.replace("active_scene", "ActiveScene")).is_err());
+    assert!(DdmProfile::parse_yaml(&"x".repeat(64 * 1024 + 1)).is_err());
 }
 
 #[test]
@@ -137,6 +225,23 @@ fn mutually_exclusive_groups_select_one_deterministically() {
 }
 
 #[test]
+fn top_k_suppression_is_deterministic() {
+    let mut profile = profile();
+    profile.selection.top_k = 1;
+    let mut second = profile.dispositions[0].clone();
+    second.id = "second".to_owned();
+    second.base_activation = 0.2;
+    second.modulation = DdmModulation::default();
+    profile.dispositions.push(second);
+    profile.validate().expect("top-k profile");
+    let audit = profile.evaluate(&DdmSignalSnapshot::default());
+    assert_eq!(audit.effective_dispositions.len(), 1);
+    assert_eq!(audit.effective_dispositions[0].id, "protect_companion");
+    assert_eq!(audit.suppressed_disposition_ids, ["second"]);
+    assert_eq!(audit.next_bands.len(), 2);
+}
+
+#[test]
 fn source_fingerprint_binds_signals_and_previous_bands() {
     let profile = profile();
     let empty = profile.evaluate(&DdmSignalSnapshot::default());
@@ -154,5 +259,16 @@ fn source_fingerprint_binds_signals_and_previous_bands() {
         profile
             .evaluate_with_previous(&signals, &previous)
             .source_fingerprint
+    );
+
+    let mut forward = DdmSignalSnapshot::default();
+    forward.insert("dmw.tag.danger", DdmSignalValue::Bool(true), "event:1");
+    forward.insert("dmw.tag.danger", DdmSignalValue::Bool(true), "event:2");
+    let mut reverse = DdmSignalSnapshot::default();
+    reverse.insert("dmw.tag.danger", DdmSignalValue::Bool(true), "event:2");
+    reverse.insert("dmw.tag.danger", DdmSignalValue::Bool(true), "event:1");
+    assert_eq!(
+        profile.evaluate(&forward).source_fingerprint,
+        profile.evaluate(&reverse).source_fingerprint
     );
 }
