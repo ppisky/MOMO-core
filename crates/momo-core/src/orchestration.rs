@@ -119,6 +119,7 @@ pub struct MomoApiService {
     vision_adapter: Arc<dyn VisionDescriptionAdapter>,
     response_attempts: Arc<Mutex<HashMap<String, String>>>,
     operation_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+    conversation_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     operation_states: Arc<SyncMutex<HashMap<String, OperationState>>>,
     maintenance_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     generation_gates: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
@@ -132,7 +133,7 @@ struct OperationState {
     scope_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct ResolvedResponseInput {
     text: String,
     /// User-authored text to append to conversation history. Tool-only
@@ -148,6 +149,12 @@ struct ResolvedResponseInput {
     vision_usage: ChatUsage,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     vision_upstream_request_ids: Vec<String>,
+}
+
+impl ResolvedResponseInput {
+    fn maintenance_user_text(&self) -> &str {
+        self.persisted_user_text.as_deref().unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,6 +221,7 @@ impl MomoApiService {
             vision_adapter,
             response_attempts: Arc::new(Mutex::new(HashMap::new())),
             operation_locks: Arc::new(Mutex::new(HashMap::new())),
+            conversation_locks: Arc::new(Mutex::new(HashMap::new())),
             operation_states: Arc::new(SyncMutex::new(HashMap::new())),
             maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
             generation_gates: Arc::new(Mutex::new(HashMap::new())),
@@ -305,6 +313,21 @@ impl MomoApiService {
             let gate = Arc::new(Semaphore::new(1));
             gates.insert(gate_key, Arc::downgrade(&gate));
             gate
+        }
+    }
+
+    async fn conversation_lock(&self, scope_id: &str, conversation_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.conversation_locks.lock().await;
+        if locks.len() >= 1_024 {
+            locks.retain(|_, lock| lock.strong_count() > 0);
+        }
+        let key = format!("{scope_id}:{conversation_id}");
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(Mutex::new(()));
+            locks.insert(key, Arc::downgrade(&lock));
+            lock
         }
     }
 }

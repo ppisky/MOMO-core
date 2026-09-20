@@ -72,6 +72,34 @@ pub(super) fn maintenance_finish_error(completion: &Value) -> Option<String> {
 }
 
 impl MomoApiService {
+    pub(super) async fn recover_due_maintenance(&self, scope_id: &str) -> Vec<String> {
+        let config = self.config_snapshot();
+        let mut warnings = Vec::new();
+        for (kind, enabled, threshold) in [
+            (
+                MaintenanceKind::Memory,
+                config.runtime.memory_distillation_enabled,
+                config.runtime.memory_distill_every_turns,
+            ),
+            (
+                MaintenanceKind::SemanticGraph,
+                config.runtime.semantic_graph_enabled,
+                config.runtime.nsg_govern_every_turns,
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
+            if let Err(error) = self.maintain(scope_id, kind, threshold).await {
+                warnings.push(format!(
+                    "{} maintenance recovery degraded: {error}",
+                    kind.storage_name()
+                ));
+            }
+        }
+        warnings
+    }
+
     pub(super) fn schedule_maintenance(&self, scope_id: String) {
         let config = self.config_snapshot();
         for (kind, enabled, threshold) in [

@@ -11,8 +11,8 @@ use super::{
     MomoResponseEventSink, ResolvedResponseInput, generation::GatewayGenerationCapability,
 };
 use crate::{
-    ChatUsage, DEFAULT_VISION_ROUTE, GovernedOverrides, MoStateProfile, MomoResponse,
-    MomoResponseRequest, RequestedOverrides, VisionDescriptionRequest, api::simple,
+    ChatUsage, DEFAULT_VISION_ROUTE, GovernedOverrides, MomoResponse, MomoResponseRequest,
+    RequestedOverrides, VisionDescriptionRequest, api::simple,
 };
 
 impl MomoApiService {
@@ -94,6 +94,24 @@ impl MomoApiService {
                     .map_err(|error| MomoApiError::internal(error.to_string()));
             }
         }
+        let _conversation_guard =
+            if let Some(conversation_id) = request.momo.conversation_id.as_deref() {
+                let conversation_space_id = request
+                    .momo
+                    .conversation_space_id
+                    .as_deref()
+                    .expect("validated conversation Space");
+                Some(
+                    self.lock_active_conversation(
+                        conversation_space_id,
+                        conversation_id,
+                        operation_key,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
         if request.input.has_images() && !config.vision.enabled {
             return Err(MomoApiError::bad_request(
                 "image input requires vision.enabled = true in the portable MOMO configuration",
@@ -101,22 +119,6 @@ impl MomoApiService {
         }
 
         let mut warnings = Vec::new();
-        let autonomous_mo_state =
-            request.momo.mo_state && config.mo_state.profile == MoStateProfile::ClosedAutonomous;
-        let managed_space_id = request
-            .momo
-            .memory_write_space_id
-            .as_deref()
-            .unwrap_or_else(|| {
-                request
-                    .momo
-                    .personal_space_id
-                    .as_deref()
-                    .expect("validated personal Space")
-            });
-        if autonomous_mo_state {
-            self.schedule_maintenance(managed_space_id.to_owned());
-        }
         let capability = match self.gateway_response_budget().await {
             Ok(value) => value,
             Err(error) => {
@@ -226,7 +228,7 @@ impl MomoApiService {
             json!({
                 "request_id": operation_key,
                 "scope_id": memory_write_space_id,
-                "user_content": &resolved_input.text,
+                "user_content": resolved_input.maintenance_user_text(),
                 "assistant_content": response.output_text,
             })
         });
@@ -253,6 +255,24 @@ impl MomoApiService {
             );
         }
         Ok(response)
+    }
+
+    pub(super) async fn lock_active_conversation(
+        &self,
+        conversation_space_id: &str,
+        conversation_id: &str,
+        operation_key: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, MomoApiError> {
+        let guard = self
+            .conversation_lock(conversation_space_id, conversation_id)
+            .await
+            .lock_owned()
+            .await;
+        // Cancellation can happen while this request is queued behind another
+        // response in the same conversation. Re-check before capability or
+        // vision calls are allowed to start.
+        self.ensure_active(operation_key)?;
+        Ok(guard)
     }
 
     pub(super) async fn resolve_response_input(

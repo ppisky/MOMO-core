@@ -46,6 +46,10 @@ fn structured_tags_and_ids_do_not_match_shared_prefix_tokens() {
         let tags = [tag.as_str()];
         write_fixture(root.path(), &event_fixture(&relative, &id, &tags));
     }
+    write_fixture(
+        root.path(),
+        &event_fixture("events/cjk_tag.md", "cjk_tag", &["小红标签"]),
+    );
     workspace.rebuild_index().expect("index");
 
     let retrieved = workspace
@@ -57,6 +61,25 @@ fn structured_tags_and_ids_do_not_match_shared_prefix_tokens() {
         .map(|item| item.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(event_ids, vec!["event_00002"]);
+
+    for longer_identifier in ["unique_000020", "event_000020"] {
+        let retrieved = workspace
+            .retrieve(longer_identifier, 4096, &ConservativeTokenCounter)
+            .expect("retrieve longer identifier");
+        assert!(
+            retrieved
+                .iter()
+                .all(|item| !item.path.starts_with("events")),
+            "structured identifier matched as a substring: {longer_identifier}"
+        );
+    }
+    assert!(
+        workspace
+            .retrieve("请找小红标签相关内容", 4096, &ConservativeTokenCounter,)
+            .expect("retrieve unsegmented tag")
+            .iter()
+            .any(|item| item.id == "cjk_tag")
+    );
 }
 
 #[test]
@@ -153,7 +176,7 @@ fn body_terms_retrieve_specific_facts_across_multiple_languages() {
 }
 
 #[test]
-fn retrieval_prefers_specific_entity_binding_over_popular_partial_matches() {
+fn direct_pool_uses_normative_weight_and_importance_order() {
     let root = tempfile::tempdir().expect("root");
     let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
     let mut distractor = event_fixture("events/decoy.md", "decoy", &["silver", "silver", "silver"]);
@@ -171,7 +194,174 @@ fn retrieval_prefers_specific_entity_binding_over_popular_partial_matches() {
         .filter(|r| r.id == "target" || r.id == "decoy")
         .map(|r| r.id.as_str())
         .collect();
-    assert_eq!(ids, vec!["target", "decoy"]);
+    assert_eq!(ids, vec!["decoy", "target"]);
+}
+
+#[test]
+fn expansion_pool_applies_the_normative_hub_weight_penalty() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    let mut hub_source = event_fixture("events/hub_source.md", "hub_source", &["source-marker"]);
+    hub_source.weight = 0.9;
+    write_fixture(root.path(), &hub_source);
+    let mut normal_source = event_fixture(
+        "events/normal_source.md",
+        "normal_source",
+        &["source-marker"],
+    );
+    normal_source.weight = 0.8;
+    write_fixture(root.path(), &normal_source);
+
+    let mut hub_relation_ids = Vec::new();
+    for index in 0..16 {
+        let id = format!("hub_target_{index:02}");
+        let path = format!("events/{id}.md");
+        let mut target = event_fixture(&path, &id, &[]);
+        target.weight = if index == 0 { 0.95 } else { 0.1 };
+        write_fixture(root.path(), &target);
+        hub_relation_ids.push(id);
+    }
+    let mut normal_target = event_fixture("events/normal_target.md", "normal_target", &[]);
+    normal_target.weight = 0.8;
+    write_fixture(root.path(), &normal_target);
+
+    let mut hub_document = workspace.read("events/hub_source.md").expect("hub source");
+    hub_document
+        .metadata
+        .relations
+        .insert("events".to_owned(), hub_relation_ids);
+    atomic_write(
+        &root.path().join("events/hub_source.md"),
+        &hub_document.encode().expect("encode hub source"),
+    )
+    .expect("write hub source");
+    let mut normal_document = workspace
+        .read("events/normal_source.md")
+        .expect("normal source");
+    normal_document
+        .metadata
+        .relations
+        .insert("events".to_owned(), vec!["normal_target".to_owned()]);
+    atomic_write(
+        &root.path().join("events/normal_source.md"),
+        &normal_document.encode().expect("encode normal source"),
+    )
+    .expect("write normal source");
+    workspace.rebuild_index().expect("index");
+
+    let retrieved = workspace
+        .retrieve("source-marker", usize::MAX, &ConservativeTokenCounter)
+        .expect("retrieve");
+    let expansion_ids = retrieved
+        .iter()
+        .filter(|item| item.id == "normal_target" || item.id == "hub_target_00")
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(expansion_ids, vec!["normal_target", "hub_target_00"]);
+}
+
+#[test]
+fn archived_relations_do_not_turn_an_active_source_into_a_hub() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    let source = event_fixture("events/source.md", "source", &["source-marker"]);
+    write_fixture(root.path(), &source);
+
+    let mut relation_ids = Vec::new();
+    for index in 0..16 {
+        let id = format!("archived_target_{index:02}");
+        let relative = format!("archive/event/{id}.md");
+        let mut archived = event_fixture(&relative, &id, &[]);
+        archived.status = "archived";
+        write_fixture(root.path(), &archived);
+        relation_ids.push(id);
+    }
+    for index in 0..4 {
+        let id = format!("active_target_{index:02}");
+        let relative = format!("events/{id}.md");
+        write_fixture(root.path(), &event_fixture(&relative, &id, &[]));
+        relation_ids.push(id);
+    }
+    let mut source_document = workspace.read("events/source.md").expect("source");
+    source_document
+        .metadata
+        .relations
+        .insert("events".to_owned(), relation_ids);
+    atomic_write(
+        &root.path().join("events/source.md"),
+        &source_document.encode().expect("encode source"),
+    )
+    .expect("write source");
+    workspace.rebuild_index().expect("index");
+
+    let retrieved = workspace
+        .retrieve("source-marker", usize::MAX, &ConservativeTokenCounter)
+        .expect("retrieve");
+    let active_expansions = retrieved
+        .iter()
+        .filter(|item| item.id.starts_with("active_target_"))
+        .count();
+    assert_eq!(active_expansions, 4);
+}
+
+#[test]
+fn retrieval_returns_to_unconsumed_direct_candidates_after_expansion() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    for index in 0..3 {
+        let id = format!("direct_{index}");
+        let path = format!("events/{id}.md");
+        let mut fixture = event_fixture(&path, &id, &["direct-marker"]);
+        fixture.weight = 0.9 - f64::from(index) * 0.1;
+        write_fixture(root.path(), &fixture);
+        let mut document = workspace.read(&path).expect("direct document");
+        document.body = "one compact memory record".to_owned();
+        if index == 0 {
+            document
+                .metadata
+                .relations
+                .insert("events".to_owned(), vec!["expansion_target".to_owned()]);
+        }
+        atomic_write(
+            &root.path().join(path),
+            &document.encode().expect("encode direct document"),
+        )
+        .expect("write direct document");
+    }
+    let mut expansion = event_fixture("events/expansion_target.md", "expansion_target", &[]);
+    expansion.weight = 0.7;
+    write_fixture(root.path(), &expansion);
+    let mut expansion_document = workspace
+        .read("events/expansion_target.md")
+        .expect("expansion document");
+    expansion_document.body = "one compact memory record".to_owned();
+    atomic_write(
+        &root.path().join("events/expansion_target.md"),
+        &expansion_document
+            .encode()
+            .expect("encode expansion document"),
+    )
+    .expect("write expansion document");
+    workspace.rebuild_index().expect("index");
+
+    let counter = ConservativeTokenCounter;
+    let hot_tokens = ["current/scene.md", "current/active_threads.md"]
+        .iter()
+        .map(|path| counter.count(&workspace.read(path).expect("hot memory").body))
+        .sum::<usize>();
+    let record_tokens = counter.count("one compact memory record");
+    let retrieved = workspace
+        .retrieve("direct-marker", hot_tokens + record_tokens * 4, &counter)
+        .expect("retrieve");
+    let ids = retrieved
+        .iter()
+        .filter(|item| item.id.starts_with("direct_") || item.id == "expansion_target")
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec!["direct_0", "direct_1", "expansion_target", "direct_2"]
+    );
 }
 
 #[test]

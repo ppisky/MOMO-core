@@ -273,7 +273,6 @@ impl MemoryWorkspace {
 
         let normalized_query = normalize(query);
         let mut direct_pool = Vec::new();
-        let mut relevance = HashMap::new();
         let mut by_id = HashMap::new();
 
         for (id, entry) in &index.entries {
@@ -292,7 +291,6 @@ impl MemoryWorkspace {
                     )));
                 }
                 if document.metadata.status == "active" {
-                    relevance.insert(id.clone(), (hot_reference_hit, query_hit.matched_terms));
                     if query_hit.substantive || hot_reference_hit {
                         touch_ids.insert(id.clone());
                     }
@@ -300,58 +298,89 @@ impl MemoryWorkspace {
                 }
             }
         }
-        let compare_direct = |left: &(String, MemoryDocument), right: &(String, MemoryDocument)| {
-            relevance[&right.1.metadata.id]
-                .cmp(&relevance[&left.1.metadata.id])
-                .then_with(|| compare_documents(left, right))
-        };
-        direct_pool.sort_by(compare_direct);
-        let related_ids = direct_pool
-            .iter()
-            .take(EXPANSION_SOURCE_LIMIT)
-            .flat_map(|(_, document)| {
-                let is_hub = relation_degree(document, &by_id, &access) > HUB_THRESHOLD;
-                let limit = if is_hub {
-                    HUB_EXPANSION_PER_SOURCE
-                } else {
-                    NORMAL_EXPANSION_PER_SOURCE
-                };
-                ranked_relation_ids(
-                    document,
-                    &by_id,
-                    &access,
-                    &normalized_query,
-                    &hot_reference_ids,
-                )
-                .into_iter()
-                .take(limit)
-            })
-            .take(MAX_EXPANSION_TOTAL)
-            .collect::<Vec<_>>();
-        let mut candidate_ids = direct_pool
+        direct_pool.sort_by(compare_documents);
+        let direct_ids = direct_pool
             .iter()
             .map(|(_, document)| document.metadata.id.clone())
             .collect::<HashSet<_>>();
-        let mut expansion_pool = Vec::new();
-        for related_id in related_ids {
-            if candidate_ids.insert(related_id.clone())
-                && let Some(entry) = by_id.get(&related_id)
-                && access.can_read(&entry.kind)
-            {
+        let mut expansion_candidates = HashMap::new();
+        for (_, source) in direct_pool.iter().take(EXPANSION_SOURCE_LIMIT) {
+            let is_hub = relation_degree(source, &by_id, &access) > HUB_THRESHOLD;
+            let limit = if is_hub {
+                HUB_EXPANSION_PER_SOURCE
+            } else {
+                NORMAL_EXPANSION_PER_SOURCE
+            };
+            let expansion_factor = if is_hub { HUB_FACTOR } else { 1.0 };
+            let mut seen_for_source = HashSet::new();
+            let mut relation_relevance = HashMap::new();
+            let mut related_pool = Vec::new();
+            for related_id in source.metadata.relations.values().flatten() {
+                if direct_ids.contains(related_id) || !seen_for_source.insert(related_id.clone()) {
+                    continue;
+                }
+                let Some(entry) = by_id.get(related_id) else {
+                    continue;
+                };
+                if !access.can_read(&entry.kind) {
+                    continue;
+                }
                 let document = self.read_unchecked(Path::new(&entry.path))?;
-                if document.metadata.id != related_id {
+                if document.metadata.id != *related_id {
                     return Err(MemoryError::InvalidIndex(format!(
                         "entry {related_id} points to document {}",
                         document.metadata.id
                     )));
                 }
-                if document.metadata.status == "active" {
-                    expansion_pool.push((entry.path.clone(), document));
+                if document.metadata.status != "active" {
+                    continue;
                 }
+                relation_relevance.insert(
+                    related_id.clone(),
+                    (
+                        query_hit(entry, related_id, &normalized_query).candidate,
+                        hot_reference_ids.contains(related_id),
+                    ),
+                );
+                related_pool.push((entry.path.clone(), document));
+            }
+            related_pool.sort_by(|left, right| {
+                let left_relevance = relation_relevance[&left.1.metadata.id];
+                let right_relevance = relation_relevance[&right.1.metadata.id];
+                right_relevance
+                    .0
+                    .cmp(&left_relevance.0)
+                    .then_with(|| right_relevance.1.cmp(&left_relevance.1))
+                    .then_with(|| compare_documents(left, right))
+            });
+            for (path, document) in related_pool.into_iter().take(limit) {
+                expansion_candidates
+                    .entry(document.metadata.id.clone())
+                    .and_modify(|candidate: &mut (String, MemoryDocument, f64)| {
+                        candidate.2 = candidate.2.max(expansion_factor);
+                    })
+                    .or_insert((path, document, expansion_factor));
             }
         }
-        direct_pool.sort_by(compare_direct);
-        expansion_pool.sort_by(compare_documents);
+        let mut expansion_pool = expansion_candidates.into_values().collect::<Vec<_>>();
+        expansion_pool.sort_by(|left, right| {
+            let left_weight = left.1.metadata.weight.unwrap_or_default() * left.2;
+            let right_weight = right.1.metadata.weight.unwrap_or_default() * right.2;
+            right_weight
+                .total_cmp(&left_weight)
+                .then_with(|| {
+                    right
+                        .1
+                        .metadata
+                        .importance
+                        .unwrap_or_default()
+                        .total_cmp(&left.1.metadata.importance.unwrap_or_default())
+                })
+                .then_with(|| right.1.metadata.touch_at.cmp(&left.1.metadata.touch_at))
+                .then_with(|| left.1.metadata.id.cmp(&right.1.metadata.id))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        expansion_pool.truncate(MAX_EXPANSION_TOTAL);
         let remaining_memory_budget = max_tokens.saturating_sub(used);
         let direct_budget =
             remaining_memory_budget.saturating_mul(DIRECT_RESERVE_RATIO_NUMERATOR) / 100;
@@ -394,7 +423,7 @@ impl MemoryWorkspace {
                 state_signal: Some(retrieved_state_signal(document)),
             });
         }
-        for (path, document) in &expansion_pool {
+        for (path, document, _) in &expansion_pool {
             let tokens = counter.count(&document.body);
             if used.saturating_add(tokens) > max_tokens
                 || expansion_used.saturating_add(tokens) > expansion_budget
@@ -416,6 +445,38 @@ impl MemoryWorkspace {
                     .get("characters")
                     .cloned()
                     .unwrap_or_default(),
+                injection_scope: document.metadata.injection_scope.clone(),
+                injection_conversation_id: document.metadata.injection_conversation_id.clone(),
+                injection_character_id: document.metadata.injection_character_id.clone(),
+                state_signal: Some(retrieved_state_signal(document)),
+            });
+        }
+        let already_loaded = loaded_ids.iter().cloned().collect::<HashSet<_>>();
+        for (path, document) in &direct_pool {
+            if already_loaded.contains(&document.metadata.id) {
+                continue;
+            }
+            let remaining = max_tokens.saturating_sub(used);
+            let body = markdown_prefix_within_budget(&document.body, remaining, counter);
+            if body.is_empty() {
+                continue;
+            }
+            let tokens = counter.count(&body);
+            used += tokens;
+            let id = document.metadata.id.clone();
+            let source_character_ids = document
+                .metadata
+                .relations
+                .get("characters")
+                .cloned()
+                .unwrap_or_default();
+            loaded_ids.push(id.clone());
+            result.push(RetrievedMemory {
+                id,
+                path: PathBuf::from(path.clone()),
+                body,
+                estimated_tokens: tokens,
+                source_character_ids,
                 injection_scope: document.metadata.injection_scope.clone(),
                 injection_conversation_id: document.metadata.injection_conversation_id.clone(),
                 injection_character_id: document.metadata.injection_character_id.clone(),
@@ -1189,6 +1250,7 @@ impl MemoryWorkspace {
             let entry = IndexEntry {
                 path: portable_path(&relative),
                 kind: document.metadata.kind.clone(),
+                status: Some(document.metadata.status.clone()),
                 aliases,
                 tags: document.metadata.tags.clone(),
                 body_identifiers: retrieval::body_identifiers(&document.body),

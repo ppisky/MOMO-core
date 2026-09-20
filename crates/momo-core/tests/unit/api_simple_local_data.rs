@@ -33,3 +33,46 @@ fn character_crud_uses_native_card_validation() {
     invalid.character_markdown = "---\nsecret: true\n---\n# Momo".to_owned();
     assert!(validate_runtime_character(&invalid).is_err());
 }
+
+#[tokio::test]
+async fn conversation_update_cannot_replace_the_bound_character() {
+    let directory = tempfile::tempdir().expect("data directory");
+    let core = MomoCore::initialize(directory.path())
+        .await
+        .expect("initialize core");
+    let now = chrono::Utc::now();
+    let scope_id = momo_domain::new_id();
+    let conversation = momo_domain::Conversation {
+        id: momo_domain::new_id(),
+        scope_id,
+        character_id: None,
+        title: "Before".to_owned(),
+        created_at: now,
+        updated_at: now,
+    };
+    core.store()
+        .save_conversation(&conversation)
+        .await
+        .expect("save conversation");
+    let submitted = momo_domain::Conversation {
+        character_id: Some(momo_domain::new_id()),
+        title: "After".to_owned(),
+        created_at: now + chrono::Duration::days(1),
+        ..conversation.clone()
+    };
+
+    let updated = stage_conversation_update_for_core(&core, scope_id, submitted)
+        .await
+        .expect("update conversation");
+    assert_eq!(updated.character_id, None);
+    assert_eq!(updated.created_at, conversation.created_at);
+    assert_eq!(updated.title, "After");
+    let stored = core
+        .store()
+        .conversation_for_scope(scope_id, conversation.id)
+        .await
+        .expect("load conversation")
+        .expect("stored conversation");
+    assert_eq!(stored.character_id, None);
+    assert_eq!(stored.title, "After");
+}

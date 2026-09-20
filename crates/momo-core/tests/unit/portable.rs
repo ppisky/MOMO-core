@@ -1,4 +1,13 @@
 use super::*;
+
+#[test]
+fn encrypted_moc_envelope_is_bounded_before_allocation() {
+    validate_private_moc_envelope_size(PRIVATE_MOC_MAX_ENVELOPE_BYTES).expect("boundary envelope");
+    assert!(matches!(
+        validate_private_moc_envelope_size(PRIVATE_MOC_MAX_ENVELOPE_BYTES + 1),
+        Err(PortableError::PrivateMocTooLarge)
+    ));
+}
 use momo_domain::{MessageRole, new_id};
 
 fn test_export_plan(
@@ -43,6 +52,40 @@ fn test_import_plan(source: Uuid, target: Uuid, conflict_mode: ConflictMode) -> 
         space_map: [(source, target)].into_iter().collect(),
         conflict_mode,
     }
+}
+
+async fn seed_character_conversation(core: &MomoCore, scope_id: Uuid) -> (Uuid, Uuid) {
+    let character_id = new_id();
+    let conversation_id = new_id();
+    let now = Utc::now();
+    core.store()
+        .save_character(&CharacterCard {
+            id: character_id,
+            scope_id,
+            name: "Portable character".to_owned(),
+            version: "2.0.0".to_owned(),
+            author_name: "Tester".to_owned(),
+            author_url: None,
+            character_markdown: "# Character".to_owned(),
+            user_markdown: String::new(),
+            opening_markdown: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("character");
+    core.store()
+        .save_conversation(&Conversation {
+            id: conversation_id,
+            scope_id,
+            character_id: Some(character_id),
+            title: "Portable conversation".to_owned(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("conversation");
+    (character_id, conversation_id)
 }
 
 #[tokio::test]
@@ -564,6 +607,291 @@ name = "Tester"
             .await
             .expect("conversations")
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn import_uses_declared_module_order_when_space_declarations_are_reordered() {
+    let source_directory = tempfile::tempdir().expect("source directory");
+    let source = MomoCore::initialize(source_directory.path())
+        .await
+        .expect("source core");
+    let source_space = new_id();
+    let (character_id, conversation_id) = seed_character_conversation(&source, source_space).await;
+    let canonical = source_directory.path().join("canonical.moc");
+    export_moc(
+        &source,
+        &canonical,
+        &serde_json::json!({}),
+        &test_export_plan(
+            source_space,
+            &[MocModule::Characters, MocModule::Conversations],
+            None,
+            MocCompatibility::None,
+        ),
+    )
+    .await
+    .expect("canonical export");
+    let manifest = momo_moc::inspect(&canonical).expect("manifest");
+    let extracted = tempfile::tempdir().expect("extracted payload");
+    momo_moc::extract(&canonical, extracted.path(), ExtractionLimits::default())
+        .expect("extract canonical MOC");
+    let mut reordered_spaces = manifest.space_modules.clone();
+    reordered_spaces.reverse();
+    assert_eq!(reordered_spaces[0].module, "conversations");
+    let reordered = source_directory.path().join("reordered.moc");
+    momo_moc::create_from_definitions_and_spaces(
+        &reordered,
+        extracted.path(),
+        &manifest.module_definitions,
+        &reordered_spaces,
+    )
+    .expect("valid reordered MOC");
+
+    let destination_directory = tempfile::tempdir().expect("destination directory");
+    let destination = MomoCore::initialize(destination_directory.path())
+        .await
+        .expect("destination core");
+    let target_space = new_id();
+    import_moc(
+        &destination,
+        &reordered,
+        &test_import_plan(source_space, target_space, ConflictMode::Replace),
+    )
+    .await
+    .expect("import reordered MOC");
+
+    let conversation = destination
+        .store()
+        .conversation_for_scope(target_space, conversation_id)
+        .await
+        .expect("conversation lookup")
+        .expect("imported conversation");
+    assert_eq!(conversation.character_id, Some(character_id));
+}
+
+#[tokio::test]
+async fn preflight_rejects_cross_space_conversation_conflicts_before_importing_characters() {
+    let source_directory = tempfile::tempdir().expect("source directory");
+    let source = MomoCore::initialize(source_directory.path())
+        .await
+        .expect("source core");
+    let source_space = new_id();
+    let (character_id, conversation_id) = seed_character_conversation(&source, source_space).await;
+    let package = source_directory.path().join("cross-space-conflict.moc");
+    export_moc(
+        &source,
+        &package,
+        &serde_json::json!({}),
+        &test_export_plan(
+            source_space,
+            &[MocModule::Characters, MocModule::Conversations],
+            None,
+            MocCompatibility::None,
+        ),
+    )
+    .await
+    .expect("export");
+
+    let destination_directory = tempfile::tempdir().expect("destination directory");
+    let destination = MomoCore::initialize(destination_directory.path())
+        .await
+        .expect("destination core");
+    let existing_space = new_id();
+    let target_space = new_id();
+    let now = Utc::now();
+    destination
+        .store()
+        .save_conversation(&Conversation {
+            id: conversation_id,
+            scope_id: existing_space,
+            character_id: None,
+            title: "Existing elsewhere".to_owned(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("existing conversation");
+
+    let error = import_moc(
+        &destination,
+        &package,
+        &test_import_plan(source_space, target_space, ConflictMode::Replace),
+    )
+    .await
+    .expect_err("cross-Space conflict must fail preflight");
+    assert!(matches!(error, PortableError::InvalidData(_)));
+    assert!(
+        destination
+            .store()
+            .list_characters()
+            .await
+            .expect("characters")
+            .iter()
+            .all(|character| character.id != character_id),
+        "preflight failure must not commit the earlier character module"
+    );
+}
+
+#[tokio::test]
+async fn preflight_rejects_cross_space_character_conflicts() {
+    let source_directory = tempfile::tempdir().expect("source directory");
+    let source = MomoCore::initialize(source_directory.path())
+        .await
+        .expect("source core");
+    let source_space = new_id();
+    let (character_id, conversation_id) = seed_character_conversation(&source, source_space).await;
+    let package = source_directory.path().join("character-conflict.moc");
+    export_moc(
+        &source,
+        &package,
+        &serde_json::json!({}),
+        &test_export_plan(
+            source_space,
+            &[MocModule::Characters, MocModule::Conversations],
+            None,
+            MocCompatibility::None,
+        ),
+    )
+    .await
+    .expect("export");
+
+    let destination_directory = tempfile::tempdir().expect("destination directory");
+    let destination = MomoCore::initialize(destination_directory.path())
+        .await
+        .expect("destination core");
+    let existing_space = new_id();
+    let target_space = new_id();
+    let now = Utc::now();
+    destination
+        .store()
+        .save_character(&CharacterCard {
+            id: character_id,
+            scope_id: existing_space,
+            name: "Existing elsewhere".to_owned(),
+            version: "2.0.0".to_owned(),
+            author_name: "Tester".to_owned(),
+            author_url: None,
+            character_markdown: String::new(),
+            user_markdown: String::new(),
+            opening_markdown: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("existing character");
+
+    let error = import_moc(
+        &destination,
+        &package,
+        &test_import_plan(source_space, target_space, ConflictMode::Replace),
+    )
+    .await
+    .expect_err("cross-Space character conflict must fail preflight");
+    assert!(matches!(error, PortableError::InvalidData(_)));
+    assert!(
+        destination
+            .store()
+            .conversation_for_scope(target_space, conversation_id)
+            .await
+            .expect("conversation lookup")
+            .is_none()
+    );
+    assert_eq!(
+        destination
+            .store()
+            .character_by_id(character_id)
+            .await
+            .expect("character lookup")
+            .expect("existing character")
+            .scope_id,
+        existing_space
+    );
+}
+
+#[tokio::test]
+async fn preflight_rejects_message_ids_owned_by_another_conversation() {
+    let source_directory = tempfile::tempdir().expect("source directory");
+    let source = MomoCore::initialize(source_directory.path())
+        .await
+        .expect("source core");
+    let source_space = new_id();
+    let (character_id, conversation_id) = seed_character_conversation(&source, source_space).await;
+    let message_id = new_id();
+    let now = Utc::now();
+    source
+        .store()
+        .append_message(&Message {
+            id: message_id,
+            conversation_id,
+            role: MessageRole::User,
+            content: "Portable message".to_owned(),
+            created_at: now,
+        })
+        .await
+        .expect("source message");
+    let package = source_directory.path().join("message-conflict.moc");
+    export_moc(
+        &source,
+        &package,
+        &serde_json::json!({}),
+        &test_export_plan(
+            source_space,
+            &[MocModule::Characters, MocModule::Conversations],
+            None,
+            MocCompatibility::None,
+        ),
+    )
+    .await
+    .expect("export");
+
+    let destination_directory = tempfile::tempdir().expect("destination directory");
+    let destination = MomoCore::initialize(destination_directory.path())
+        .await
+        .expect("destination core");
+    let existing_space = new_id();
+    let existing_conversation = new_id();
+    destination
+        .store()
+        .save_conversation(&Conversation {
+            id: existing_conversation,
+            scope_id: existing_space,
+            character_id: None,
+            title: "Existing conversation".to_owned(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("existing conversation");
+    destination
+        .store()
+        .append_message(&Message {
+            id: message_id,
+            conversation_id: existing_conversation,
+            role: MessageRole::User,
+            content: "Existing message".to_owned(),
+            created_at: now,
+        })
+        .await
+        .expect("existing message");
+    let target_space = new_id();
+
+    let error = import_moc(
+        &destination,
+        &package,
+        &test_import_plan(source_space, target_space, ConflictMode::Replace),
+    )
+    .await
+    .expect_err("cross-conversation message conflict must fail preflight");
+    assert!(matches!(error, PortableError::InvalidData(_)));
+    assert!(
+        destination
+            .store()
+            .character_by_id(character_id)
+            .await
+            .expect("character lookup")
+            .is_none(),
+        "preflight failure must not commit the character module"
     );
 }
 

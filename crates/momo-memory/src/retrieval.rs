@@ -4,7 +4,6 @@ use super::*;
 pub(super) struct QueryHit {
     pub(super) candidate: bool,
     pub(super) substantive: bool,
-    pub(super) matched_terms: usize,
 }
 
 pub(super) fn query_hit(entry: &IndexEntry, id: &str, normalized_query: &str) -> QueryHit {
@@ -38,7 +37,7 @@ pub(super) fn query_hit(entry: &IndexEntry, id: &str, normalized_query: &str) ->
     // matching its shared `unique` prefix would select every `unique_*` item.
     for term in &entry.tags {
         let term = normalize(term);
-        if !term.is_empty() && normalized_query.contains(&term) {
+        if !term.is_empty() && contains_structured_term(normalized_query, &term) {
             candidate = true;
             for token in searchable_terms(&term) {
                 if !is_generic_term(&token) {
@@ -64,7 +63,7 @@ pub(super) fn query_hit(entry: &IndexEntry, id: &str, normalized_query: &str) ->
         }
     }
     let id_term = normalize(id);
-    if !id_term.is_empty() && normalized_query.contains(&id_term) {
+    if !id_term.is_empty() && contains_structured_term(normalized_query, &id_term) {
         candidate = true;
         if !is_generic_term(&id_term) {
             matched_terms.insert(id_term);
@@ -73,7 +72,6 @@ pub(super) fn query_hit(entry: &IndexEntry, id: &str, normalized_query: &str) ->
     QueryHit {
         candidate,
         substantive: !matched_terms.is_empty(),
-        matched_terms: matched_terms.len(),
     }
 }
 
@@ -83,6 +81,31 @@ fn searchable_terms(value: &str) -> HashSet<String> {
         .filter(|term| !term.is_empty())
         .flat_map(segment_terms)
         .collect()
+}
+
+fn contains_structured_term(query: &str, term: &str) -> bool {
+    // Scripts without explicit word separators still need natural substring
+    // recall. ASCII identifiers and tags, on the other hand, must respect
+    // identifier boundaries so S17 cannot select S170.
+    if !term.chars().any(is_structured_identifier_character) {
+        return query.contains(term);
+    }
+    query.match_indices(term).any(|(start, matched)| {
+        let end = start + matched.len();
+        let left_is_boundary = query[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !is_structured_identifier_character(character));
+        let right_is_boundary = query[end..]
+            .chars()
+            .next()
+            .is_none_or(|character| !is_structured_identifier_character(character));
+        left_is_boundary && right_is_boundary
+    })
+}
+
+fn is_structured_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
 }
 
 fn segment_terms(segment: &str) -> Vec<String> {
@@ -175,41 +198,18 @@ pub(super) fn relation_degree(
         .filter(|id| {
             by_id
                 .get(*id)
-                .is_some_and(|entry| access.can_read(&entry.kind))
+                .is_some_and(|entry| entry.is_active() && access.can_read(&entry.kind))
         })
         .count()
 }
 
-pub(super) fn ranked_relation_ids(
-    document: &MemoryDocument,
-    by_id: &HashMap<String, &IndexEntry>,
-    access: &AccessConfig,
-    normalized_query: &str,
-    hot_reference_ids: &HashSet<String>,
-) -> Vec<String> {
-    let mut ids = document
-        .metadata
-        .relations
-        .values()
-        .flatten()
-        .filter_map(|id| {
-            let entry = by_id.get(id)?;
-            access
-                .can_read(&entry.kind)
-                .then(|| ((*id).clone(), *entry))
-        })
-        .collect::<Vec<_>>();
-    ids.sort_by(|left, right| {
-        let left_hot = hot_reference_ids.contains(&left.0);
-        let right_hot = hot_reference_ids.contains(&right.0);
-        let left_query = query_hit(left.1, &left.0, normalized_query).candidate;
-        let right_query = query_hit(right.1, &right.0, normalized_query).candidate;
-        right_query
-            .cmp(&left_query)
-            .then_with(|| right_hot.cmp(&left_hot))
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    ids.into_iter().map(|(id, _)| id).collect()
+impl IndexEntry {
+    fn is_active(&self) -> bool {
+        self.status.as_deref().map_or_else(
+            || !Path::new(&self.path).starts_with("archive"),
+            |status| status == "active",
+        )
+    }
 }
 
 pub(super) fn normalize(value: &str) -> String {

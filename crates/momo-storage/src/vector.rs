@@ -133,12 +133,45 @@ impl TursoVectorStore {
 
 impl NsgVectorStore for TursoVectorStore {
     async fn upsert_nsg_vectors(&self, records: &[NsgVectorRecord]) -> Result<(), StorageError> {
+        let mut dimensions = HashMap::new();
         for record in records {
             validate_nsg_vector(record).map_err(StorageError::InvalidNsgVector)?;
+            let key = (record.scope_id, record.vector_space_id.clone());
+            if dimensions
+                .insert(key, record.dimension)
+                .is_some_and(|dimension| dimension != record.dimension)
+            {
+                return Err(StorageError::InvalidNsgVector(
+                    "one scope and vector space cannot contain mixed dimensions".to_owned(),
+                ));
+            }
         }
         let connection = self.database.connect()?;
         connection.execute("BEGIN IMMEDIATE", ()).await?;
-        if let Err(error) = insert_nsg_vectors(&connection, records).await {
+        let result = async {
+            for ((scope_id, vector_space_id), dimension) in dimensions {
+                let mut rows = connection
+                    .query(
+                        "SELECT DISTINCT dimension FROM nsg_vectors \
+                         WHERE scope_id=?1 AND vector_space_id=?2",
+                        (scope_id.to_string(), vector_space_id),
+                    )
+                    .await?;
+                while let Some(row) = rows.next().await? {
+                    let existing = usize::try_from(row.get::<i64>(0)?).map_err(|_| {
+                        StorageError::InvalidNsgVector("invalid stored dimension".to_owned())
+                    })?;
+                    if existing != dimension {
+                        return Err(StorageError::InvalidNsgVector(
+                            "one scope and vector space cannot contain mixed dimensions".to_owned(),
+                        ));
+                    }
+                }
+            }
+            insert_nsg_vectors(&connection, records).await
+        }
+        .await;
+        if let Err(error) = result {
             let _ = connection.execute("ROLLBACK", ()).await;
             return Err(error);
         }

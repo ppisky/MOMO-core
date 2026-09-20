@@ -14,6 +14,7 @@ serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 unicode-normalization.workspace = true
 yaml_serde.workspace = true
 

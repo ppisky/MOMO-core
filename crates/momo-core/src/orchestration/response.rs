@@ -10,7 +10,7 @@ use super::{
     state,
 };
 use crate::{
-    MomoResponse, MomoResponseMetadata, MomoResponseRequest, ResponseOutputContent,
+    MoStateProfile, MomoResponse, MomoResponseMetadata, MomoResponseRequest, ResponseOutputContent,
     ResponseOutputItem, api::simple, product_prompts,
 };
 
@@ -60,6 +60,9 @@ impl MomoApiService {
             .memory_write_space_id
             .clone()
             .unwrap_or_else(|| personal_space_id.clone());
+        if request.momo.mo_state && config.mo_state.profile == MoStateProfile::ClosedAutonomous {
+            warnings.extend(self.recover_due_maintenance(&managed_space_id).await);
+        }
         let include_memory = request
             .momo
             .memory_sources

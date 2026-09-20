@@ -1420,6 +1420,32 @@ async fn nsg_vectors_are_scope_and_space_isolated_and_validate_input() {
         .upsert_nsg_vectors(std::slice::from_ref(&record))
         .await
         .expect("save vector");
+    let mixed_batch = [
+        NsgVectorRecord {
+            node_id: "mixed_a".to_owned(),
+            ..record.clone()
+        },
+        NsgVectorRecord {
+            node_id: "mixed_b".to_owned(),
+            dimension: 2,
+            vector: vec![0.1, 0.2],
+            ..record.clone()
+        },
+    ];
+    assert!(matches!(
+        store.upsert_nsg_vectors(&mixed_batch).await,
+        Err(StorageError::InvalidNsgVector(_))
+    ));
+    let changed_dimension = NsgVectorRecord {
+        node_id: "different_node".to_owned(),
+        dimension: 2,
+        vector: vec![0.1, 0.2],
+        ..record.clone()
+    };
+    assert!(matches!(
+        store.upsert_nsg_vectors(&[changed_dimension]).await,
+        Err(StorageError::InvalidNsgVector(_))
+    ));
     assert_eq!(
         store
             .list_nsg_vectors(scope, "provider|model|3")
