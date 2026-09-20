@@ -168,24 +168,37 @@ async fn retrieve_scoped_memory_snapshot(
             combined.push(value);
         }
     }
-    let mut source_observations = Vec::with_capacity(observed_space_ids.len());
-    for space_id in std::mem::take(&mut observed_space_ids) {
-        let parsed_space_id =
-            uuid::Uuid::parse_str(&space_id).map_err(|error| error.to_string())?;
-        let source = core()?
-            .memory_for_space(parsed_space_id)
-            .map_err(|error| error.to_string())?
-            .mo_state_source_fingerprint()
-            .map_err(|error| error.to_string())?;
-        source_observations.push(momo_storage::MoStateSourceObservation {
-            space_id,
-            dmw_fingerprint: source.dmw,
-            nsg_fingerprint: source.nsg,
-            scene_fingerprint: source.scene,
-            scene_json: serde_json::to_string(&source.scene_snapshot)
-                .map_err(|error| error.to_string())?,
-        });
-    }
+    let observed_spaces = std::mem::take(&mut observed_space_ids)
+        .into_iter()
+        .map(|space_id| {
+            uuid::Uuid::parse_str(&space_id)
+                .map(|parsed| (space_id, parsed))
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let runtime = core()?.clone();
+    let source_observations = tokio::task::spawn_blocking(move || {
+        observed_spaces
+            .into_iter()
+            .map(|(space_id, parsed_space_id)| {
+                let source = runtime
+                    .memory_for_space(parsed_space_id)
+                    .map_err(|error| error.to_string())?
+                    .mo_state_source_fingerprint()
+                    .map_err(|error| error.to_string())?;
+                Ok(momo_storage::MoStateSourceObservation {
+                    space_id,
+                    dmw_fingerprint: source.dmw,
+                    nsg_fingerprint: source.nsg,
+                    scene_fingerprint: source.scene,
+                    scene_json: serde_json::to_string(&source.scene_snapshot)
+                        .map_err(|error| error.to_string())?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()
+    })
+    .await
+    .map_err(|error| format!("memory source observation task failed: {error}"))??;
     drop(state_guards);
     Ok(ScopedMemorySnapshot {
         items: combined,
@@ -288,19 +301,27 @@ pub async fn retrieve_memory_json(
 }
 
 async fn retrieve_memory(plan: RetrievalPlan) -> Result<String, String> {
-    let workspace = core()?
-        .memory_for_space(plan.scope_id)
+    let runtime = core()?.clone();
+    let scope_id = plan.scope_id;
+    let workspace = tokio::task::spawn_blocking(move || runtime.memory_for_space(scope_id))
+        .await
+        .map_err(|error| format!("memory workspace task failed: {error}"))?
         .map_err(|error| error.to_string())?;
     let vector_ranked_ids = if let Some(vector_query) = &plan.vector {
         validate_query_vector(vector_query)?;
-        let nsg = momo_memory::nsg::NsgWorkspace::initialize(workspace.root())
-            .map_err(|error| error.to_string())?;
-        let hashes = nsg
-            .embedding_documents()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|document| (document.node_id, document.source_hash))
-            .collect::<std::collections::HashMap<_, _>>();
+        let vector_workspace = Arc::clone(&workspace);
+        let hashes = tokio::task::spawn_blocking(move || {
+            let nsg = momo_memory::nsg::NsgWorkspace::initialize(vector_workspace.root())?;
+            Ok::<_, momo_memory::MemoryError>(
+                nsg.embedding_documents()?
+                    .into_iter()
+                    .map(|document| (document.node_id, document.source_hash))
+                    .collect::<std::collections::HashMap<_, _>>(),
+            )
+        })
+        .await
+        .map_err(|error| format!("semantic graph indexing task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
         core()?
             .vector_store()
             .rank_nsg_vectors(
@@ -315,55 +336,60 @@ async fn retrieve_memory(plan: RetrievalPlan) -> Result<String, String> {
     } else {
         Vec::new()
     };
-    let reserved_memory_budget = dmw_retrieval_budget(
-        plan.max_tokens,
-        plan.include_memory,
-        plan.include_semantic_graph,
-    );
-    let nsg = if plan.include_semantic_graph {
-        momo_memory::nsg::NsgWorkspace::initialize(workspace.root())
-            .map_err(|error| error.to_string())?
-            .retrieve(
-                &plan.query,
-                &vector_ranked_ids,
-                plan.max_tokens.saturating_sub(reserved_memory_budget),
-                &momo_memory::ConservativeTokenCounter,
-            )
-            .map_err(|error| error.to_string())?
-    } else {
-        Vec::new()
-    };
-    let nsg_tokens = nsg.iter().map(|item| item.estimated_tokens).sum::<usize>();
-    let memory_budget = effective_dmw_retrieval_budget(
-        plan.max_tokens,
-        plan.include_memory,
-        plan.include_semantic_graph,
-        nsg_tokens,
-    );
-    let memories = if plan.include_memory {
-        workspace
-            .retrieve(
-                &plan.query,
-                memory_budget,
-                &momo_memory::ConservativeTokenCounter,
-            )
-            .map_err(|error| error.to_string())?
-    } else {
-        Vec::new()
-    };
-    let mut combined = serde_json::to_value(memories)
-        .map_err(|error| error.to_string())?
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    combined.extend(
-        serde_json::to_value(nsg)
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let reserved_memory_budget = dmw_retrieval_budget(
+            plan.max_tokens,
+            plan.include_memory,
+            plan.include_semantic_graph,
+        );
+        let nsg = if plan.include_semantic_graph {
+            momo_memory::nsg::NsgWorkspace::initialize(workspace.root())
+                .map_err(|error| error.to_string())?
+                .retrieve(
+                    &plan.query,
+                    &vector_ranked_ids,
+                    plan.max_tokens.saturating_sub(reserved_memory_budget),
+                    &momo_memory::ConservativeTokenCounter,
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
+        let nsg_tokens = nsg.iter().map(|item| item.estimated_tokens).sum::<usize>();
+        let memory_budget = effective_dmw_retrieval_budget(
+            plan.max_tokens,
+            plan.include_memory,
+            plan.include_semantic_graph,
+            nsg_tokens,
+        );
+        let memories = if plan.include_memory {
+            workspace
+                .retrieve(
+                    &plan.query,
+                    memory_budget,
+                    &momo_memory::ConservativeTokenCounter,
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
+        let mut combined = serde_json::to_value(memories)
             .map_err(|error| error.to_string())?
             .as_array()
             .cloned()
-            .unwrap_or_default(),
-    );
-    serde_json::to_string(&combined).map_err(|error| error.to_string())
+            .unwrap_or_default();
+        combined.extend(
+            serde_json::to_value(nsg)
+                .map_err(|error| error.to_string())?
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+        );
+        serde_json::to_string(&combined).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("memory retrieval task failed: {error}"))?
+    .map_err(|error| error.to_string())
 }
 
 pub async fn compile_mo_state_json(

@@ -15,6 +15,8 @@ use std::{
     fs,
     io::{self, Write},
     path::{Component, Path, PathBuf},
+    sync::{Arc, RwLock},
+    time::SystemTime,
 };
 
 use chrono::Utc;
@@ -383,6 +385,20 @@ pub struct DocumentSummary {
 #[derive(Debug, Clone)]
 pub struct MemoryWorkspace {
     root: PathBuf,
+    index_cache: Arc<RwLock<Option<CachedMemoryIndex>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedMemoryIndex {
+    source_signature: Vec<IndexSourceStamp>,
+    index: Arc<MemoryIndex>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexSourceStamp {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
 }
 
 mod workspace;

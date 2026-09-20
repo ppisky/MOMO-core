@@ -93,7 +93,9 @@ usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.respons
 信号、确定性选择、持久化迟滞和原子审计状态；更广的凭据测试与 MORP 覆盖仍是稳定版
 `v1.0.0` 发布门槛。详见
 [1.0.0 发布契约](docs/roadmap_1_0_0.md)。
-本次候选变更见 [rc.3 发布说明](docs/release_notes_1_0_0_rc3.md)。
+rc.4 候选保持上述契约冻结，同时收紧编排边界，并让每个 Space 的检索 Workspace 在请求间
+持续复用。本次候选变更见 [rc.4 发布说明](docs/release_notes_1_0_0_rc4.md)；已发布的
+[rc.3 发布说明](docs/release_notes_1_0_0_rc3.md)继续保留。
 DDM 的实现边界与剩余实验性限制见 [DDM 状态报告](docs/ddm_implementation_status.zh-CN.md)。
 
 产品提示词是由仓库追踪、通过 `include_str!` 编译进 `momo_core` 的 Markdown

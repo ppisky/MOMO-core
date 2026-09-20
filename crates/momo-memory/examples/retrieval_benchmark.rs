@@ -73,7 +73,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Warm the filesystem and parser caches once, then record repeated
     // end-to-end retrievals, including activity-index writes.
     let counter = ConservativeTokenCounter;
-    let query = format!("Please recall Needle memory {:05}", document_count - 1);
+    // Query the unique structured tag instead of the title. Every fixture body
+    // contains the generic word "memory", so a title query makes every record
+    // a candidate and can push the needle past the fixed token budget.
+    let query = format!("fixture-{:05}", document_count - 1);
     let warm = memory.retrieve(&query, 2_048, &counter)?;
     if !warm
         .iter()

@@ -1,10 +1,12 @@
 # MOMO Core 1.0.0 release contract
 
 **Status:** `v1.0.0-rc.3` is published with a complete opt-in
-implementation of the experimental DDM contract. The existing `v1.0.0`,
-`v1.0.0-rc.1`, and `v1.0.0-rc.2` tags remain historical and must not move.
+implementation of the experimental DDM contract. An rc.4 candidate tightens
+runtime ownership and retrieval performance without changing frozen product or
+portable contracts. The existing `v1.0.0`, `v1.0.0-rc.1`, and `v1.0.0-rc.2`
+tags remain historical and must not move.
 
-**Updated:** 2026-09-14
+**Updated:** 2026-09-21
 
 The checks and artifact hashes below describe the existing tagged candidate,
 not later work made after that tag. Current contract precedence is
@@ -129,6 +131,11 @@ and cross-protocol tests are green.
 - [x] Receive explicit owner authorization to commit, create
   `v1.0.0-rc.3`, push, and publish the GitHub prerelease without moving earlier
   tags.
+- [x] Make Core own bounded per-Space memory-workspace lifetimes, retain index
+  validation across external edits, and move retrieval filesystem work off
+  asynchronous request workers for the rc.4 candidate.
+- [ ] Merge the rc.4 candidate through the complete GitHub CI matrix before
+  creating or publishing a `v1.0.0-rc.4` tag.
 
 ## Explicitly outside 1.0
 

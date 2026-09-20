@@ -6,10 +6,14 @@ pub(super) struct QueryHit {
     pub(super) substantive: bool,
 }
 
-pub(super) fn query_hit(entry: &IndexEntry, id: &str, normalized_query: &str) -> QueryHit {
+pub(super) fn query_hit(
+    entry: &IndexEntry,
+    id: &str,
+    normalized_query: &str,
+    query_terms: &HashSet<String>,
+) -> QueryHit {
     let mut candidate = false;
     let mut matched_terms = HashSet::new();
-    let query_terms = searchable_terms(normalized_query);
     // Aliases are human-readable phrases, so matching their individual words
     // supports queries such as "silver astrolabe" against a longer title.
     for term in &entry.aliases {
@@ -75,7 +79,7 @@ pub(super) fn query_hit(entry: &IndexEntry, id: &str, normalized_query: &str) ->
     }
 }
 
-fn searchable_terms(value: &str) -> HashSet<String> {
+pub(super) fn searchable_terms(value: &str) -> HashSet<String> {
     value
         .split(|character: char| !character.is_alphanumeric())
         .filter(|term| !term.is_empty())

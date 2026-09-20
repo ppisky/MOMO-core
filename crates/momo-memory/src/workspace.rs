@@ -73,7 +73,10 @@ impl MemoryWorkspace {
             };
             atomic_write(&path, &document.encode()?)?;
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            index_cache: Arc::new(RwLock::new(None)),
+        })
     }
 
     #[must_use]
@@ -272,6 +275,10 @@ impl MemoryWorkspace {
         }
 
         let normalized_query = normalize(query);
+        // Tokenizing allocates a set (and CJK bigrams). It depends only on the
+        // query, so compute it once instead of once per index entry and graph
+        // expansion candidate.
+        let query_terms = searchable_terms(&normalized_query);
         let mut direct_pool = Vec::new();
         let mut by_id = HashMap::new();
 
@@ -280,7 +287,7 @@ impl MemoryWorkspace {
             if !access.can_read(&entry.kind) {
                 continue;
             }
-            let query_hit = query_hit(entry, id, &normalized_query);
+            let query_hit = query_hit(entry, id, &normalized_query, &query_terms);
             let hot_reference_hit = hot_reference_ids.contains(id);
             if query_hit.candidate || hot_reference_hit {
                 let document = self.read_unchecked(Path::new(&entry.path))?;
@@ -338,7 +345,7 @@ impl MemoryWorkspace {
                 relation_relevance.insert(
                     related_id.clone(),
                     (
-                        query_hit(entry, related_id, &normalized_query).candidate,
+                        query_hit(entry, related_id, &normalized_query, &query_terms).candidate,
                         hot_reference_ids.contains(related_id),
                     ),
                 );
@@ -488,23 +495,28 @@ impl MemoryWorkspace {
             .map(|memory| memory.id.as_str())
             .collect::<HashSet<_>>();
         let mut queued_touch_ids = HashSet::new();
-        for (_, document) in direct_pool.iter().take(HIT_REFRESH_LIMIT) {
+        for (path, document) in direct_pool.iter().take(HIT_REFRESH_LIMIT) {
             if touch_ids.contains(&document.metadata.id) {
                 queued_touch_ids.insert(document.metadata.id.clone());
-                self.queue_touch(now, document, &mut mutations)?;
+                self.queue_touch(now, path, document, &mut mutations)?;
             }
         }
-        for (_, document) in &direct_pool {
+        for (path, document) in &direct_pool {
             if loaded_long_term.contains(document.metadata.id.as_str())
                 && touch_ids.contains(&document.metadata.id)
                 && queued_touch_ids.insert(document.metadata.id.clone())
             {
-                self.queue_touch(now, document, &mut mutations)?;
+                self.queue_touch(now, path, document, &mut mutations)?;
             }
         }
         self.record_memory_activity(now, &loaded_ids, &mut mutations)?;
         if !mutations.is_empty() {
             commit_mutations(&mutations)?;
+            // Retrieval only changes touch timestamps in long-term documents;
+            // the searchable index remains valid. Refresh the file signature
+            // so the next request can use the cached index while still
+            // detecting edits made outside this process.
+            self.refresh_cached_index_stamps(&mutations)?;
         }
         Ok(result)
     }
@@ -541,6 +553,7 @@ impl MemoryWorkspace {
             path: self.checked_index_path()?,
             content: encode_index(&index)?.into_bytes(),
         }])?;
+        self.store_cached_index(index.clone())?;
         Ok(count)
     }
 
@@ -771,7 +784,7 @@ impl MemoryWorkspace {
     /// the same filesystem transaction.
     pub fn delete_document_authorized(&self, id: &str) -> Result<(), MemoryError> {
         let access = self.load_access()?;
-        let mut index = self.load_index()?;
+        let mut index = Arc::unwrap_or_clone(self.load_index()?);
         let entry = index
             .entries
             .get(id)
@@ -820,7 +833,7 @@ impl MemoryWorkspace {
         explicitly_authorized: bool,
     ) -> Result<PathBuf, MemoryError> {
         let access = self.load_access()?;
-        let mut index = self.load_index()?;
+        let mut index = Arc::unwrap_or_clone(self.load_index()?);
         let entry = index
             .entries
             .get(id)
@@ -949,7 +962,7 @@ impl MemoryWorkspace {
     /// section patch can accidentally target the document title or fail when
     /// an older file has no `##` section yet.
     pub fn replace_document_body(&self, id: &str, body: &str) -> Result<(), MemoryError> {
-        let mut index = self.load_index()?;
+        let mut index = Arc::unwrap_or_clone(self.load_index()?);
         let entry = index
             .entries
             .get(id)
@@ -1096,21 +1109,20 @@ impl MemoryWorkspace {
     fn queue_touch(
         &self,
         now: i64,
+        relative: &str,
         document: &MemoryDocument,
         mutations: &mut Vec<FileMutation>,
     ) -> Result<(), MemoryError> {
         if document.metadata.kind == "current" {
             return Ok(());
         }
-        let index = self.load_index_for_rebuild()?;
-        let Some(entry) = index.entries.get(&document.metadata.id) else {
-            return Ok(());
-        };
-        let relative = PathBuf::from(&entry.path);
         let mut touched = document.clone();
         touched.metadata.touch_at = now;
         mutations.push(FileMutation::Write {
-            path: self.resolve(&relative)?,
+            // The path came from the already validated index entry used to
+            // load this exact document. Re-reading and parsing the complete
+            // index here made every retrieval pay that cost a second time.
+            path: self.resolve(Path::new(relative))?,
             content: touched.encode()?.into_bytes(),
         });
         Ok(())
@@ -1193,7 +1205,18 @@ impl MemoryWorkspace {
         }))
     }
 
-    pub(super) fn load_index(&self) -> Result<MemoryIndex, MemoryError> {
+    pub(super) fn load_index(&self) -> Result<Arc<MemoryIndex>, MemoryError> {
+        let source_signature = self.index_source_signature()?;
+        if let Some(cached) = self
+            .index_cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|cached| cached.source_signature == source_signature)
+        {
+            return Ok(Arc::clone(&cached.index));
+        }
+
         let path = self.checked_index_path()?;
         let parsed = match fs::read_to_string(&path) {
             Ok(text) => yaml_serde::from_str::<MemoryIndex>(&text)
@@ -1209,7 +1232,82 @@ impl MemoryWorkspace {
                 content: encode_index(&rebuilt)?.into_bytes(),
             }])?;
         }
-        Ok(rebuilt)
+        let index = Arc::new(rebuilt);
+        *self
+            .index_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedMemoryIndex {
+            source_signature: self.index_source_signature()?,
+            index: Arc::clone(&index),
+        });
+        Ok(index)
+    }
+
+    fn store_cached_index(&self, index: MemoryIndex) -> Result<(), MemoryError> {
+        *self
+            .index_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedMemoryIndex {
+            source_signature: self.index_source_signature()?,
+            index: Arc::new(index),
+        });
+        Ok(())
+    }
+
+    fn refresh_cached_index_stamps(&self, mutations: &[FileMutation]) -> Result<(), MemoryError> {
+        let mut cache = self
+            .index_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(cached) = cache.as_mut() else {
+            return Ok(());
+        };
+        for mutation in mutations {
+            let Ok(relative) = mutation.path().strip_prefix(&self.root) else {
+                continue;
+            };
+            let Ok(index) = cached
+                .source_signature
+                .binary_search_by(|stamp| stamp.path.as_path().cmp(relative))
+            else {
+                // Activity and audit files do not contribute to the memory
+                // index signature.
+                continue;
+            };
+            let metadata = fs::symlink_metadata(mutation.path())?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(MemoryError::UnsafePath(relative.to_path_buf()));
+            }
+            cached.source_signature[index] = IndexSourceStamp {
+                path: relative.to_path_buf(),
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+            };
+        }
+        Ok(())
+    }
+
+    fn index_source_signature(&self) -> Result<Vec<IndexSourceStamp>, MemoryError> {
+        let mut paths = self.all_long_term_memory_paths()?;
+        paths.push(PathBuf::from("indexes/memory_index.yaml"));
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                // `all_long_term_memory_paths` obtains these paths from a
+                // symlink-rejecting directory walk. Joining directly avoids
+                // restatting every ancestor for every document.
+                let metadata = fs::symlink_metadata(self.root.join(&path))?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(MemoryError::UnsafePath(path));
+                }
+                Ok(IndexSourceStamp {
+                    path,
+                    len: metadata.len(),
+                    modified: metadata.modified().ok(),
+                })
+            })
+            .collect()
     }
 
     fn load_index_for_rebuild(&self) -> Result<MemoryIndex, MemoryError> {

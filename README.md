@@ -125,8 +125,11 @@ projection, including character-owned MOC profiles, typed signals, deterministic
 selection, persisted hysteresis, and atomic audit state; broader credentialed
 and MORP coverage remains the stable `v1.0.0` gate. See the
 [1.0.0 release contract](docs/roadmap_1_0_0.md).
+The rc.4 candidate keeps those contracts frozen while tightening orchestration
+boundaries and making per-Space retrieval workspaces persistent across requests.
 Release-candidate changes are summarized in the
-[rc.3 release notes](docs/release_notes_1_0_0_rc3.md).
+[rc.4 release notes](docs/release_notes_1_0_0_rc4.md); the published rc.3 notes
+remain [available here](docs/release_notes_1_0_0_rc3.md).
 DDM's implementation boundary and remaining experimental limitations are in
 the [DDM status report](docs/ddm_implementation_status.md).
 

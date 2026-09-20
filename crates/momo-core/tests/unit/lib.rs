@@ -20,6 +20,20 @@ async fn initializes_local_data_layout() {
 }
 
 #[tokio::test]
+async fn reuses_memory_workspace_state_for_the_same_space() {
+    let directory = tempfile::tempdir().expect("data directory");
+    let core = MomoCore::initialize(directory.path())
+        .await
+        .expect("initialize core");
+    let space_id = momo_domain::new_id();
+
+    let first = core.memory_for_space(space_id).expect("first workspace");
+    let second = core.memory_for_space(space_id).expect("second workspace");
+
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[tokio::test]
 async fn converts_the_legacy_memory_directory_once() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let space_id = momo_domain::new_id();
