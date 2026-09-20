@@ -50,6 +50,26 @@ fn node_round_trip_preserves_semantics_and_edges() {
 }
 
 #[test]
+fn invalid_scalar_metadata_uses_conservative_defaults() {
+    let node = NsgNode::parse(
+        r#"# ID: lore_defaults
+# TYPE: lore
+# IMP: not-a-number
+# MODE: experimental
+# STATUS: typo
+# ZONE: somewhere
+
+@ANCHORS: defaults
+"#,
+    )
+    .expect("invalid scalar metadata degrades locally");
+    assert_eq!(node.importance, 0.5);
+    assert_eq!(node.mode, NsgMode::Canon);
+    assert_eq!(node.status, NsgStatus::Archived);
+    assert_eq!(node.zone, NsgZone::Auto);
+}
+
+#[test]
 fn exact_nsg_create_patch_replay_is_idempotent() {
     let root = tempfile::tempdir().expect("root");
     let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");
@@ -78,6 +98,22 @@ fn automatic_creation_requires_draft_and_rejects_unknown_fields() {
 }
 
 #[test]
+fn validation_checks_current_graph_without_writing() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");
+
+    workspace.validate_patch(CREATE_DRAFT).expect("valid patch");
+    assert!(!root.path().join("lore/black_flame.nsg").exists());
+
+    let unauthorized = CREATE_DRAFT.replace("mode: \"draft\"", "mode: \"canon\"");
+    assert!(matches!(
+        workspace.validate_patch(&unauthorized),
+        Err(MemoryError::InvalidPatch(_))
+    ));
+    assert!(!root.path().join("lore/black_flame.nsg").exists());
+}
+
+#[test]
 fn retrieval_matches_terms_inside_multiword_anchors() {
     let root = tempfile::tempdir().expect("root");
     let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");
@@ -97,6 +133,65 @@ fn retrieval_matches_terms_inside_multiword_anchors() {
         retrieved.iter().any(|item| item.id == "lore_black_flame"),
         "multiword anchor was not searchable: {retrieved:?}"
     );
+}
+
+#[test]
+fn direct_candidates_can_use_budget_left_by_an_empty_expansion_pool() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");
+    let node = |id: &str, consequence: &str| NsgNode {
+        id: id.to_owned(),
+        graph_id: "budget-test".to_owned(),
+        kind: "lore".to_owned(),
+        importance: 0.8,
+        mode: NsgMode::Canon,
+        status: NsgStatus::Active,
+        zone: NsgZone::Two,
+        anchors: vec!["budget marker".to_owned()],
+        condition: "The condition is known.".to_owned(),
+        trigger: "The marker is mentioned.".to_owned(),
+        consequence: consequence.to_owned(),
+        constraint: "No graph edges are present.".to_owned(),
+        source_character_ids: Vec::new(),
+        inject_character_ids: Vec::new(),
+        edges: Vec::new(),
+    };
+    let first = node("budget_first", "The first independent fact applies.");
+    let second = node("budget_second", "The second independent fact applies.");
+    let max_tokens = ConservativeTokenCounter.count(&first.graph_context())
+        + ConservativeTokenCounter.count(&second.graph_context());
+    workspace
+        .write_node("lore/budget_first.nsg", first)
+        .expect("first node");
+    workspace
+        .write_node("lore/budget_second.nsg", second)
+        .expect("second node");
+
+    let retrieved = workspace
+        .retrieve("budget marker", &[], max_tokens, &ConservativeTokenCounter)
+        .expect("retrieve");
+    assert!(retrieved.iter().any(|item| item.id == "budget_first"));
+    assert!(retrieved.iter().any(|item| item.id == "budget_second"));
+}
+
+#[test]
+fn retrieval_excludes_one_invalid_file_without_losing_valid_nodes() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = NsgWorkspace::initialize(root.path()).expect("workspace");
+    workspace
+        .apply_patch_authorized(&CREATE_DRAFT.replace("mode: \"draft\"", "mode: \"canon\""))
+        .expect("create Canon fixture");
+    fs::write(
+        root.path().join("lore/invalid.nsg"),
+        "this is not an NSG metadata document\n",
+    )
+    .expect("invalid node fixture");
+
+    let retrieved = workspace
+        .retrieve("black flame", &[], 512, &ConservativeTokenCounter)
+        .expect("one invalid node must not abort retrieval");
+
+    assert!(retrieved.iter().any(|item| item.id == "lore_black_flame"));
 }
 
 #[test]

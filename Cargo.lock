@@ -2100,6 +2100,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
+ "tracing",
  "unicode-normalization",
  "yaml_serde",
 ]

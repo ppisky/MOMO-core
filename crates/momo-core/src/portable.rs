@@ -22,6 +22,12 @@ use crate::MomoCore;
 const PRIVATE_MOC_AAD: &[u8] = b"momo-private-moc-v1";
 const PRIVATE_MOC_PAYLOAD: &str = "private/payload.enc";
 const PRIVATE_MOC_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const PRIVATE_MOC_GCM_TAG_BYTES: u64 = 16;
+const PRIVATE_MOC_ENVELOPE_OVERHEAD_BYTES: u64 = 64 * 1024;
+const PRIVATE_MOC_MAX_CIPHERTEXT_BASE64_BYTES: u64 =
+    (PRIVATE_MOC_MAX_BYTES + PRIVATE_MOC_GCM_TAG_BYTES).div_ceil(3) * 4;
+const PRIVATE_MOC_MAX_ENVELOPE_BYTES: u64 =
+    PRIVATE_MOC_MAX_CIPHERTEXT_BASE64_BYTES + PRIVATE_MOC_ENVELOPE_OVERHEAD_BYTES;
 const EXTERNAL_SOURCE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -520,8 +526,14 @@ pub async fn import_moc_with_passphrase_and_claims(
         let passphrase = passphrase
             .filter(|value| !value.is_empty())
             .ok_or(PortableError::MissingPassphrase)?;
-        let envelope =
-            momo_crypto::decode_envelope(&fs::read(outer.path().join(PRIVATE_MOC_PAYLOAD))?)?;
+        let encrypted_payload = outer.path().join(PRIVATE_MOC_PAYLOAD);
+        validate_private_moc_envelope_size(fs::metadata(&encrypted_payload)?.len())?;
+        let envelope = momo_crypto::decode_envelope(&fs::read(&encrypted_payload)?)?;
+        if u64::try_from(envelope.ciphertext.len()).unwrap_or(u64::MAX)
+            > PRIVATE_MOC_MAX_CIPHERTEXT_BASE64_BYTES
+        {
+            return Err(PortableError::PrivateMocTooLarge);
+        }
         let plaintext = momo_crypto::decrypt(&envelope, passphrase, PRIVATE_MOC_AAD)?;
         if u64::try_from(plaintext.len()).unwrap_or(u64::MAX) > PRIVATE_MOC_MAX_BYTES {
             return Err(PortableError::PrivateMocTooLarge);
@@ -601,7 +613,7 @@ pub async fn import_moc_with_passphrase_and_claims(
         }
     }
     let mut imported_character_ids = HashSet::new();
-    for space in &payload_manifest.space_modules {
+    for space in ordered_space_modules(&payload_manifest) {
         let source_space = Uuid::parse_str(&space.space_id)?;
         let target_space = plan
             .space_map
@@ -641,6 +653,30 @@ pub async fn import_moc_with_passphrase_and_claims(
     Ok(report)
 }
 
+fn validate_private_moc_envelope_size(size: u64) -> Result<(), PortableError> {
+    if size > PRIVATE_MOC_MAX_ENVELOPE_BYTES {
+        return Err(PortableError::PrivateMocTooLarge);
+    }
+    Ok(())
+}
+
+fn ordered_space_modules(manifest: &Manifest) -> Vec<&SpaceModuleDefinition> {
+    let import_orders = manifest
+        .module_definitions
+        .iter()
+        .map(|module| (module.id.as_str(), module.import_order))
+        .collect::<BTreeMap<_, _>>();
+    let mut spaces = manifest.space_modules.iter().collect::<Vec<_>>();
+    spaces.sort_by(|left, right| {
+        import_orders
+            .get(left.module.as_str())
+            .cmp(&import_orders.get(right.module.as_str()))
+            .then_with(|| left.module.cmp(&right.module))
+            .then_with(|| left.space_id.cmp(&right.space_id))
+    });
+    spaces
+}
+
 async fn preflight_moc_payload(
     core: &MomoCore,
     extracted: &Path,
@@ -657,25 +693,54 @@ async fn preflight_moc_payload(
         preflight_config_bundle(extracted.join("config/momo.toml"))?;
     }
 
-    let existing_characters = core
+    let existing_character_spaces = core
         .store()
         .list_characters()
         .await?
         .into_iter()
-        .map(|character| character.id)
+        .map(|character| (character.id, character.scope_id))
+        .collect::<BTreeMap<_, _>>();
+    let existing_characters = existing_character_spaces
+        .keys()
+        .copied()
         .collect::<HashSet<_>>();
+    let existing_conversation_spaces = core
+        .store()
+        .list_conversations()
+        .await?
+        .into_iter()
+        .map(|conversation| (conversation.id, conversation.scope_id))
+        .collect::<BTreeMap<_, _>>();
+    let mut existing_message_conversations = BTreeMap::new();
+    for conversation_id in existing_conversation_spaces.keys() {
+        for message in core.store().list_messages(*conversation_id).await? {
+            existing_message_conversations.insert(message.id, message.conversation_id);
+        }
+    }
     let mut character_ids = existing_characters.clone();
     let mut imported_character_ids = HashSet::new();
     let mut conversation_ids = HashSet::new();
     let mut message_ids = HashSet::new();
 
-    for space in &manifest.space_modules {
+    for space in ordered_space_modules(manifest) {
         let source_space = Uuid::parse_str(&space.space_id)?;
+        let target_space = plan
+            .space_map
+            .get(&source_space)
+            .copied()
+            .unwrap_or(source_space);
         let directory = extracted.join(&space.path);
         match space.module.as_str() {
             "characters" => {
                 let ids = preflight_characters(&directory)?;
                 for id in ids {
+                    if let Some(existing_space) = existing_character_spaces.get(&id)
+                        && *existing_space != target_space
+                    {
+                        return Err(PortableError::InvalidData(format!(
+                            "character {id} already belongs to Space {existing_space} instead of mapped target Space {target_space}"
+                        )));
+                    }
                     if !imported_character_ids.insert(id) {
                         return Err(PortableError::InvalidData(format!(
                             "character {id} occurs in more than one Space module"
@@ -684,12 +749,33 @@ async fn preflight_moc_payload(
                     character_ids.insert(id);
                 }
             }
-            "conversations" => preflight_conversations(
-                &directory,
-                source_space,
-                &mut conversation_ids,
-                &mut message_ids,
-            )?,
+            "conversations" => {
+                let preflight = preflight_conversations(
+                    &directory,
+                    source_space,
+                    &mut conversation_ids,
+                    &mut message_ids,
+                )?;
+                for id in preflight.conversation_ids {
+                    if let Some(existing_space) = existing_conversation_spaces.get(&id)
+                        && *existing_space != target_space
+                    {
+                        return Err(PortableError::InvalidData(format!(
+                            "conversation {id} already belongs to Space {existing_space} instead of mapped target Space {target_space}"
+                        )));
+                    }
+                }
+                for (message_id, conversation_id) in preflight.message_owners {
+                    if let Some(existing_conversation) =
+                        existing_message_conversations.get(&message_id)
+                        && *existing_conversation != conversation_id
+                    {
+                        return Err(PortableError::InvalidData(format!(
+                            "message {message_id} already belongs to conversation {existing_conversation} instead of imported conversation {conversation_id}"
+                        )));
+                    }
+                }
+            }
             "memory" | "semantic_graph" => preflight_workspace_tree(&directory)?,
             _ => {
                 return Err(PortableError::InvalidData(format!(
@@ -826,12 +912,17 @@ fn preflight_characters(directory: &Path) -> Result<HashSet<Uuid>, PortableError
     Ok(discovered)
 }
 
+struct PreflightConversations {
+    conversation_ids: HashSet<Uuid>,
+    message_owners: Vec<(Uuid, Uuid)>,
+}
+
 fn preflight_conversations(
     directory: &Path,
     source_space: Uuid,
     all_conversation_ids: &mut HashSet<Uuid>,
     all_message_ids: &mut HashSet<Uuid>,
-) -> Result<(), PortableError> {
+) -> Result<PreflightConversations, PortableError> {
     if !directory.is_dir() {
         return Err(PortableError::InvalidData(format!(
             "declared conversation Space is not a directory: {}",
@@ -859,6 +950,7 @@ fn preflight_conversations(
     }
     let messages: Vec<Message> =
         serde_json::from_slice(&fs::read(directory.join("messages.json"))?)?;
+    let mut message_owners = Vec::with_capacity(messages.len());
     for message in messages {
         if !local_conversations.contains(&message.conversation_id) {
             return Err(PortableError::InvalidData(format!(
@@ -872,8 +964,12 @@ fn preflight_conversations(
                 message.id
             )));
         }
+        message_owners.push((message.id, message.conversation_id));
     }
-    Ok(())
+    Ok(PreflightConversations {
+        conversation_ids: local_conversations,
+        message_owners,
+    })
 }
 
 fn preflight_workspace_tree(directory: &Path) -> Result<(), PortableError> {

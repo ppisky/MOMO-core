@@ -73,7 +73,10 @@ impl MemoryWorkspace {
             };
             atomic_write(&path, &document.encode()?)?;
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            index_cache: Arc::new(RwLock::new(None)),
+        })
     }
 
     #[must_use]
@@ -272,8 +275,11 @@ impl MemoryWorkspace {
         }
 
         let normalized_query = normalize(query);
+        // Tokenizing allocates a set (and CJK bigrams). It depends only on the
+        // query, so compute it once instead of once per index entry and graph
+        // expansion candidate.
+        let query_terms = searchable_terms(&normalized_query);
         let mut direct_pool = Vec::new();
-        let mut relevance = HashMap::new();
         let mut by_id = HashMap::new();
 
         for (id, entry) in &index.entries {
@@ -281,7 +287,7 @@ impl MemoryWorkspace {
             if !access.can_read(&entry.kind) {
                 continue;
             }
-            let query_hit = query_hit(entry, id, &normalized_query);
+            let query_hit = query_hit(entry, id, &normalized_query, &query_terms);
             let hot_reference_hit = hot_reference_ids.contains(id);
             if query_hit.candidate || hot_reference_hit {
                 let document = self.read_unchecked(Path::new(&entry.path))?;
@@ -292,7 +298,6 @@ impl MemoryWorkspace {
                     )));
                 }
                 if document.metadata.status == "active" {
-                    relevance.insert(id.clone(), (hot_reference_hit, query_hit.matched_terms));
                     if query_hit.substantive || hot_reference_hit {
                         touch_ids.insert(id.clone());
                     }
@@ -300,58 +305,89 @@ impl MemoryWorkspace {
                 }
             }
         }
-        let compare_direct = |left: &(String, MemoryDocument), right: &(String, MemoryDocument)| {
-            relevance[&right.1.metadata.id]
-                .cmp(&relevance[&left.1.metadata.id])
-                .then_with(|| compare_documents(left, right))
-        };
-        direct_pool.sort_by(compare_direct);
-        let related_ids = direct_pool
-            .iter()
-            .take(EXPANSION_SOURCE_LIMIT)
-            .flat_map(|(_, document)| {
-                let is_hub = relation_degree(document, &by_id, &access) > HUB_THRESHOLD;
-                let limit = if is_hub {
-                    HUB_EXPANSION_PER_SOURCE
-                } else {
-                    NORMAL_EXPANSION_PER_SOURCE
-                };
-                ranked_relation_ids(
-                    document,
-                    &by_id,
-                    &access,
-                    &normalized_query,
-                    &hot_reference_ids,
-                )
-                .into_iter()
-                .take(limit)
-            })
-            .take(MAX_EXPANSION_TOTAL)
-            .collect::<Vec<_>>();
-        let mut candidate_ids = direct_pool
+        direct_pool.sort_by(compare_documents);
+        let direct_ids = direct_pool
             .iter()
             .map(|(_, document)| document.metadata.id.clone())
             .collect::<HashSet<_>>();
-        let mut expansion_pool = Vec::new();
-        for related_id in related_ids {
-            if candidate_ids.insert(related_id.clone())
-                && let Some(entry) = by_id.get(&related_id)
-                && access.can_read(&entry.kind)
-            {
+        let mut expansion_candidates = HashMap::new();
+        for (_, source) in direct_pool.iter().take(EXPANSION_SOURCE_LIMIT) {
+            let is_hub = relation_degree(source, &by_id, &access) > HUB_THRESHOLD;
+            let limit = if is_hub {
+                HUB_EXPANSION_PER_SOURCE
+            } else {
+                NORMAL_EXPANSION_PER_SOURCE
+            };
+            let expansion_factor = if is_hub { HUB_FACTOR } else { 1.0 };
+            let mut seen_for_source = HashSet::new();
+            let mut relation_relevance = HashMap::new();
+            let mut related_pool = Vec::new();
+            for related_id in source.metadata.relations.values().flatten() {
+                if direct_ids.contains(related_id) || !seen_for_source.insert(related_id.clone()) {
+                    continue;
+                }
+                let Some(entry) = by_id.get(related_id) else {
+                    continue;
+                };
+                if !access.can_read(&entry.kind) {
+                    continue;
+                }
                 let document = self.read_unchecked(Path::new(&entry.path))?;
-                if document.metadata.id != related_id {
+                if document.metadata.id != *related_id {
                     return Err(MemoryError::InvalidIndex(format!(
                         "entry {related_id} points to document {}",
                         document.metadata.id
                     )));
                 }
-                if document.metadata.status == "active" {
-                    expansion_pool.push((entry.path.clone(), document));
+                if document.metadata.status != "active" {
+                    continue;
                 }
+                relation_relevance.insert(
+                    related_id.clone(),
+                    (
+                        query_hit(entry, related_id, &normalized_query, &query_terms).candidate,
+                        hot_reference_ids.contains(related_id),
+                    ),
+                );
+                related_pool.push((entry.path.clone(), document));
+            }
+            related_pool.sort_by(|left, right| {
+                let left_relevance = relation_relevance[&left.1.metadata.id];
+                let right_relevance = relation_relevance[&right.1.metadata.id];
+                right_relevance
+                    .0
+                    .cmp(&left_relevance.0)
+                    .then_with(|| right_relevance.1.cmp(&left_relevance.1))
+                    .then_with(|| compare_documents(left, right))
+            });
+            for (path, document) in related_pool.into_iter().take(limit) {
+                expansion_candidates
+                    .entry(document.metadata.id.clone())
+                    .and_modify(|candidate: &mut (String, MemoryDocument, f64)| {
+                        candidate.2 = candidate.2.max(expansion_factor);
+                    })
+                    .or_insert((path, document, expansion_factor));
             }
         }
-        direct_pool.sort_by(compare_direct);
-        expansion_pool.sort_by(compare_documents);
+        let mut expansion_pool = expansion_candidates.into_values().collect::<Vec<_>>();
+        expansion_pool.sort_by(|left, right| {
+            let left_weight = left.1.metadata.weight.unwrap_or_default() * left.2;
+            let right_weight = right.1.metadata.weight.unwrap_or_default() * right.2;
+            right_weight
+                .total_cmp(&left_weight)
+                .then_with(|| {
+                    right
+                        .1
+                        .metadata
+                        .importance
+                        .unwrap_or_default()
+                        .total_cmp(&left.1.metadata.importance.unwrap_or_default())
+                })
+                .then_with(|| right.1.metadata.touch_at.cmp(&left.1.metadata.touch_at))
+                .then_with(|| left.1.metadata.id.cmp(&right.1.metadata.id))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        expansion_pool.truncate(MAX_EXPANSION_TOTAL);
         let remaining_memory_budget = max_tokens.saturating_sub(used);
         let direct_budget =
             remaining_memory_budget.saturating_mul(DIRECT_RESERVE_RATIO_NUMERATOR) / 100;
@@ -394,7 +430,7 @@ impl MemoryWorkspace {
                 state_signal: Some(retrieved_state_signal(document)),
             });
         }
-        for (path, document) in &expansion_pool {
+        for (path, document, _) in &expansion_pool {
             let tokens = counter.count(&document.body);
             if used.saturating_add(tokens) > max_tokens
                 || expansion_used.saturating_add(tokens) > expansion_budget
@@ -422,28 +458,65 @@ impl MemoryWorkspace {
                 state_signal: Some(retrieved_state_signal(document)),
             });
         }
+        let already_loaded = loaded_ids.iter().cloned().collect::<HashSet<_>>();
+        for (path, document) in &direct_pool {
+            if already_loaded.contains(&document.metadata.id) {
+                continue;
+            }
+            let remaining = max_tokens.saturating_sub(used);
+            let body = markdown_prefix_within_budget(&document.body, remaining, counter);
+            if body.is_empty() {
+                continue;
+            }
+            let tokens = counter.count(&body);
+            used += tokens;
+            let id = document.metadata.id.clone();
+            let source_character_ids = document
+                .metadata
+                .relations
+                .get("characters")
+                .cloned()
+                .unwrap_or_default();
+            loaded_ids.push(id.clone());
+            result.push(RetrievedMemory {
+                id,
+                path: PathBuf::from(path.clone()),
+                body,
+                estimated_tokens: tokens,
+                source_character_ids,
+                injection_scope: document.metadata.injection_scope.clone(),
+                injection_conversation_id: document.metadata.injection_conversation_id.clone(),
+                injection_character_id: document.metadata.injection_character_id.clone(),
+                state_signal: Some(retrieved_state_signal(document)),
+            });
+        }
         let loaded_long_term = result
             .iter()
             .map(|memory| memory.id.as_str())
             .collect::<HashSet<_>>();
         let mut queued_touch_ids = HashSet::new();
-        for (_, document) in direct_pool.iter().take(HIT_REFRESH_LIMIT) {
+        for (path, document) in direct_pool.iter().take(HIT_REFRESH_LIMIT) {
             if touch_ids.contains(&document.metadata.id) {
                 queued_touch_ids.insert(document.metadata.id.clone());
-                self.queue_touch(now, document, &mut mutations)?;
+                self.queue_touch(now, path, document, &mut mutations)?;
             }
         }
-        for (_, document) in &direct_pool {
+        for (path, document) in &direct_pool {
             if loaded_long_term.contains(document.metadata.id.as_str())
                 && touch_ids.contains(&document.metadata.id)
                 && queued_touch_ids.insert(document.metadata.id.clone())
             {
-                self.queue_touch(now, document, &mut mutations)?;
+                self.queue_touch(now, path, document, &mut mutations)?;
             }
         }
         self.record_memory_activity(now, &loaded_ids, &mut mutations)?;
         if !mutations.is_empty() {
             commit_mutations(&mutations)?;
+            // Retrieval only changes touch timestamps in long-term documents;
+            // the searchable index remains valid. Refresh the file signature
+            // so the next request can use the cached index while still
+            // detecting edits made outside this process.
+            self.refresh_cached_index_stamps(&mutations)?;
         }
         Ok(result)
     }
@@ -480,6 +553,7 @@ impl MemoryWorkspace {
             path: self.checked_index_path()?,
             content: encode_index(&index)?.into_bytes(),
         }])?;
+        self.store_cached_index(index.clone())?;
         Ok(count)
     }
 
@@ -710,7 +784,7 @@ impl MemoryWorkspace {
     /// the same filesystem transaction.
     pub fn delete_document_authorized(&self, id: &str) -> Result<(), MemoryError> {
         let access = self.load_access()?;
-        let mut index = self.load_index()?;
+        let mut index = Arc::unwrap_or_clone(self.load_index()?);
         let entry = index
             .entries
             .get(id)
@@ -759,7 +833,7 @@ impl MemoryWorkspace {
         explicitly_authorized: bool,
     ) -> Result<PathBuf, MemoryError> {
         let access = self.load_access()?;
-        let mut index = self.load_index()?;
+        let mut index = Arc::unwrap_or_clone(self.load_index()?);
         let entry = index
             .entries
             .get(id)
@@ -888,7 +962,7 @@ impl MemoryWorkspace {
     /// section patch can accidentally target the document title or fail when
     /// an older file has no `##` section yet.
     pub fn replace_document_body(&self, id: &str, body: &str) -> Result<(), MemoryError> {
-        let mut index = self.load_index()?;
+        let mut index = Arc::unwrap_or_clone(self.load_index()?);
         let entry = index
             .entries
             .get(id)
@@ -1035,21 +1109,20 @@ impl MemoryWorkspace {
     fn queue_touch(
         &self,
         now: i64,
+        relative: &str,
         document: &MemoryDocument,
         mutations: &mut Vec<FileMutation>,
     ) -> Result<(), MemoryError> {
         if document.metadata.kind == "current" {
             return Ok(());
         }
-        let index = self.load_index_for_rebuild()?;
-        let Some(entry) = index.entries.get(&document.metadata.id) else {
-            return Ok(());
-        };
-        let relative = PathBuf::from(&entry.path);
         let mut touched = document.clone();
         touched.metadata.touch_at = now;
         mutations.push(FileMutation::Write {
-            path: self.resolve(&relative)?,
+            // The path came from the already validated index entry used to
+            // load this exact document. Re-reading and parsing the complete
+            // index here made every retrieval pay that cost a second time.
+            path: self.resolve(Path::new(relative))?,
             content: touched.encode()?.into_bytes(),
         });
         Ok(())
@@ -1132,7 +1205,18 @@ impl MemoryWorkspace {
         }))
     }
 
-    pub(super) fn load_index(&self) -> Result<MemoryIndex, MemoryError> {
+    pub(super) fn load_index(&self) -> Result<Arc<MemoryIndex>, MemoryError> {
+        let source_signature = self.index_source_signature()?;
+        if let Some(cached) = self
+            .index_cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|cached| cached.source_signature == source_signature)
+        {
+            return Ok(Arc::clone(&cached.index));
+        }
+
         let path = self.checked_index_path()?;
         let parsed = match fs::read_to_string(&path) {
             Ok(text) => yaml_serde::from_str::<MemoryIndex>(&text)
@@ -1148,7 +1232,82 @@ impl MemoryWorkspace {
                 content: encode_index(&rebuilt)?.into_bytes(),
             }])?;
         }
-        Ok(rebuilt)
+        let index = Arc::new(rebuilt);
+        *self
+            .index_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedMemoryIndex {
+            source_signature: self.index_source_signature()?,
+            index: Arc::clone(&index),
+        });
+        Ok(index)
+    }
+
+    fn store_cached_index(&self, index: MemoryIndex) -> Result<(), MemoryError> {
+        *self
+            .index_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedMemoryIndex {
+            source_signature: self.index_source_signature()?,
+            index: Arc::new(index),
+        });
+        Ok(())
+    }
+
+    fn refresh_cached_index_stamps(&self, mutations: &[FileMutation]) -> Result<(), MemoryError> {
+        let mut cache = self
+            .index_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(cached) = cache.as_mut() else {
+            return Ok(());
+        };
+        for mutation in mutations {
+            let Ok(relative) = mutation.path().strip_prefix(&self.root) else {
+                continue;
+            };
+            let Ok(index) = cached
+                .source_signature
+                .binary_search_by(|stamp| stamp.path.as_path().cmp(relative))
+            else {
+                // Activity and audit files do not contribute to the memory
+                // index signature.
+                continue;
+            };
+            let metadata = fs::symlink_metadata(mutation.path())?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(MemoryError::UnsafePath(relative.to_path_buf()));
+            }
+            cached.source_signature[index] = IndexSourceStamp {
+                path: relative.to_path_buf(),
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+            };
+        }
+        Ok(())
+    }
+
+    fn index_source_signature(&self) -> Result<Vec<IndexSourceStamp>, MemoryError> {
+        let mut paths = self.all_long_term_memory_paths()?;
+        paths.push(PathBuf::from("indexes/memory_index.yaml"));
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                // `all_long_term_memory_paths` obtains these paths from a
+                // symlink-rejecting directory walk. Joining directly avoids
+                // restatting every ancestor for every document.
+                let metadata = fs::symlink_metadata(self.root.join(&path))?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(MemoryError::UnsafePath(path));
+                }
+                Ok(IndexSourceStamp {
+                    path,
+                    len: metadata.len(),
+                    modified: metadata.modified().ok(),
+                })
+            })
+            .collect()
     }
 
     fn load_index_for_rebuild(&self) -> Result<MemoryIndex, MemoryError> {
@@ -1189,6 +1348,7 @@ impl MemoryWorkspace {
             let entry = IndexEntry {
                 path: portable_path(&relative),
                 kind: document.metadata.kind.clone(),
+                status: Some(document.metadata.status.clone()),
                 aliases,
                 tags: document.metadata.tags.clone(),
                 body_identifiers: retrieval::body_identifiers(&document.body),

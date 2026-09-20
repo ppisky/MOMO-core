@@ -16,10 +16,11 @@ mod response;
 mod vision;
 
 use std::{
+    collections::HashMap,
     fs::{File, OpenOptions},
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use fs2::FileExt;
@@ -121,6 +122,43 @@ pub struct MomoCore {
     _instance_lock: Arc<File>,
     store: LocalStore,
     vector_store: TursoVectorStore,
+    memory_workspaces: Arc<Mutex<MemoryWorkspaceRegistry>>,
+}
+
+const MAX_CACHED_MEMORY_WORKSPACES: usize = 1_024;
+
+#[derive(Debug, Default)]
+struct MemoryWorkspaceRegistry {
+    generation: u64,
+    entries: HashMap<uuid::Uuid, MemoryWorkspaceEntry>,
+}
+
+#[derive(Debug)]
+struct MemoryWorkspaceEntry {
+    workspace: Arc<MemoryWorkspace>,
+    last_used: u64,
+}
+
+impl MemoryWorkspaceRegistry {
+    fn next_generation(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    fn evict_idle_workspace(&mut self) {
+        if self.entries.len() < MAX_CACHED_MEMORY_WORKSPACES {
+            return;
+        }
+        let oldest = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| Arc::strong_count(&entry.workspace) == 1)
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(space_id, _)| *space_id);
+        if let Some(space_id) = oldest {
+            self.entries.remove(&space_id);
+        }
+    }
 }
 
 impl MomoCore {
@@ -137,6 +175,7 @@ impl MomoCore {
             _instance_lock: Arc::new(instance_lock),
             store,
             vector_store,
+            memory_workspaces: Arc::new(Mutex::new(MemoryWorkspaceRegistry::default())),
         })
     }
 
@@ -158,13 +197,32 @@ impl MomoCore {
     pub fn memory_for_space(
         &self,
         space_id: uuid::Uuid,
-    ) -> Result<MemoryWorkspace, momo_memory::MemoryError> {
-        MemoryWorkspace::initialize(
+    ) -> Result<Arc<MemoryWorkspace>, momo_memory::MemoryError> {
+        let mut registry = self
+            .memory_workspaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = registry.next_generation();
+        if let Some(entry) = registry.entries.get_mut(&space_id) {
+            entry.last_used = generation;
+            return Ok(Arc::clone(&entry.workspace));
+        }
+
+        let workspace = Arc::new(MemoryWorkspace::initialize(
             self.data_dir
                 .join("spaces")
                 .join(space_id.to_string())
                 .join("memory"),
-        )
+        )?);
+        registry.evict_idle_workspace();
+        registry.entries.insert(
+            space_id,
+            MemoryWorkspaceEntry {
+                workspace: Arc::clone(&workspace),
+                last_used: generation,
+            },
+        );
+        Ok(workspace)
     }
 }
 

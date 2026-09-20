@@ -220,14 +220,26 @@ impl NsgNode {
             id: take_required(&mut fields, "ID")?,
             graph_id: fields.remove("GRAPH").unwrap_or_else(default_graph_id),
             kind: take_required(&mut fields, "TYPE")?,
-            importance: fields
-                .remove("IMP")
-                .and_then(|value| value.parse::<f64>().ok())
-                .unwrap_or(0.5),
+            importance: fields.remove("IMP").map_or(0.5, |value| {
+                match value.parse::<f64>() {
+                    Ok(parsed) if (0.0..=1.0).contains(&parsed) => parsed,
+                    Ok(parsed) => {
+                        tracing::warn!(%value, %parsed, "defaulted out-of-range NSG importance to 0.5");
+                        0.5
+                    }
+                    Err(error) => {
+                        tracing::warn!(%value, %error, "defaulted invalid NSG importance to 0.5");
+                        0.5
+                    }
+                }
+            }),
             mode: match fields.remove("MODE").as_deref().unwrap_or("canon") {
                 "canon" => NsgMode::Canon,
                 "draft" => NsgMode::Draft,
-                _ => NsgMode::Canon,
+                invalid_mode => {
+                    tracing::warn!(value = invalid_mode, "defaulted invalid NSG mode to canon");
+                    NsgMode::Canon
+                }
             },
             status: match fields
                 .remove("STATUS")
@@ -236,14 +248,21 @@ impl NsgNode {
             {
                 "active" => NsgStatus::Active,
                 "archived" => NsgStatus::Archived,
-                _ => NsgStatus::Active,
+                invalid_status => {
+                    tracing::warn!(
+                        value = invalid_status,
+                        "defaulted invalid NSG status to archived"
+                    );
+                    NsgStatus::Archived
+                }
             },
-            zone: fields
-                .remove("ZONE")
-                .as_deref()
-                .map(NsgZone::parse)
-                .transpose()?
-                .unwrap_or(NsgZone::Auto),
+            zone: match fields.remove("ZONE") {
+                Some(value) => NsgZone::parse(&value).unwrap_or_else(|error| {
+                    tracing::warn!(%value, %error, "defaulted invalid NSG zone to auto");
+                    NsgZone::Auto
+                }),
+                None => NsgZone::Auto,
+            },
             anchors: semantic
                 .remove("ANCHORS")
                 .map_or_else(Vec::new, |value| split_comma_separated(&value)),
@@ -402,14 +421,25 @@ impl NsgWorkspace {
     }
 
     pub fn apply_patch(&self, yaml: &str) -> Result<(), MemoryError> {
-        self.apply_patch_inner(yaml, false)
+        let mutations = self.prepare_patch(yaml, false)?;
+        commit_mutations(&mutations)
     }
 
     pub fn apply_patch_authorized(&self, yaml: &str) -> Result<(), MemoryError> {
-        self.apply_patch_inner(yaml, true)
+        let mutations = self.prepare_patch(yaml, true)?;
+        commit_mutations(&mutations)
     }
 
-    fn apply_patch_inner(&self, yaml: &str, authorized: bool) -> Result<(), MemoryError> {
+    /// Checks an automatic patch against the current graph without writing it.
+    pub fn validate_patch(&self, yaml: &str) -> Result<(), MemoryError> {
+        self.prepare_patch(yaml, false).map(|_| ())
+    }
+
+    fn prepare_patch(
+        &self,
+        yaml: &str,
+        authorized: bool,
+    ) -> Result<Vec<FileMutation>, MemoryError> {
         let patch: NsgPatchDocument = yaml_serde::from_str(yaml)?;
         let mut touched = HashSet::new();
         let mut mutations = Vec::new();
@@ -503,7 +533,7 @@ impl NsgWorkspace {
                 content: node.encode()?.into_bytes(),
             });
         }
-        commit_mutations(&mutations)
+        Ok(mutations)
     }
 
     pub fn retrieve(
@@ -619,34 +649,60 @@ impl NsgWorkspace {
         }
         candidates.sort_by(compare_candidates);
         let zone3_ids = zone3_candidate_ids(&candidates);
+        let (direct_candidates, expansion_candidates): (Vec<_>, Vec<_>) = candidates
+            .into_iter()
+            .partition(|candidate| candidate.class == NsgCandidateClass::Direct);
 
         let mut used = 0;
         let mut direct_used = 0;
         let mut expansion_used = 0;
         let direct_budget = ((max_tokens as f64) * NSG_DIRECT_RESERVE_RATIO) as usize;
         let expansion_budget = ((max_tokens as f64) * NSG_EXPANSION_MAX_RATIO) as usize;
-        let mut result = Vec::new();
-        for candidate in candidates {
+        let mut selected = Vec::new();
+        let mut deferred_direct = Vec::new();
+        for candidate in direct_candidates {
             let body = candidate.node.graph_context();
             let tokens = counter.count(&body);
             if used + tokens > max_tokens {
                 continue;
             }
-            match candidate.class {
-                NsgCandidateClass::Direct => {
-                    if direct_used + tokens > direct_budget && direct_used > 0 {
-                        continue;
-                    }
-                    direct_used += tokens;
-                }
-                NsgCandidateClass::Expansion => {
-                    if expansion_used + tokens > expansion_budget {
-                        continue;
-                    }
-                    expansion_used += tokens;
-                }
+            if !expansion_candidates.is_empty()
+                && direct_used + tokens > direct_budget
+                && direct_used > 0
+            {
+                deferred_direct.push(candidate);
+                continue;
+            }
+            direct_used += tokens;
+            used += tokens;
+            selected.push(candidate);
+        }
+        for candidate in expansion_candidates {
+            let tokens = counter.count(&candidate.node.graph_context());
+            if used + tokens > max_tokens || expansion_used + tokens > expansion_budget {
+                continue;
+            }
+            expansion_used += tokens;
+            used += tokens;
+            selected.push(candidate);
+        }
+        // The 70% direct allocation is a reserve, not a ceiling. Once the
+        // bounded expansion pool has had its opportunity, return to skipped
+        // direct candidates and use any remaining total budget.
+        for candidate in deferred_direct {
+            let tokens = counter.count(&candidate.node.graph_context());
+            if used + tokens > max_tokens {
+                continue;
             }
             used += tokens;
+            selected.push(candidate);
+        }
+        selected.sort_by(compare_candidates);
+
+        let mut result = Vec::new();
+        for candidate in selected {
+            let body = candidate.node.graph_context();
+            let tokens = counter.count(&body);
             let zone = match candidate.node.zone {
                 NsgZone::Zero => 0,
                 NsgZone::Three => 3,
@@ -1199,8 +1255,19 @@ fn collect_nsg_files(
                 .strip_prefix(root)
                 .map_err(|_| MemoryError::UnsafePath(entry.path()))?
                 .to_path_buf();
-            let node = NsgNode::parse(&fs::read_to_string(entry.path())?)?;
-            output.push((relative, node));
+            let text = match fs::read_to_string(entry.path()) {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::warn!(path = %relative.display(), %error, "excluded unreadable NSG file from retrieval");
+                    continue;
+                }
+            };
+            match NsgNode::parse(&text) {
+                Ok(node) => output.push((relative, node)),
+                Err(error) => {
+                    tracing::warn!(path = %relative.display(), %error, "excluded invalid NSG file from retrieval");
+                }
+            }
         }
     }
     Ok(())

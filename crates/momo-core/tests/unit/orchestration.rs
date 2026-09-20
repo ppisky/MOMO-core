@@ -174,6 +174,96 @@ async fn slow_maintenance_does_not_occupy_foreground_generation_slot() {
     assert!(foreground.try_acquire_owned().is_ok());
 }
 
+#[tokio::test]
+async fn conversation_locks_serialize_one_conversation_across_personal_spaces() {
+    let service = MomoApiService::new(
+        "http://127.0.0.1:9/v1",
+        None,
+        reqwest::Client::new(),
+        Arc::new(MomoConfig::default()),
+    );
+    let conversation_space = "01900000-0000-7000-8000-000000000201";
+    let conversation_id = "01900000-0000-7000-8000-000000000202";
+    let first = service
+        .conversation_lock(conversation_space, conversation_id)
+        .await;
+    let first_guard = first
+        .clone()
+        .try_lock_owned()
+        .expect("first conversation owner");
+    let same = service
+        .conversation_lock(conversation_space, conversation_id)
+        .await;
+    assert!(same.clone().try_lock_owned().is_err());
+
+    let other = service
+        .conversation_lock(conversation_space, "01900000-0000-7000-8000-000000000203")
+        .await;
+    let other_guard = other
+        .try_lock_owned()
+        .expect("different conversations remain concurrent");
+
+    drop(first_guard);
+    assert!(same.try_lock_owned().is_ok());
+    drop(other_guard);
+}
+
+#[tokio::test]
+async fn cancelled_conversation_waiter_stops_immediately_after_acquiring_the_lock() {
+    let service = MomoApiService::new(
+        "http://127.0.0.1:9/v1",
+        None,
+        reqwest::Client::new(),
+        Arc::new(MomoConfig::default()),
+    );
+    let scope_id = "01900000-0000-7000-8000-000000000211";
+    let conversation_id = "01900000-0000-7000-8000-000000000212";
+    let request_id = "queued-request";
+    let operation_key = scoped_operation_key(scope_id, request_id);
+    let _operation = service.enter_operation(&operation_key, scope_id);
+    let blocker = service
+        .conversation_lock(scope_id, conversation_id)
+        .await
+        .lock_owned()
+        .await;
+    let waiter = {
+        let service = service.clone();
+        let operation_key = operation_key.clone();
+        tokio::spawn(async move {
+            service
+                .lock_active_conversation(scope_id, conversation_id, &operation_key)
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(service.cancel(scope_id, request_id));
+    drop(blocker);
+    assert!(matches!(
+        waiter.await.expect("waiter task"),
+        Err(MomoApiError {
+            kind: MomoApiErrorKind::Cancelled,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn maintenance_uses_only_user_authored_text() {
+    let tool_only = ResolvedResponseInput {
+        text: r#"{"temperature":21}"#.to_owned(),
+        persisted_user_text: None,
+        ..ResolvedResponseInput::default()
+    };
+    assert_eq!(tool_only.maintenance_user_text(), "");
+
+    let mixed = ResolvedResponseInput {
+        text: "Please check.\n{\"temperature\":21}".to_owned(),
+        persisted_user_text: Some("Please check.".to_owned()),
+        ..ResolvedResponseInput::default()
+    };
+    assert_eq!(mixed.maintenance_user_text(), "Please check.");
+}
+
 #[test]
 fn roleplay_context_keeps_multi_space_memory_provenance() {
     let rendered = joined_bodies(&[
