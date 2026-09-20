@@ -1309,6 +1309,7 @@ async fn responses_forwards_upstream_sse_deltas_before_completion() {
         let request_text = String::from_utf8_lossy(&request[..read]);
         assert!(request_text.starts_with("POST /v1/chat/completions "));
         assert!(request_text.contains("\"stream\":true"));
+        assert!(request_text.contains("\"temperature\":0.6"));
         let first =
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n";
         let rest = concat!(
@@ -1338,9 +1339,16 @@ async fn responses_forwards_upstream_sse_deltas_before_completion() {
             .expect("write remaining deltas");
     });
 
+    let mut config = MomoConfig::default();
+    config.request_overrides.sampling = momo_core::OverrideMode::Allow;
     let app = build_app(AppState {
         data_dir: initialized_dir,
-        momo_api: test_momo_api(format!("http://{address}/v1")),
+        momo_api: Arc::new(MomoApiService::new(
+            format!("http://{address}/v1"),
+            None,
+            reqwest::Client::new(),
+            Arc::new(config),
+        )),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
         metrics: Arc::new(Mutex::new(HashMap::new())),
@@ -1356,6 +1364,7 @@ async fn responses_forwards_upstream_sse_deltas_before_completion() {
                         "model": "conversation",
                         "input": "stream this response",
                         "stream": true,
+                        "temperature": 0.6,
                         "tools": [{
                             "type": "function",
                             "name": "weather",
@@ -2263,6 +2272,132 @@ async fn maintenance_repairs_invalid_memory_patch_before_staging() {
     )
     .expect("pending JSON");
     assert_eq!(pending, json!([]));
+}
+
+#[tokio::test]
+async fn maintenance_repairs_invalid_semantic_graph_patch_before_staging() {
+    let _test_guard = TEST_LOCK.lock().await;
+    let initialized_dir = initialize_test_core().await;
+    let scope_id = uuid::Uuid::now_v7().to_string();
+    simple::append_maintenance_turn_json(
+        json!({
+            "request_id": uuid::Uuid::now_v7().to_string(),
+            "scope_id": scope_id,
+            "user_content": "Black flame consumes the caster's vitality.",
+            "assistant_content": "Understood."
+        })
+        .to_string(),
+        false,
+        true,
+    )
+    .await
+    .expect("pending semantic-graph turn");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("maintenance gateway");
+    let address = listener.local_addr().expect("maintenance address");
+    let gateway = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept model discovery");
+        let request = read_test_http_request(&mut socket).await;
+        assert!(request.starts_with("GET /v1/models/semantic_graph_governance "));
+        write_test_json_response(
+            &mut socket,
+            json!({
+                "momo": {
+                    "context_window": 8192,
+                    "max_output_tokens": 2048,
+                    "modalities": ["text"]
+                }
+            }),
+        )
+        .await;
+
+        for attempt in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("accept maintenance");
+            let request = read_test_http_request(&mut socket).await;
+            let request_body = request
+                .split_once("\r\n\r\n")
+                .expect("maintenance HTTP body")
+                .1;
+            let request_json: Value =
+                serde_json::from_str(request_body).expect("maintenance request JSON");
+            let user_content: Value = serde_json::from_str(
+                request_json["messages"][1]["content"]
+                    .as_str()
+                    .expect("maintenance user content"),
+            )
+            .expect("structured maintenance input");
+            if attempt == 0 {
+                assert!(user_content.get("previous_output_error").is_none());
+            } else {
+                assert!(
+                    user_content["previous_output_error"]
+                        .as_str()
+                        .is_some_and(|error| error.contains("draft mode"))
+                );
+                assert!(
+                    user_content["required_correction"]
+                        .as_str()
+                        .is_some_and(|instruction| instruction.contains("semantic-graph patch"))
+                );
+            }
+            let mode = if attempt == 0 { "canon" } else { "draft" };
+            let patch = format!(
+                r#"patches:
+  - target_file: "lore/black_flame.nsg"
+    operations:
+      - type: "create_node"
+        metadata:
+          id: "lore_black_flame"
+          type: "lore"
+          importance: 0.9
+          mode: "{mode}"
+          status: "active"
+          zone: "auto"
+        anchors: "black flame, taboo, magic"
+        condition: "The caster lacks a blessing."
+        trigger: "The caster uses black flame."
+        consequence: "The caster loses vitality."
+        constraint: "The spell consumes life."
+        edges: []"#
+            );
+            write_test_json_response(
+                &mut socket,
+                json!({
+                    "choices": [{
+                        "message": {"role": "assistant", "content": patch},
+                        "finish_reason": "stop"
+                    }]
+                }),
+            )
+            .await;
+        }
+    });
+    let state = AppState {
+        data_dir: initialized_dir,
+        momo_api: test_momo_api(format!("http://{address}/v1")),
+        response_concurrency: Arc::new(Semaphore::new(8)),
+        response_timeout: std::time::Duration::from_secs(120),
+        metrics: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let result = drain_momo_maintenance(
+        State(state),
+        Json(SpaceRequest {
+            space_id: scope_id.clone(),
+        }),
+    )
+    .await;
+    assert!(result.is_ok(), "repair invalid semantic-graph patch");
+    gateway.await.expect("mock gateway task");
+    let nodes: Value = serde_json::from_str(
+        &simple::list_nsg_nodes_json(scope_id, false)
+            .await
+            .expect("list semantic-graph nodes"),
+    )
+    .expect("node list JSON");
+    assert_eq!(nodes.as_array().map(Vec::len), Some(1));
+    assert_eq!(nodes[0]["id"], "lore_black_flame");
 }
 
 #[tokio::test]

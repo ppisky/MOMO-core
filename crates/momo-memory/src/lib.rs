@@ -15,6 +15,8 @@ use std::{
     fs,
     io::{self, Write},
     path::{Component, Path, PathBuf},
+    sync::{Arc, RwLock},
+    time::SystemTime,
 };
 
 use chrono::Utc;
@@ -70,6 +72,7 @@ const NORMAL_EXPANSION_PER_SOURCE: usize = 8;
 const HUB_EXPANSION_PER_SOURCE: usize = 3;
 const MAX_EXPANSION_TOTAL: usize = 15;
 const HUB_THRESHOLD: usize = 15;
+const HUB_FACTOR: f64 = 0.75;
 const DIRECT_RESERVE_RATIO_NUMERATOR: usize = 60;
 const EXPANSION_MAX_RATIO_NUMERATOR: usize = 35;
 const HIT_REFRESH_LIMIT: usize = 5;
@@ -225,6 +228,11 @@ struct IndexEntry {
     path: String,
     #[serde(rename = "type")]
     kind: String,
+    /// Derived status for retrieval and relation-degree decisions. Older
+    /// indexes omitted this field, so callers also fall back to the archive
+    /// path convention until the next rebuild.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
     #[serde(default)]
     aliases: Vec<String>,
     #[serde(default)]
@@ -377,6 +385,20 @@ pub struct DocumentSummary {
 #[derive(Debug, Clone)]
 pub struct MemoryWorkspace {
     root: PathBuf,
+    index_cache: Arc<RwLock<Option<CachedMemoryIndex>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedMemoryIndex {
+    source_signature: Vec<IndexSourceStamp>,
+    index: Arc<MemoryIndex>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexSourceStamp {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
 }
 
 mod workspace;
@@ -520,6 +542,7 @@ fn update_index_entry(
         IndexEntry {
             path: portable_path(relative),
             kind: metadata.kind.clone(),
+            status: Some(metadata.status.clone()),
             aliases,
             tags: metadata.tags.clone(),
             body_identifiers: retrieval::body_identifiers(&document.body),

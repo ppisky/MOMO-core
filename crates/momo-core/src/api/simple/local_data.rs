@@ -656,27 +656,39 @@ pub async fn stage_conversation_update_json(
     conversation_json: String,
 ) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
-    let mut conversation: momo_domain::Conversation =
+    let conversation: momo_domain::Conversation =
         serde_json::from_str(&conversation_json).map_err(|error| error.to_string())?;
     if conversation.scope_id != scope_id {
         return Err("conversation body scope does not match request scope".to_owned());
     }
     let core = core()?;
-    if core
+    let conversation = stage_conversation_update_for_core(core, scope_id, conversation).await?;
+    serde_json::to_string(&conversation).map_err(|error| error.to_string())
+}
+
+async fn stage_conversation_update_for_core(
+    core: &MomoCore,
+    scope_id: uuid::Uuid,
+    mut conversation: momo_domain::Conversation,
+) -> Result<momo_domain::Conversation, String> {
+    let existing = core
         .store()
         .conversation_for_scope(scope_id, conversation.id)
         .await
         .map_err(|error| error.to_string())?
-        .is_none()
-    {
-        return Err("conversation does not belong to scope".to_owned());
-    }
+        .ok_or_else(|| "conversation does not belong to scope".to_owned())?;
+    // The generic conversation update endpoint edits mutable presentation
+    // fields only. Character changes must go through the explicit
+    // switch_character control so its authorization and audit boundary cannot
+    // be bypassed by submitting a replacement Conversation object.
+    conversation.character_id = existing.character_id;
+    conversation.created_at = existing.created_at;
     conversation.updated_at = chrono::Utc::now();
     core.store()
-        .save_conversation(&conversation)
+        .stage_conversation_update(&conversation)
         .await
         .map_err(|error| error.to_string())?;
-    serde_json::to_string(&conversation).map_err(|error| error.to_string())
+    Ok(conversation)
 }
 
 pub async fn stage_conversation_delete(scope_id: String, id: String) -> Result<(), String> {

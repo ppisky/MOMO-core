@@ -385,13 +385,13 @@ fn push_entry(
     if path == "manifest.toml" || !seen.insert(path.clone()) {
         return Err(MocError::DuplicatePath(path));
     }
-    let bytes = fs::read(source)?;
+    let (size, sha256) = file_size_and_sha256(source)?;
     entries.push(ModuleEntry {
         module: module.to_owned(),
         space_id,
         path,
-        size: u64::try_from(bytes.len()).map_err(|_| MocError::LimitExceeded)?,
-        sha256: hex::encode(Sha256::digest(&bytes)),
+        size,
+        sha256,
     });
     Ok(())
 }
@@ -413,13 +413,35 @@ fn verify_entries(
             .iter()
             .find(|(name, _, _)| name == &expected.path)
             .ok_or_else(|| MocError::Integrity(expected.path.clone()))?;
-        let bytes = fs::read(path)?;
-        let actual_hash = hex::encode(Sha256::digest(&bytes));
-        if *size != expected.size || actual_hash != expected.sha256 {
+        let (actual_size, actual_hash) = file_size_and_sha256(path)?;
+        if *size != expected.size || actual_size != expected.size || actual_hash != expected.sha256
+        {
             return Err(MocError::Integrity(expected.path.clone()));
         }
     }
     Ok(())
+}
+
+fn file_size_and_sha256(path: &Path) -> Result<(u64, String), MocError> {
+    let mut file = File::open(path)?;
+    let expected_size = file.metadata()?.len();
+    let mut actual_size = 0_u64;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        actual_size = actual_size
+            .checked_add(u64::try_from(read).map_err(|_| MocError::LimitExceeded)?)
+            .ok_or(MocError::LimitExceeded)?;
+        digest.update(&buffer[..read]);
+    }
+    if actual_size != expected_size {
+        return Err(MocError::Integrity(path.display().to_string()));
+    }
+    Ok((actual_size, hex::encode(digest.finalize())))
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<(), MocError> {

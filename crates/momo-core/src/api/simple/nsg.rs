@@ -122,6 +122,21 @@ pub async fn apply_nsg_patch_json(
     Ok("ok".to_owned())
 }
 
+pub async fn validate_nsg_patch_json(
+    scope_id: String,
+    patch_yaml: String,
+) -> Result<String, String> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
+    let memory = core()?
+        .memory_for_space(scope_id)
+        .map_err(|error| error.to_string())?;
+    momo_memory::nsg::NsgWorkspace::initialize(memory.root())
+        .map_err(|error| error.to_string())?
+        .validate_patch(&patch_yaml)
+        .map_err(|error| error.to_string())?;
+    Ok("ok".to_owned())
+}
+
 pub async fn list_nsg_pending_candidates_json(scope_id: String) -> Result<String, String> {
     let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
     let memory = core()?
