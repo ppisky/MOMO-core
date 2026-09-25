@@ -1,5 +1,101 @@
 use super::*;
 
+#[tokio::test]
+async fn uuid_spelling_does_not_change_response_identity_or_cancellation() {
+    let space = "abcdefab-1234-4567-89ab-abcdefabcdef";
+    let mut first: MomoResponseRequest = serde_json::from_value(json!({
+        "input": "hello", "momo": {"schema": "momo.responses/1.0", "personal_space_id": space, "conversation_space_id": space}
+    }))
+    .expect("request");
+    let mut second = first.clone();
+    second.momo.personal_space_id = Some(space.to_uppercase());
+    second.momo.conversation_space_id = Some(space.replace('-', ""));
+    assert_eq!(
+        execution::response_request_fingerprint(&first).expect("fingerprint"),
+        execution::response_request_fingerprint(&second).expect("fingerprint")
+    );
+    first.normalize_identifiers().expect("normalize");
+    second.normalize_identifiers().expect("normalize");
+    assert_eq!(first, second);
+    let runtime = test_runtime().await;
+    let service = MomoApiService::new(
+        runtime,
+        "http://127.0.0.1:1/v1",
+        None,
+        reqwest::Client::new(),
+    );
+    let key = scoped_operation_key(space, "request");
+    let _operation = service.coordination.enter_operation(&key, space);
+    assert!(service.cancel(&space.to_uppercase(), "request"));
+    assert!(service.coordination.ensure_active(&key).is_err());
+}
+
+#[tokio::test]
+async fn separately_constructed_services_share_runtime_coordination() {
+    let runtime = test_runtime().await;
+    let make_service = || {
+        let runtime = runtime.clone();
+        MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:1/v1",
+            None,
+            reqwest::Client::new(),
+        )
+    };
+    let first = make_service();
+    let mut settings = runtime.runtime_settings();
+    settings.runtime.memory_distill_every_turns = 7;
+    runtime
+        .update_runtime_settings(settings)
+        .expect("shared policy");
+    runtime
+        .prompt_spaces()
+        .replace(PromptSpaceId::Assistant, "shared prompt".to_owned())
+        .expect("shared prompt");
+    let second = make_service();
+    assert_eq!(second.maintenance_batch_limit(MaintenanceKind::Memory), 7);
+    assert_eq!(
+        first
+            .runtime()
+            .prompt_spaces()
+            .get(PromptSpaceId::Assistant),
+        second
+            .runtime()
+            .prompt_spaces()
+            .get(PromptSpaceId::Assistant)
+    );
+    let key = scoped_operation_key("00000000-0000-4000-8000-000000000001", "request");
+    let _operation = first
+        .coordination
+        .enter_operation(&key, "00000000-0000-4000-8000-000000000001");
+    assert!(second.cancel("00000000-0000-4000-8000-000000000001", "request"));
+    assert!(first.coordination.ensure_active(&key).is_err());
+    let first_lock = first
+        .coordination
+        .conversation_lock("00000000-0000-4000-8000-000000000001", "conversation")
+        .await;
+    let second_lock = second
+        .coordination
+        .conversation_lock("00000000-0000-4000-8000-000000000001", "conversation")
+        .await;
+    let _guard = first_lock.lock().await;
+    assert!(second_lock.try_lock().is_err());
+    let unrelated = second
+        .coordination
+        .conversation_lock("00000000-0000-4000-8000-000000000001", "other-conversation")
+        .await;
+    assert!(unrelated.try_lock().is_ok());
+}
+
+async fn test_runtime() -> Arc<MomoRuntime> {
+    let directory = tempfile::tempdir().expect("runtime directory").keep();
+    Arc::new(
+        MomoRuntime::initialize(directory)
+            .await
+            .expect("initialize runtime"),
+    )
+}
+
 #[test]
 fn maintenance_rejects_mutated_opaque_identifiers() {
     let source = r#"Meet at Glass-Archive-f41e9 with Cobalt-Key-dae44."#;
@@ -143,13 +239,22 @@ fn mo_state_input_audit_binds_projection_without_exposing_bodies() {
 
 #[tokio::test]
 async fn slow_maintenance_does_not_occupy_foreground_generation_slot() {
-    let service = MomoApiService::new(
-        "http://127.0.0.1:9/v1",
-        None,
-        reqwest::Client::new(),
-        Arc::new(MomoConfig::default()),
-    );
-    let maintenance = service.generation_gate("space", "maintenance").await;
+    let service = {
+        let runtime = test_runtime().await;
+        runtime
+            .update_runtime_settings(MomoRuntimeSettings::default())
+            .expect("runtime settings");
+        MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+        )
+    };
+    let maintenance = service
+        .coordination
+        .generation_gate("00000000-0000-4000-8000-000000000001", "maintenance")
+        .await;
     let first = maintenance
         .clone()
         .acquire_owned()
@@ -157,12 +262,16 @@ async fn slow_maintenance_does_not_occupy_foreground_generation_slot() {
         .expect("maintenance slot");
     assert!(
         service
-            .generation_gate("space", "maintenance")
+            .coordination
+            .generation_gate("00000000-0000-4000-8000-000000000001", "maintenance")
             .await
             .try_acquire_owned()
             .is_err()
     );
-    let foreground = service.generation_gate("space", "foreground").await;
+    let foreground = service
+        .coordination
+        .generation_gate("00000000-0000-4000-8000-000000000001", "foreground")
+        .await;
     let reply = foreground
         .clone()
         .try_acquire_owned()
@@ -176,15 +285,22 @@ async fn slow_maintenance_does_not_occupy_foreground_generation_slot() {
 
 #[tokio::test]
 async fn conversation_locks_serialize_one_conversation_across_personal_spaces() {
-    let service = MomoApiService::new(
-        "http://127.0.0.1:9/v1",
-        None,
-        reqwest::Client::new(),
-        Arc::new(MomoConfig::default()),
-    );
+    let service = {
+        let runtime = test_runtime().await;
+        runtime
+            .update_runtime_settings(MomoRuntimeSettings::default())
+            .expect("runtime settings");
+        MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+        )
+    };
     let conversation_space = "01900000-0000-7000-8000-000000000201";
     let conversation_id = "01900000-0000-7000-8000-000000000202";
     let first = service
+        .coordination
         .conversation_lock(conversation_space, conversation_id)
         .await;
     let first_guard = first
@@ -192,11 +308,13 @@ async fn conversation_locks_serialize_one_conversation_across_personal_spaces() 
         .try_lock_owned()
         .expect("first conversation owner");
     let same = service
+        .coordination
         .conversation_lock(conversation_space, conversation_id)
         .await;
     assert!(same.clone().try_lock_owned().is_err());
 
     let other = service
+        .coordination
         .conversation_lock(conversation_space, "01900000-0000-7000-8000-000000000203")
         .await;
     let other_guard = other
@@ -210,18 +328,27 @@ async fn conversation_locks_serialize_one_conversation_across_personal_spaces() 
 
 #[tokio::test]
 async fn cancelled_conversation_waiter_stops_immediately_after_acquiring_the_lock() {
-    let service = MomoApiService::new(
-        "http://127.0.0.1:9/v1",
-        None,
-        reqwest::Client::new(),
-        Arc::new(MomoConfig::default()),
-    );
+    let service = {
+        let runtime = test_runtime().await;
+        runtime
+            .update_runtime_settings(MomoRuntimeSettings::default())
+            .expect("runtime settings");
+        MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+        )
+    };
     let scope_id = "01900000-0000-7000-8000-000000000211";
     let conversation_id = "01900000-0000-7000-8000-000000000212";
     let request_id = "queued-request";
     let operation_key = scoped_operation_key(scope_id, request_id);
-    let _operation = service.enter_operation(&operation_key, scope_id);
+    let _operation = service
+        .coordination
+        .enter_operation(&operation_key, scope_id);
     let blocker = service
+        .coordination
         .conversation_lock(scope_id, conversation_id)
         .await
         .lock_owned()
@@ -285,17 +412,23 @@ fn roleplay_context_keeps_multi_space_memory_provenance() {
     assert!(!rendered.contains("space-group"));
 }
 
-#[test]
-fn explicit_drain_uses_configured_maintenance_batch_limits() {
-    let mut config = MomoConfig::default();
+#[tokio::test]
+async fn explicit_drain_uses_configured_maintenance_batch_limits() {
+    let mut config = MomoRuntimeSettings::default();
     config.runtime.memory_distill_every_turns = 7;
     config.runtime.nsg_govern_every_turns = 11;
-    let service = MomoApiService::new(
-        "http://127.0.0.1:9/v1",
-        None,
-        reqwest::Client::new(),
-        Arc::new(config),
-    );
+    let service = {
+        let runtime = test_runtime().await;
+        runtime
+            .update_runtime_settings(config)
+            .expect("runtime settings");
+        MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+        )
+    };
     assert_eq!(service.maintenance_batch_limit(MaintenanceKind::Memory), 7);
     assert_eq!(
         service.maintenance_batch_limit(MaintenanceKind::SemanticGraph),
@@ -303,19 +436,28 @@ fn explicit_drain_uses_configured_maintenance_batch_limits() {
     );
 }
 
-#[test]
-fn imported_runtime_config_replaces_the_live_service_snapshot() {
-    let service = MomoApiService::new(
-        "http://127.0.0.1:9/v1",
-        None,
-        reqwest::Client::new(),
-        Arc::new(MomoConfig::default()),
-    );
-    let mut imported = MomoConfig::default();
+#[tokio::test]
+async fn runtime_settings_replace_the_live_service_snapshot() {
+    let service = {
+        let runtime = test_runtime().await;
+        runtime
+            .update_runtime_settings(MomoRuntimeSettings::default())
+            .expect("runtime settings");
+        MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+        )
+    };
+    let mut imported = MomoRuntimeSettings::default();
     imported.runtime.memory_distill_every_turns = 13;
     imported.runtime.nsg_govern_every_turns = 17;
 
-    service.update_config(imported).expect("valid live config");
+    service
+        .runtime()
+        .update_runtime_settings(imported)
+        .expect("valid live settings");
 
     assert_eq!(service.maintenance_batch_limit(MaintenanceKind::Memory), 13);
     assert_eq!(
@@ -362,51 +504,78 @@ impl VisionDescriptionAdapter for UnexpectedVisionAdapter {
     }
 }
 
-#[test]
-fn cancellation_state_is_active_only_and_drop_safe() {
-    let service = MomoApiService::new(
-        "http://127.0.0.1:9/v1",
-        None,
-        reqwest::Client::new(),
-        Arc::new(MomoConfig::default()),
-    );
+#[tokio::test]
+async fn cancellation_state_is_active_only_and_drop_safe() {
+    let service = {
+        let runtime = test_runtime().await;
+        runtime
+            .update_runtime_settings(MomoRuntimeSettings::default())
+            .expect("runtime settings");
+        MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+        )
+    };
     let scope_id = "01900000-0000-7000-8000-000000000101";
     let operation_key = scoped_operation_key(scope_id, "request-1");
     assert!(!service.cancel(scope_id, "request-1"));
-    let operation = service.enter_operation(&operation_key, scope_id);
-    assert!(service.has_active_responses(scope_id));
-    assert!(!service.has_active_responses("01900000-0000-7000-8000-000000000102"));
+    let operation = service
+        .coordination
+        .enter_operation(&operation_key, scope_id);
+    assert!(service.coordination.has_active_responses(scope_id));
+    assert!(
+        !service
+            .coordination
+            .has_active_responses("01900000-0000-7000-8000-000000000102")
+    );
     assert!(!service.cancel("01900000-0000-7000-8000-000000000102", "request-1"));
     service
+        .coordination
         .ensure_active(&operation_key)
         .expect("another scope cannot cancel this operation");
     assert!(service.cancel(scope_id, "request-1"));
     assert!(matches!(
-        service.ensure_active(&operation_key),
+        service.coordination.ensure_active(&operation_key),
         Err(MomoApiError {
             kind: MomoApiErrorKind::Cancelled,
             ..
         })
     ));
     drop(operation);
-    assert!(!service.has_active_responses(scope_id));
+    assert!(!service.coordination.has_active_responses(scope_id));
     assert!(!service.cancel(scope_id, "request-1"));
     service
+        .coordination
         .ensure_active(&operation_key)
         .expect("dropped operations leave no stale cancellation marker");
 }
 
 #[tokio::test]
 async fn governed_vision_adapter_resolves_images_to_retryable_text() {
-    let mut config = MomoConfig::default();
+    let mut config = MomoRuntimeSettings::default();
     config.vision.enabled = true;
-    config.vision.prompt = "Describe visible facts.".to_owned();
-    let service = MomoApiService::new(
-        "http://127.0.0.1:9/v1",
-        None,
-        reqwest::Client::new(),
-        Arc::new(config),
-    )
+    let vision_runtime = test_runtime().await;
+    let prompt_spaces = vision_runtime.prompt_spaces();
+    prompt_spaces
+        .replace(
+            PromptSpaceId::VisionFallback,
+            "Describe visible facts.".to_owned(),
+        )
+        .expect("replace vision Prompt Space");
+    let service = {
+        let runtime = vision_runtime;
+        runtime
+            .update_runtime_settings(config)
+            .expect("runtime settings");
+        MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+        )
+    }
     .with_vision_adapter(Arc::new(FixedVisionAdapter));
     let request: MomoResponseRequest = serde_json::from_value(json!({
         "input": [
@@ -431,7 +600,9 @@ async fn governed_vision_adapter_resolves_images_to_retryable_text() {
             },
         )
         .expect("governance");
-    let operation = service.enter_operation("request-vision-1", "vision-space");
+    let operation = service
+        .coordination
+        .enter_operation("request-vision-1", "vision-space");
     let resolved = service
         .resolve_response_input(&request, "request-vision-1", None, &governed, false)
         .await
@@ -448,10 +619,17 @@ async fn governed_vision_adapter_resolves_images_to_retryable_text() {
         "What do you see?\n[Visual description for image 1]\nA red umbrella on a wet street."
     );
 
-    let persisted = json!({
-        "resolved_input_json": serde_json::to_string(&resolved).expect("stored resolution")
-    });
-    let operation = service.enter_operation("request-vision-1", "vision-space");
+    let persisted = momo_storage::ResponseOperation {
+        request_id: "request-vision-1".to_owned(),
+        request_fingerprint: String::new(),
+        conversation_id: String::new(),
+        user_written: true,
+        resolved_input_json: Some(serde_json::to_string(&resolved).expect("stored resolution")),
+        response_json: None,
+    };
+    let operation = service
+        .coordination
+        .enter_operation("request-vision-1", "vision-space");
     let replayed = service
         .resolve_response_input(
             &request,
@@ -468,15 +646,20 @@ async fn governed_vision_adapter_resolves_images_to_retryable_text() {
 
 #[tokio::test]
 async fn multimodal_chat_uses_original_images_without_vision_prompt() {
-    let mut config = MomoConfig::default();
+    let mut config = MomoRuntimeSettings::default();
     config.vision.enabled = true;
-    config.vision.prompt = "This fallback prompt must not be used.".to_owned();
-    let service = MomoApiService::new(
-        "http://127.0.0.1:9/v1",
-        None,
-        reqwest::Client::new(),
-        Arc::new(config),
-    )
+    let service = {
+        let runtime = test_runtime().await;
+        runtime
+            .update_runtime_settings(config)
+            .expect("runtime settings");
+        MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+        )
+    }
     .with_vision_adapter(Arc::new(UnexpectedVisionAdapter));
     let request: MomoResponseRequest = serde_json::from_value(json!({
         "input": [{
@@ -505,7 +688,9 @@ async fn multimodal_chat_uses_original_images_without_vision_prompt() {
             },
         )
         .expect("governance");
-    let operation = service.enter_operation("request-direct-vision-1", "direct-vision-space");
+    let operation = service
+        .coordination
+        .enter_operation("request-direct-vision-1", "direct-vision-space");
     let resolved = service
         .resolve_response_input(&request, "request-direct-vision-1", None, &governed, true)
         .await

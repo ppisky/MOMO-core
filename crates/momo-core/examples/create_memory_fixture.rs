@@ -94,9 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     export_moc(
         &core,
         &output,
-        &serde_json::json!({"schema_version": 2}),
         &MocExportPlan {
-            include_config: false,
             characters: vec![MocCharacterSelection {
                 space_id: scope_id,
                 character_ids: vec![],

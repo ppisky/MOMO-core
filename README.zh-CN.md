@@ -23,6 +23,31 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 - capability discovery 与上下文预算
 - 向量存储契约与确定性检索
 
+## 快速本地烟测
+
+需要 Rust `1.96.1`（仓库已通过 `rust-toolchain.toml` 固定）以及可用的 C/C++ 构建工具链。
+以下命令只启动本地服务并验证健康端点，不会调用模型：
+
+```powershell
+$env:MOMO_DATA_DIR = "$PWD/.momo-data/dev"
+cargo run -p momo-server
+```
+
+在另一个 PowerShell 窗口中：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/health
+```
+
+Linux/macOS 可使用
+`MOMO_DATA_DIR=.momo-data/dev cargo run -p momo-server` 和
+`curl http://127.0.0.1:8765/health`。服务默认只监听 loopback。实际生成还需要通过
+`MOMO_MODEL_GATEWAY_ORIGIN` 配置模型网关，并按需设置
+`MOMO_MODEL_GATEWAY_API_KEY`。可移植产品策略示例见
+[`momo.example.toml`](momo.example.toml)，稳定请求样例见
+[`contracts/1.0/response_request.json`](contracts/1.0/response_request.json)，部署信任边界见
+[`docs/http_api_1_0.md`](docs/http_api_1_0.md)。
+
 `crates/` 下的 crate 是 MOMO Core 的内部实现模块，不是彼此独立的产品，也不会作为
 独立 crates.io 包发布。1.0 的产品稳定面是版本化的原生 HTTP wire（`momo.responses/1.0`
 与 `momo.control/1.0`）和已记录的可移植格式；其余 `/v1` 路由属于本机管理 profile。嵌入方仍可从同一固定 workspace revision
@@ -49,13 +74,16 @@ CCv2/CCv3 JSON 与 CHARX 导出；APNG 明确不支持。CHARX 的资产、`x_me
 
 ## Workspace
 
+当前依赖方向、运行时所有权、锁顺序与跨存储恢复边界见
+[1.0 架构说明](docs/architecture_1_0.md)。
+
 - `momo-core`：编排与面向调用方的 Rust API
 - `momo-domain`：共享领域类型
 - `momo-storage`：SQLite 业务持久化与 Turso 向量存储
 - `momo-memory`：DMW、NSG、检索、场景解析与 MO State 投影
 - `momo-moc`：MOC 容器
 - `momo-crypto`：私有容器加密
-- `momo-config`：可移植运行配置
+- `momo-config`：供可移植资产格式使用的 TOML 文档工具
 - `momo-server`：本地 HTTP/SSE 接口
 
 ## 数据存储
@@ -93,14 +121,17 @@ usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.respons
 信号、确定性选择、持久化迟滞和原子审计状态；更广的凭据测试与 MORP 覆盖仍是稳定版
 `v1.0.0` 发布门槛。详见
 [1.0.0 发布契约](docs/roadmap_1_0_0.md)。
-rc.4 候选保持上述契约冻结，同时收紧编排边界，并让每个 Space 的检索 Workspace 在请求间
-持续复用。本次候选变更见 [rc.4 发布说明](docs/release_notes_1_0_0_rc4.md)；已发布的
+已发布的 rc.4 保持上述契约冻结，同时收紧编排边界，并让每个 Space 的检索 Workspace 在请求间
+持续复用。rc.5 候选完成实例级运行时协调、类型化 Rust 应用 API 和可恢复的记忆维护提交。
+后续稳定化在现有架构边界内处理具体缺陷并积累发布证据。发布事实以 GitHub 公开 tag 和
+Release 为准。变更见 [rc.5 说明](docs/release_notes_1_0_0_rc5.md)。历史记录见
+[rc.4 发布说明](docs/release_notes_1_0_0_rc4.md)；已发布的
 [rc.3 发布说明](docs/release_notes_1_0_0_rc3.md)继续保留。
 DDM 的实现边界与剩余实验性限制见 [DDM 状态报告](docs/ddm_implementation_status.zh-CN.md)。
 
-产品提示词是由仓库追踪、通过 `include_str!` 编译进 `momo_core` 的 Markdown
-源码资产，不是运行时文件，也不属于可移植配置；详见
-[简体中文提示词资产说明](docs/maintenance_prompts.zh-CN.md)或
+Prompt Spaces 是具名运行时资源，仓库中通过 `include_str!` 编译的 Markdown 只提供
+受审查的默认值；当前值可通过原生 HTTP API 替换。MOMO 自身不读取 `momo.toml`，
+也不通过 MOC 携带提示词。详见[简体中文 Prompt Spaces 说明](docs/maintenance_prompts.zh-CN.md)或
 [English guide](docs/maintenance_prompts.en.md)。
 
 ## Space 标识

@@ -36,61 +36,44 @@ impl EmbeddingRequestConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GenerateEmbeddingsRequest {
-    embedding: EmbeddingRequestConfig,
-    inputs: Vec<EmbeddingInput>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum GenerateEmbeddingsError {
-    #[error("invalid embedding request JSON: {0}")]
-    InvalidRequest(serde_json::Error),
-    #[error(transparent)]
-    Provider(#[from] EmbeddingError),
-    #[error("failed to serialize embedding response: {0}")]
-    Serialize(serde_json::Error),
+pub struct GenerateEmbeddingsRequest {
+    pub embedding: EmbeddingRequestConfig,
+    pub inputs: Vec<EmbeddingInput>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum NsgIndexMode {
+pub enum NsgIndexMode {
     Full,
     Incremental,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RebuildNsgIndexRequest {
-    embedding: EmbeddingRequestConfig,
+pub struct RebuildNsgIndexRequest {
+    pub embedding: EmbeddingRequestConfig,
     #[serde(default = "default_index_mode")]
-    mode: NsgIndexMode,
+    pub mode: NsgIndexMode,
     #[serde(default = "default_index_batch_size")]
-    batch_size: usize,
+    pub batch_size: usize,
 }
 
-pub async fn generate_embeddings_json(request_json: String) -> Result<String, String> {
-    generate_embeddings_json_typed(request_json)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-pub async fn generate_embeddings_json_typed(
-    request_json: String,
-) -> Result<String, GenerateEmbeddingsError> {
-    let request: GenerateEmbeddingsRequest =
-        serde_json::from_str(&request_json).map_err(GenerateEmbeddingsError::InvalidRequest)?;
+pub async fn generate_embeddings(
+    request: GenerateEmbeddingsRequest,
+) -> Result<crate::EmbeddingBatch, EmbeddingError> {
     let provider = request.embedding.provider()?;
-    let batch = provider
+    provider
         .embed_batch(&request.embedding.profile, &request.inputs)
-        .await?;
-    serde_json::to_string(&batch).map_err(GenerateEmbeddingsError::Serialize)
+        .await
 }
 
 pub(super) async fn embed_query(
     embedding: &EmbeddingRequestConfig,
     query: &str,
-) -> Result<(String, Vec<f64>), String> {
-    let provider = embedding.provider().map_err(|error| error.to_string())?;
+) -> Result<(String, Vec<f64>), RuntimeApiError> {
+    let provider = embedding
+        .provider()
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     let batch = provider
         .embed_batch(
             &embedding.profile,
@@ -101,49 +84,50 @@ pub(super) async fn embed_query(
             }],
         )
         .await
-        .map_err(|error| error.to_string())?;
-    let vector = batch
-        .vectors
-        .into_iter()
-        .next()
-        .ok_or_else(|| "embedding provider returned no query vector".to_owned())?;
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+    let vector =
+        batch.vectors.into_iter().next().ok_or_else(|| {
+            RuntimeApiError::upstream("embedding provider returned no query vector")
+        })?;
     Ok((batch.vector_space_id, vector.vector))
 }
 
-pub async fn rebuild_nsg_vector_index_json(
+pub async fn rebuild_nsg_vector_index(
+    runtime: &MomoRuntime,
     scope_id: String,
-    request_json: String,
-) -> Result<String, String> {
-    let scope_id = uuid::Uuid::parse_str(&scope_id).map_err(|error| error.to_string())?;
-    let request: RebuildNsgIndexRequest =
-        serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
+    request: RebuildNsgIndexRequest,
+) -> Result<serde_json::Value, RuntimeApiError> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id)
+        .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
     if request.batch_size == 0 || request.batch_size > MAX_EMBEDDING_BATCH_SIZE {
-        return Err(format!(
+        return Err(RuntimeApiError::invalid(format!(
             "embedding batch_size must be between 1 and {MAX_EMBEDDING_BATCH_SIZE}"
-        ));
+        )));
     }
     let provider = request
         .embedding
         .provider()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     let vector_space_id = request
         .embedding
         .profile
         .vector_space_id()
-        .map_err(|error| error.to_string())?;
-    let memory = core()?
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+    let memory = runtime
+        .core()
         .memory_for_space(scope_id)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     let documents = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
-        .map_err(|error| error.to_string())?
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?
         .embedding_documents()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
 
-    let existing = core()?
+    let existing = runtime
+        .core()
         .vector_store()
         .list_nsg_vectors(scope_id, &vector_space_id)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     let reusable = existing
         .into_iter()
         .filter(|record| record.dimension == request.embedding.profile.dimension)
@@ -177,13 +161,17 @@ pub async fn rebuild_nsg_vector_index_json(
         let batch = provider
             .embed_batch(&request.embedding.profile, &inputs)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
         if batch.vector_space_id != vector_space_id {
-            return Err("embedding provider returned an unexpected vector space".to_owned());
+            return Err(RuntimeApiError::invalid(
+                "embedding provider returned an unexpected vector space",
+            ));
         }
         for (document, vector) in documents.iter().zip(batch.vectors) {
             if document.node_id != vector.id {
-                return Err("embedding response id did not match the NSG document".to_owned());
+                return Err(RuntimeApiError::invalid(
+                    "embedding response id did not match the NSG document",
+                ));
             }
             records.push(momo_storage::NsgVectorRecord {
                 scope_id,
@@ -198,13 +186,14 @@ pub async fn rebuild_nsg_vector_index_json(
         batch_count += 1;
     }
     records.sort_by(|left, right| left.node_id.cmp(&right.node_id));
-    core()?
+    runtime
+        .core()
         .vector_store()
         .replace_nsg_vectors(scope_id, &vector_space_id, &records)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
 
-    serde_json::to_string(&serde_json::json!({
+    Ok(json!({
         "vector_space_id": vector_space_id,
         "dimension": request.embedding.profile.dimension,
         "node_count": records.len(),
@@ -216,7 +205,6 @@ pub async fn rebuild_nsg_vector_index_json(
             NsgIndexMode::Incremental => "incremental",
         },
     }))
-    .map_err(|error| error.to_string())
 }
 
 const fn default_embedding_timeout_seconds() -> u64 {

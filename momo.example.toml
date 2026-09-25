@@ -1,4 +1,6 @@
-# Portable MOMO product behaviour. This file may be included in a MOC export.
+# Example user-facing input for a host such as mobot. MOMO Core never reads
+# this file and MOC never transports it. The host validates these values and
+# translates the Core-owned subset to PUT /v1/runtime-settings.
 # Never place credentials, listener addresses, Discord IDs, executables, or
 # absolute host paths in this document.
 schema_version = 1
@@ -34,8 +36,8 @@ injection_mode = "active"     # shadow computes, persists, and audits without in
 [mo_state.ddm]
 enabled = false
 
-# The Roleplay Director is fixed product policy compiled into Core, not
-# author-owned Character Card content or runtime configuration.
+# The Roleplay Director is a named PromptSpace, not author-owned Character Card
+# content or portable runtime configuration.
 [roleplay]
 enabled = true
 
@@ -55,8 +57,7 @@ allowed_parameters = [] # e.g. ["seed", "stop"], never protocol-owned fields.
 # image; a text-only route uses the host-provided logical vision fallback.
 [vision]
 enabled = true # This permits image input; it does not force the fallback route.
-prompt = "Describe only visible facts relevant to the conversation. Do not infer identity, intent, private attributes, or illegible text." # Fallback only.
 
-# Product prompts are compiled into MOMO Core from
-# crates/momo-core/src/product_prompts/. They are not configurable here,
-# transported by MOC, or replaceable while the Core process is running.
+# Prompt Space defaults are compiled into MOMO Core, while active overrides are
+# managed through /v1/prompt-spaces. Prompt content is never configured here or
+# transported by MOC.

@@ -76,7 +76,7 @@ interface or design.
 | MO State v2 | Medium-high | The implementation now binds persisted source versions to retrieved bodies under one lock window and includes scoped DDM hysteresis. Tool resumption and cross-system Saga behavior remain incomplete. |
 | Native response runtime | Medium-high | Idempotency, persistence, streaming, vision, and maintenance order align with the implementation. Message roles, instruction precedence, card hot updates, openings, image history, and tool-continuation semantics are now documented. |
 | Space model | High | Ownership and access responsibilities are clear. Documentation now matches the implementation: a Space weight divides the Space budget, while ranking occurs independently inside each Space. |
-| Portable runtime configuration | Medium-high | Core executes governance, maintenance, MO State, and vision fields. Product prompts are tracked Markdown sources compiled into `momo_core`; they are neither runtime configuration nor MOC content. Host-owned routing, default-character, weight, and concurrency fields were removed from `momo.example.toml`; safe unknown fields are preserved but not executed. |
+| Runtime settings API | Medium-high | Core executes governance, maintenance, MO State, and vision fields from the typed HTTP resource. Prompt Space defaults are tracked Markdown sources compiled into `momo_core`; active overrides are managed by HTTP and are never MOC content. Host-owned routing, default-character, weight, and concurrency fields remain host concerns. |
 
 ## Corrections made during the review
 

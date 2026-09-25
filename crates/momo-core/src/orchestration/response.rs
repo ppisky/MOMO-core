@@ -10,8 +10,9 @@ use super::{
     state,
 };
 use crate::{
-    MoStateProfile, MomoResponse, MomoResponseMetadata, MomoResponseRequest, ResponseOutputContent,
-    ResponseOutputItem, api::simple, product_prompts,
+    ChatInput, ContextBudget, ContextRequest, ContextSections, MoStateProfile, MomoResponse,
+    MomoResponseMetadata, MomoResponseRequest, PromptSpaceId, ResponseOutputContent,
+    ResponseOutputItem, api::runtime_api, prepare_context,
 };
 
 impl MomoApiService {
@@ -85,40 +86,48 @@ impl MomoApiService {
             None
         };
         let retrieval_enabled = !request.momo.memory_sources.is_empty();
-        let (retrieved, source_observations, retrieval_status) =
-            if retrieval_enabled || request.momo.mo_state {
-                let payload = json!({
-                    "spaces": request.momo.memory_sources,
-                    "observe_space_ids": [managed_space_id],
-                    "query": input,
-                    "max_tokens": context_window
-                        .saturating_sub(reserve_output_tokens)
-                        .saturating_div(8)
-                        .clamp(128, 2_048),
-                    "vector_space_id": query_embedding.as_ref().map(|value| &value.0),
-                    "query_vector": query_embedding.as_ref().map(|value| &value.1),
-                });
-                match simple::retrieve_scoped_memory_snapshot_json(payload.to_string()).await {
-                    Ok(value) => {
-                        let snapshot = serde_json::from_str::<Value>(&value)
-                            .map_err(|error| MomoApiError::internal(error.to_string()))?;
-                        (
-                            snapshot.get("items").cloned().unwrap_or_else(|| json!([])),
-                            snapshot
-                                .get("source_observations")
-                                .cloned()
-                                .unwrap_or_else(|| json!([])),
-                            if retrieval_enabled { "ok" } else { "disabled" },
-                        )
-                    }
-                    Err(error) => {
-                        warnings.push(format!("retrieval degraded: {error}"));
-                        (json!([]), json!([]), "degraded")
-                    }
-                }
-            } else {
-                (json!([]), json!([]), "disabled")
+        let (retrieved, source_observations, retrieval_status) = if retrieval_enabled
+            || request.momo.mo_state
+        {
+            let retrieval_request = runtime_api::ScopedMemoryRequest {
+                spaces: request
+                    .momo
+                    .memory_sources
+                    .iter()
+                    .map(|source| runtime_api::MemorySpaceSource {
+                        space_id: source.space_id.clone(),
+                        label: source.label.clone(),
+                        weight: source.weight,
+                        memory: source.memory,
+                        semantic_graph: source.semantic_graph,
+                    })
+                    .collect(),
+                observe_space_ids: vec![managed_space_id.clone()],
+                query: input.to_owned(),
+                max_tokens: context_window
+                    .saturating_sub(reserve_output_tokens)
+                    .saturating_div(8)
+                    .clamp(128, 2_048),
+                vector_space_id: query_embedding.as_ref().map(|value| value.0.clone()),
+                query_vector: query_embedding.as_ref().map(|value| value.1.clone()),
+                embedding: None,
             };
+            match runtime_api::retrieve_scoped_memory_snapshot(self.runtime(), retrieval_request)
+                .await
+            {
+                Ok(snapshot) => (
+                    Value::Array(snapshot.items),
+                    snapshot.source_observations,
+                    if retrieval_enabled { "ok" } else { "disabled" },
+                ),
+                Err(error) => {
+                    warnings.push(format!("retrieval degraded: {error}"));
+                    (json!([]), Vec::new(), "degraded")
+                }
+            }
+        } else {
+            (json!([]), Vec::new(), "disabled")
+        };
         let items = retrieved
             .as_array()
             .cloned()
@@ -156,72 +165,105 @@ impl MomoApiService {
             filter_memory_for_prompt(&memory, &state_result, state_injection_status == "active");
         governed.audit["memory_prompt_filter"] = memory_prompt_filter;
 
-        let history = parse_json(
-            simple::local_messages_json(conversation_space_id, conversation_id.clone()).await,
-        )?;
+        let conversation_scope_uuid =
+            uuid::Uuid::parse_str(&conversation_space_id).map_err(MomoApiError::internal)?;
+        let conversation_uuid =
+            uuid::Uuid::parse_str(&conversation_id).map_err(MomoApiError::internal)?;
+        let history = self
+            .runtime()
+            .core()
+            .store()
+            .list_messages_for_scope(conversation_scope_uuid, conversation_uuid)
+            .await
+            .map_err(MomoApiError::internal)?;
         let mut messages = history
-            .as_array()
             .into_iter()
-            .flatten()
-            .filter_map(|message| {
-                Some(json!({
-                    "role": message.get("role")?.as_str()?,
-                    "content": message.get("content")?.as_str()?,
-                }))
+            .map(|message| ChatInput {
+                role: message.role,
+                content: message.content,
             })
             .collect::<Vec<_>>();
         if request.input.is_structured()
             && (direct_multimodal || !request.input.has_images())
             && messages.last().is_some_and(|message| {
-                message.get("role").and_then(Value::as_str) == Some("user")
-                    && message.get("content").and_then(Value::as_str) == Some(input)
+                message.role == momo_domain::MessageRole::User && message.content == input
             })
         {
             messages.pop();
         }
-        let prepared = parse_json(simple::prepare_context_json(
-            json!({
-                "runtime_instructions": governed.instructions.as_deref().unwrap_or_default(),
-                "roleplay_director": if config.roleplay.enabled
-                    && character.get("character_markdown").and_then(Value::as_str)
-                        .is_some_and(|value| !value.trim().is_empty())
-                {
-                    product_prompts::ROLEPLAY_DIRECTOR
+        let assistant_prompt = self.runtime.prompt_spaces().get(PromptSpaceId::Assistant);
+        let roleplay_director = self
+            .runtime
+            .prompt_spaces()
+            .get(PromptSpaceId::RoleplayDirector);
+        let character_markdown = character.character_markdown.as_str();
+        let has_character = !character_markdown.trim().is_empty();
+        let assistant_enabled = governed.instructions.is_none() && !has_character;
+        let roleplay_director_enabled = config.roleplay.enabled && has_character;
+        if governed.instructions.is_none() {
+            governed.audit["instructions_source"] = if assistant_enabled {
+                json!("prompt_space")
+            } else {
+                json!("omitted_for_character")
+            };
+        }
+        governed.audit["prompt_spaces"] = json!({
+            "assistant_revision": assistant_enabled.then_some(&assistant_prompt.revision),
+            "roleplay_director_revision": roleplay_director_enabled.then_some(&roleplay_director.revision),
+        });
+        let memory_markdown = if include_memory {
+            joined_bodies(&prompt_memory)
+        } else {
+            String::new()
+        };
+        let nsg_markdown = if include_semantic_graph {
+            joined_bodies(&nsg)
+        } else {
+            String::new()
+        };
+        let prepared = prepare_context(ContextRequest {
+            sections: ContextSections {
+                runtime_instructions: governed.instructions.as_deref().unwrap_or({
+                    if assistant_enabled {
+                        assistant_prompt.content.as_str()
+                    } else {
+                        ""
+                    }
+                }),
+                roleplay_director: if roleplay_director_enabled {
+                    roleplay_director.content.as_str()
                 } else {
                     ""
                 },
-                "character_markdown": character.get("character_markdown").and_then(Value::as_str).unwrap_or_default(),
-                "user_markdown": character.get("user_markdown").and_then(Value::as_str).unwrap_or_default(),
-                "memory_markdown": if include_memory { joined_bodies(&prompt_memory) } else { String::new() },
-                "state_context": state_context_for_prompt,
-                "nsg_markdown": if include_semantic_graph { joined_bodies(&nsg) } else { String::new() },
-                "messages": messages,
-                "context_window": context_window,
-                "reserve_output_tokens": reserve_output_tokens,
-            })
-            .to_string(),
-        ))?;
+                character: character_markdown,
+                user: &character.user_markdown,
+                memory: &memory_markdown,
+                state: &state_context_for_prompt,
+                semantic_graph: &nsg_markdown,
+            },
+            messages: &messages,
+            budget: ContextBudget {
+                context_window,
+                reserve_output_tokens,
+            },
+        });
         let mut gateway_messages = prepared
-            .get("messages")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+            .messages
+            .iter()
+            .map(crate::GatewayMessage::from)
+            .collect::<Vec<_>>();
         governed.audit["text_context"] = json!({
-            "estimated_input_tokens": prepared.get("estimated_input_tokens"),
-            "omitted_messages": prepared.get("omitted_messages"),
-            "truncated_messages": prepared.get("truncated_messages"),
-            "sections": prepared.get("section_audit"),
+            "estimated_input_tokens": prepared.estimated_input_tokens,
+            "omitted_messages": prepared.omitted_messages,
+            "truncated_messages": prepared.truncated_messages,
+            "sections": prepared.section_audit,
             "excludes_appended_structured_input": request.input.is_structured()
                 && (direct_multimodal || !request.input.has_images()),
         });
         if prepared
-            .get("section_audit")
-            .and_then(Value::as_array)
-            .is_some_and(|sections| {
-                sections
-                    .iter()
-                    .any(|section| section.get("truncated").and_then(Value::as_bool) == Some(true))
-            })
+            .section_audit
+            .iter()
+            .any(|section| section.truncated)
         {
             warnings.push("system context sections were truncated; inspect request_audit.text_context.sections".to_owned());
         }
@@ -230,19 +272,15 @@ impl MomoApiService {
                 request
                     .input
                     .gateway_messages()
-                    .map_err(|error| MomoApiError::bad_request(error.to_string()))?
-                    .into_iter()
-                    .map(|message| serde_json::to_value(message).expect("message serializes")),
+                    .map_err(|error| MomoApiError::bad_request(error.to_string()))?,
             );
         }
-        let mut request_parameters = json!({
-            "max_tokens": reserve_output_tokens,
-            "momo_hop": 1,
-            "momo_request_id": operation_key,
-        });
-        let parameter_object = request_parameters
-            .as_object_mut()
-            .expect("request parameters are an object");
+        let mut request_parameters = serde_json::Map::from_iter([
+            ("max_tokens".to_owned(), json!(reserve_output_tokens)),
+            ("momo_hop".to_owned(), json!(1)),
+            ("momo_request_id".to_owned(), json!(operation_key)),
+        ]);
+        let parameter_object = &mut request_parameters;
         parameter_object.extend(governed.parameters.clone());
         if governed.allow_tools && !request.tools.is_empty() {
             parameter_object.insert("tools".to_owned(), tools_to_chat(&request.tools)?);
@@ -264,12 +302,8 @@ impl MomoApiService {
                 stream,
             })
             .await?;
-        let content = required_str(&completion, "content")?.trim().to_owned();
-        let tool_calls = completion
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let content = completion.content.trim().to_owned();
+        let tool_calls = &completion.tool_calls;
         if content.is_empty() && tool_calls.is_empty() {
             return Err(MomoApiError::model(
                 "model gateway returned neither text nor tool calls",
@@ -285,15 +319,13 @@ impl MomoApiService {
             }],
         }];
         for call in tool_calls {
-            let id = required_str(&call, "id")?.to_owned();
-            let function = call
-                .get("function")
-                .ok_or_else(|| MomoApiError::model("tool call is missing function"))?;
+            let id = call.id.clone();
+            let function = &call.function;
             output.push(ResponseOutputItem::FunctionCall {
                 id: id.clone(),
                 call_id: id,
-                name: required_str(function, "name")?.to_owned(),
-                arguments: required_str(function, "arguments")?.to_owned(),
+                name: function.name.clone(),
+                arguments: function.arguments.clone(),
                 status: "completed".to_owned(),
             });
         }
@@ -306,19 +338,13 @@ impl MomoApiService {
                 output,
                 output_text: content,
                 usage: response_usage(&completion),
-                finish_reason: completion
-                    .get("finish_reason")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                finish_reason: completion.finish_reason.clone(),
                 momo: MomoResponseMetadata {
                     schema: crate::MOMO_RESPONSE_SCHEMA.to_owned(),
                     request_id: request_id.to_owned(),
                     conversation_id,
                     route: request.model.clone(),
-                    upstream_request_id: completion
-                        .get("upstream_request_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
+                    upstream_request_id: completion.upstream_request_id.clone(),
                     warnings,
                     state_audit: state_result
                         .get("audit")
@@ -330,18 +356,6 @@ impl MomoApiService {
             mo_state_operation_id,
         ))
     }
-}
-
-fn parse_json(result: Result<String, String>) -> Result<Value, MomoApiError> {
-    let value = result.map_err(MomoApiError::internal)?;
-    serde_json::from_str(&value).map_err(|error| MomoApiError::internal(error.to_string()))
-}
-
-fn required_str<'a>(value: &'a Value, field: &str) -> Result<&'a str, MomoApiError> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| MomoApiError::internal(format!("response is missing string field {field}")))
 }
 
 pub(super) fn joined_bodies(values: &[Value]) -> String {
@@ -464,7 +478,7 @@ struct ResponseConversation {
     conversation_space_id: String,
     conversation_id: String,
     character_id: String,
-    character: Value,
+    character: momo_domain::CharacterCard,
 }
 
 impl MomoApiService {
@@ -473,7 +487,7 @@ impl MomoApiService {
         request: &MomoResponseRequest,
         operation_key: &str,
         request_fingerprint: &str,
-        persisted: Option<&Value>,
+        persisted: Option<&momo_storage::ResponseOperation>,
         resolved_input: &ResolvedResponseInput,
     ) -> Result<ResponseConversation, MomoApiError> {
         let conversation_space_id = request
@@ -481,11 +495,13 @@ impl MomoApiService {
             .conversation_space_id
             .clone()
             .expect("validated conversation Space");
+        let conversation_scope_uuid =
+            uuid::Uuid::parse_str(&conversation_space_id).map_err(MomoApiError::bad_request)?;
         let requested_character_id = request.momo.character_id.as_deref();
         let attempted_conversation = persisted
-            .and_then(|operation| operation["conversation_id"].as_str())
-            .map(str::to_owned)
+            .map(|operation| operation.conversation_id.clone())
             .or(self
+                .coordination
                 .response_attempts
                 .lock()
                 .await
@@ -498,94 +514,141 @@ impl MomoApiService {
             .map(str::to_owned)
             .or(attempted_conversation);
         let (conversation_id, character_id) = if let Some(id) = existing_conversation_id {
-            let conversations =
-                parse_json(simple::local_conversations_json(conversation_space_id.clone()).await)?;
-            let conversation = conversations
-                .as_array()
-                .and_then(|items| {
-                    items.iter().find(|conversation| {
-                        conversation.get("id").and_then(Value::as_str) == Some(id.as_str())
-                    })
-                })
+            let conversation_uuid =
+                uuid::Uuid::parse_str(&id).map_err(MomoApiError::bad_request)?;
+            let conversation = self
+                .runtime()
+                .core()
+                .store()
+                .conversation_for_scope(conversation_scope_uuid, conversation_uuid)
+                .await
+                .map_err(MomoApiError::internal)?
                 .ok_or_else(|| {
                     MomoApiError::bad_request(
                         "conversation_id does not belong to conversation_space_id",
                     )
                 })?;
             let stored_character_id = conversation
-                .get("character_id")
-                .and_then(Value::as_str)
+                .character_id
                 .ok_or_else(|| {
                     MomoApiError::bad_request(
                         "conversation has no character; use switch_character control first",
                     )
-                })?;
+                })?
+                .to_string();
             if requested_character_id.is_some_and(|value| value != stored_character_id) {
                 return Err(MomoApiError::bad_request(
                     "character_id differs from the conversation; use switch_character control",
                 ));
             }
-            (id, stored_character_id.to_owned())
+            (id, stored_character_id)
         } else {
             let character_id = requested_character_id.ok_or_else(|| {
                 MomoApiError::bad_request("character_id is required for a new conversation")
             })?;
-            let created = parse_json(
-                simple::stage_conversation_json(
-                    None,
-                    conversation_space_id.clone(),
-                    request
-                        .momo
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "MOMO response".to_owned()),
-                    character_id.to_owned(),
-                )
-                .await,
-            )?;
-            let id = required_str(&created, "id")?.to_owned();
-            self.response_attempts
+            let character_uuid =
+                uuid::Uuid::parse_str(character_id).map_err(MomoApiError::bad_request)?;
+            if self
+                .runtime()
+                .core()
+                .store()
+                .character_by_id(character_uuid)
+                .await
+                .map_err(MomoApiError::internal)?
+                .is_none()
+            {
+                return Err(MomoApiError::bad_request("character_id does not exist"));
+            }
+            let now = chrono::Utc::now();
+            let conversation = momo_domain::Conversation {
+                id: momo_domain::new_id(),
+                scope_id: conversation_scope_uuid,
+                character_id: Some(character_uuid),
+                title: request
+                    .momo
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "MOMO response".to_owned()),
+                created_at: now,
+                updated_at: now,
+            };
+            self.runtime()
+                .core()
+                .store()
+                .save_conversation(&conversation)
+                .await
+                .map_err(MomoApiError::internal)?;
+            let id = conversation.id.to_string();
+            self.coordination
+                .response_attempts
                 .lock()
                 .await
                 .insert(operation_key.to_owned(), id.clone());
             (id, character_id.to_owned())
         };
-        let character = parse_json(simple::local_character_json(character_id.clone()).await)
-            .map_err(|_| MomoApiError::bad_request("character_id does not exist"))?;
-        self.response_attempts
+        let character_uuid =
+            uuid::Uuid::parse_str(&character_id).map_err(MomoApiError::bad_request)?;
+        let character = self
+            .runtime()
+            .core()
+            .store()
+            .character_by_id(character_uuid)
+            .await
+            .map_err(MomoApiError::internal)?
+            .ok_or_else(|| MomoApiError::bad_request("character_id does not exist"))?;
+        self.coordination
+            .response_attempts
             .lock()
             .await
             .entry(operation_key.to_owned())
             .or_insert_with(|| conversation_id.clone());
-        simple::begin_response_operation(
-            operation_key.to_owned(),
-            request_fingerprint.to_owned(),
-            conversation_id.clone(),
-            serde_json::to_string(resolved_input)
-                .map_err(|error| MomoApiError::internal(error.to_string()))?,
-        )
-        .await
-        .map_err(MomoApiError::internal)?;
-        self.response_attempts.lock().await.remove(operation_key);
+        let resolved_input_json =
+            serde_json::to_string(resolved_input).map_err(MomoApiError::internal)?;
+        self.runtime()
+            .core()
+            .store()
+            .begin_response_operation(
+                operation_key,
+                request_fingerprint,
+                &conversation_id,
+                &resolved_input_json,
+            )
+            .await
+            .map_err(MomoApiError::internal)?;
+        self.coordination
+            .response_attempts
+            .lock()
+            .await
+            .remove(operation_key);
 
         let user_already_written = persisted
-            .and_then(|operation| operation["user_written"].as_bool())
+            .map(|operation| operation.user_written)
             .unwrap_or(false);
         if !user_already_written {
             let persisted_user_text = resolved_input.persisted_user_text.as_deref().or_else(|| {
                 (!request.input.has_function_outputs()).then_some(resolved_input.text.as_str())
             });
             if let Some(user_text) = persisted_user_text {
-                simple::append_response_user_message_json(
-                    operation_key.to_owned(),
-                    conversation_space_id.clone(),
-                    conversation_id.clone(),
-                    user_text.to_owned(),
-                )
-                .await
-                .map_err(MomoApiError::internal)?;
+                let conversation_uuid =
+                    uuid::Uuid::parse_str(&conversation_id).map_err(MomoApiError::internal)?;
+                let message = momo_domain::Message {
+                    id: momo_domain::new_id(),
+                    conversation_id: conversation_uuid,
+                    role: momo_domain::MessageRole::User,
+                    content: user_text.to_owned(),
+                    created_at: chrono::Utc::now(),
+                };
+                self.runtime()
+                    .core()
+                    .store()
+                    .append_response_user_message(operation_key, conversation_scope_uuid, &message)
+                    .await
+                    .map_err(MomoApiError::internal)?;
             } else {
-                simple::mark_response_user_written(operation_key.to_owned())
+                self.runtime()
+                    .core()
+                    .store()
+                    .mark_response_user_written(operation_key)
                     .await
                     .map_err(MomoApiError::internal)?;
             }

@@ -46,9 +46,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test workspace
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --locked
+      - name: Build release artifacts
+        run: cargo build --release --workspace --all-features --locked
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -69,7 +71,7 @@ jobs:
             target/morp-offline-*/dataset/manifest.json
             target/morp-offline-*/momo-plan.json
       - name: Build documentation
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps --locked
 
   security-audit:
     runs-on: ubuntu-latest

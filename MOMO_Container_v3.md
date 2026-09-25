@@ -8,8 +8,8 @@ Status: Implemented MOMO Core 1.0 contract (v3.0.0)
 
 ## 1. Purpose
 
-MOC v3 is a Zstandard-compressed tar container for explicit MOMO Space data,
-portable configuration and host extension modules. A host instance root may
+MOC v3 is a Zstandard-compressed tar container for explicit MOMO Space data
+and host extension modules. A host instance root may
 contain many personal and shared Spaces; a MOC includes only the Spaces and
 modules selected by an authorized host.
 
@@ -32,7 +32,6 @@ implicit migration path.
 
 | Module ID | Root | Space-owned | Import order |
 | --- | --- | --- | ---: |
-| `config` | `config/` | no | 10 |
 | `characters` | `characters/` | yes | 20 |
 | `conversations` | `conversations/` | yes | 30 |
 | `memory` | `memory/` | yes | 40 |
@@ -55,15 +54,13 @@ path = "memory/spaces/01900000-0000-7000-8000-000000000101"
 
 `space_id` is an opaque UUID. `module` must be a selected Space-owned known
 module. `path` must equal `<module-root>/spaces/<space_id>`. Duplicate pairs,
-undeclared Space payloads and Space declarations for config or extension
+undeclared Space payloads and Space declarations for extension
 modules are rejected.
 
 ## 3. Stable layout
 
 ```text
 manifest.toml
-config/
-  momo.toml
 characters/spaces/<owner-space-id>/
   index.json
   <character-id>/character.toml
@@ -105,7 +102,6 @@ The Core export plan contains independent selections:
 
 ```json
 {
-  "include_config": true,
   "characters": [
     {"space_id": "<owner-space>", "character_ids": ["<character-id>"]}
   ],
@@ -139,9 +135,8 @@ Spaces may not collapse into one target in the same import. This prevents an
 import from silently merging two people's memory or a group conversation into
 a personal Space.
 
-Config import is selected independently with `apply_config`. Unknown host
-modules are validated and reported; they are copied only when the host supplies
-an explicit claim directory.
+Unknown host modules are validated and reported; they are copied only when the
+host supplies an explicit claim directory.
 
 ## 6. Controls and conflicts
 
@@ -158,15 +153,13 @@ spans SQLite, Space files, and optional host-owned directories, it is not
 represented as a single cross-filesystem crash transaction; an operational I/O
 failure is reported and the host must retry or restore its deployment snapshot.
 
-## 7. Config
+## 7. Runtime settings and prompts
 
-The optional `config` module contains only `config/momo.toml`. Product prompts
-are compiled Core source and MUST NOT be included in MOC, referenced by
-`momo.toml`, or interpreted as Space-owned assets. Credentials and host-local
-adapter wiring are never included.
-
-Config is a portable behaviour profile selected for the package; it is not
-evidence that every Space in the package has one owner or identical access.
+MOC has no `config` module. Runtime settings and Prompt Space overrides MUST NOT
+be included in MOC or interpreted as Space-owned assets. A host reconciles
+those resources through `PUT /v1/runtime-settings` and
+`PUT /v1/prompt-spaces/{id}`. MOMO does not read `momo.toml`; credentials and
+host-local adapter wiring are also never included.
 
 ## 8. Security and resource limits
 

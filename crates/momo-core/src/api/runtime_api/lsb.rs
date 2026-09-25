@@ -15,7 +15,7 @@ const fn default_true() -> bool {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum LsbExportPayload {
+pub enum LsbExportPayload {
     MomoCharacter {
         owner_space_id: uuid::Uuid,
         character_id: uuid::Uuid,
@@ -34,7 +34,7 @@ enum LsbExportPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum LsbCarrierSource {
+pub enum LsbCarrierSource {
     PreservedCharacterSource {
         owner_space_id: uuid::Uuid,
         character_id: uuid::Uuid,
@@ -43,52 +43,56 @@ enum LsbCarrierSource {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EmbedLsbImageRequest {
+pub struct EmbedLsbImageRequest {
     #[serde(default)]
-    carrier_path: Option<String>,
+    pub carrier_path: Option<String>,
     #[serde(default)]
-    carrier: Option<LsbCarrierSource>,
-    output_path: String,
-    format: crate::LsbImageFormat,
-    payload: LsbExportPayload,
+    pub carrier: Option<LsbCarrierSource>,
+    pub output_path: String,
+    pub format: crate::LsbImageFormat,
+    pub payload: LsbExportPayload,
     #[serde(default = "default_true")]
-    compress: bool,
+    pub compress: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExtractLsbImageRequest {
-    input_path: String,
-    output_path: String,
-    format: crate::LsbImageFormat,
-    expected_payload_type: crate::LsbPayloadType,
+pub struct ExtractLsbImageRequest {
+    pub input_path: String,
+    pub output_path: String,
+    pub format: crate::LsbImageFormat,
+    pub expected_payload_type: crate::LsbPayloadType,
 }
 
 #[derive(Debug, Serialize)]
-struct LsbFileReport {
-    output_path: String,
-    format: crate::LsbImageFormat,
-    payload_type: crate::LsbPayloadType,
-    bytes: usize,
+pub struct LsbFileReport {
+    pub output_path: String,
+    pub format: crate::LsbImageFormat,
+    pub payload_type: crate::LsbPayloadType,
+    pub bytes: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    source_format: Option<crate::ExternalCharacterImportFormat>,
+    pub source_format: Option<crate::ExternalCharacterImportFormat>,
 }
 
-pub async fn embed_lsb_image_json(request_json: String) -> Result<String, String> {
-    embed_lsb_image_json_with_core(core()?, request_json).await
+pub async fn embed_lsb_image_file(
+    runtime: &MomoRuntime,
+    request: EmbedLsbImageRequest,
+) -> Result<LsbFileReport, RuntimeApiError> {
+    embed_lsb_image_with_core(runtime.core(), request).await
 }
 
-async fn embed_lsb_image_json_with_core(
+async fn embed_lsb_image_with_core(
     core: &crate::MomoCore,
-    request_json: String,
-) -> Result<String, String> {
-    let request: EmbedLsbImageRequest =
-        serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
+    request: EmbedLsbImageRequest,
+) -> Result<LsbFileReport, RuntimeApiError> {
     validate_image_extension(&request.output_path, request.format)?;
     let carrier = match (request.carrier_path, request.carrier) {
         (Some(path), None) => {
             validate_image_extension(&path, request.format)?;
-            read_bounded_file(path, crate::MAX_LSB_IMAGE_BYTES as u64)?
+            run_blocking("read LSB carrier", move || {
+                read_bounded_file(path, crate::MAX_LSB_IMAGE_BYTES as u64)
+            })
+            .await?
         }
         (
             None,
@@ -99,7 +103,7 @@ async fn embed_lsb_image_json_with_core(
         ) => {
             let source = crate::read_preserved_character_source(core, owner_space_id, character_id)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
             if !matches!(
                 source.source_format,
                 crate::ExternalCharacterImportFormat::Ccv1Png
@@ -107,14 +111,16 @@ async fn embed_lsb_image_json_with_core(
                     | crate::ExternalCharacterImportFormat::Ccv3Png
             ) || request.format != crate::LsbImageFormat::Png
             {
-                return Err(
-                    "a preserved LSB carrier must be an imported PNG and use format png".to_owned(),
-                );
+                return Err(RuntimeApiError::invalid(
+                    "a preserved LSB carrier must be an imported PNG and use format png",
+                ));
             }
             source.bytes
         }
         _ => {
-            return Err("exactly one of carrier_path or carrier must be provided".to_owned());
+            return Err(RuntimeApiError::invalid(
+                "exactly one of carrier_path or carrier must be provided",
+            ));
         }
     };
     let (payload_type, payload, source_format) = match request.payload {
@@ -126,34 +132,38 @@ async fn embed_lsb_image_json_with_core(
                 .store()
                 .list_characters_for_scope(owner_space_id)
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|error| RuntimeApiError::internal(error.to_string()))?
                 .into_iter()
                 .find(|character| character.id == character_id)
-                .ok_or_else(|| "character does not exist in the requested scope".to_owned())?;
+                .ok_or_else(|| {
+                    RuntimeApiError::not_found("character does not exist in the requested scope")
+                })?;
             let bytes = serde_json::to_vec(&json!({
                 "schema": crate::MOMO_LSB_CHARACTER_SCHEMA,
                 "character": character,
             }))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
             (crate::LsbPayloadType::CharacterData, bytes, None)
         }
         LsbExportPayload::Moc { input_path } => {
-            let path = Path::new(&input_path);
-            crate::momo_moc::inspect(path).map_err(|error| error.to_string())?;
-            (
-                crate::LsbPayloadType::Moc,
-                read_bounded_file(path, MAX_LSB_SOURCE_FILE_BYTES)?,
-                None,
-            )
+            let bytes = run_blocking("read MOC LSB payload", move || {
+                let path = Path::new(&input_path);
+                crate::momo_moc::inspect(path)
+                    .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
+                read_bounded_file(path, MAX_LSB_SOURCE_FILE_BYTES)
+            })
+            .await?;
+            (crate::LsbPayloadType::Moc, bytes, None)
         }
         LsbExportPayload::Charx { input_path } => {
-            let path = Path::new(&input_path);
-            crate::validate_external_charx(path).map_err(|error| error.to_string())?;
-            (
-                crate::LsbPayloadType::Charx,
-                read_bounded_file(path, MAX_LSB_SOURCE_FILE_BYTES)?,
-                None,
-            )
+            let bytes = run_blocking("read CHARX LSB payload", move || {
+                let path = Path::new(&input_path);
+                crate::validate_external_charx(path)
+                    .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
+                read_bounded_file(path, MAX_LSB_SOURCE_FILE_BYTES)
+            })
+            .await?;
+            (crate::LsbPayloadType::Charx, bytes, None)
         }
         LsbExportPayload::PreservedCharacterSource {
             owner_space_id,
@@ -161,7 +171,7 @@ async fn embed_lsb_image_json_with_core(
         } => {
             let source = crate::read_preserved_character_source(core, owner_space_id, character_id)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
             let payload_type = match source.source_format {
                 crate::ExternalCharacterImportFormat::Ccv1Json
                 | crate::ExternalCharacterImportFormat::Ccv2Json
@@ -178,50 +188,58 @@ async fn embed_lsb_image_json_with_core(
             (payload_type, source.bytes, Some(source.source_format))
         }
     };
-    let output = crate::embed_lsb_image(
-        &carrier,
-        request.format,
-        payload_type,
-        &payload,
-        request.compress,
-    )
-    .map_err(|error| error.to_string())?;
-    atomic_write(Path::new(&request.output_path), &output)?;
-    serde_json::to_string(&LsbFileReport {
-        output_path: request.output_path,
-        format: request.format,
-        payload_type,
-        bytes: output.len(),
-        source_format,
+    run_blocking("embed LSB image", move || {
+        let output = crate::embed_lsb_image(
+            &carrier,
+            request.format,
+            payload_type,
+            &payload,
+            request.compress,
+        )
+        .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
+        atomic_write(Path::new(&request.output_path), &output)?;
+        Ok(LsbFileReport {
+            output_path: request.output_path,
+            format: request.format,
+            payload_type,
+            bytes: output.len(),
+            source_format,
+        })
     })
-    .map_err(|error| error.to_string())
+    .await
 }
 
-pub async fn extract_lsb_image_json(request_json: String) -> Result<String, String> {
-    let request: ExtractLsbImageRequest =
-        serde_json::from_str(&request_json).map_err(|error| error.to_string())?;
+pub async fn extract_lsb_image_file(
+    request: ExtractLsbImageRequest,
+) -> Result<LsbFileReport, RuntimeApiError> {
+    run_blocking("extract LSB image", move || extract_lsb_image(request)).await
+}
+
+fn extract_lsb_image(request: ExtractLsbImageRequest) -> Result<LsbFileReport, RuntimeApiError> {
     validate_image_extension(&request.input_path, request.format)?;
     let input = read_bounded_file(&request.input_path, crate::MAX_LSB_IMAGE_BYTES as u64)?;
-    let payload =
-        crate::extract_lsb_image(&input, request.format).map_err(|error| error.to_string())?;
+    let payload = crate::extract_lsb_image(&input, request.format)
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     if payload.payload_type != request.expected_payload_type {
-        return Err(format!(
+        return Err(RuntimeApiError::invalid(format!(
             "LSB payload type mismatch: expected {:?}, found {:?}",
             request.expected_payload_type, payload.payload_type
-        ));
+        )));
     }
     atomic_write(Path::new(&request.output_path), &payload.bytes)?;
-    serde_json::to_string(&LsbFileReport {
+    Ok(LsbFileReport {
         output_path: request.output_path,
         format: request.format,
         payload_type: payload.payload_type,
         bytes: payload.bytes.len(),
         source_format: None,
     })
-    .map_err(|error| error.to_string())
 }
 
-fn validate_image_extension(path: &str, format: crate::LsbImageFormat) -> Result<(), String> {
+fn validate_image_extension(
+    path: &str,
+    format: crate::LsbImageFormat,
+) -> Result<(), RuntimeApiError> {
     let extension = Path::new(path)
         .extension()
         .and_then(|value| value.to_str())
@@ -234,41 +252,42 @@ fn validate_image_extension(path: &str, format: crate::LsbImageFormat) -> Result
     if valid {
         Ok(())
     } else {
-        Err(format!(
+        Err(RuntimeApiError::invalid(format!(
             "image extension {extension:?} does not match declared format {format:?}"
-        ))
+        )))
     }
 }
 
-fn read_bounded_file(path: impl AsRef<Path>, max_bytes: u64) -> Result<Vec<u8>, String> {
+fn read_bounded_file(path: impl AsRef<Path>, max_bytes: u64) -> Result<Vec<u8>, RuntimeApiError> {
     let path = path.as_ref();
-    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("input must be a regular file".to_owned());
+        return Err(RuntimeApiError::invalid("input must be a regular file"));
     }
     if metadata.len() == 0 || metadata.len() > max_bytes {
-        return Err(format!(
+        return Err(RuntimeApiError::invalid(format!(
             "input size must be between 1 and {max_bytes} bytes"
-        ));
+        )));
     }
-    fs::read(path).map_err(|error| error.to_string())
+    fs::read(path).map_err(|error| RuntimeApiError::internal(error.to_string()))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), RuntimeApiError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    fs::create_dir_all(parent).map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     temporary
         .write_all(bytes)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     temporary
         .as_file()
         .sync_all()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     temporary
         .persist(path)
-        .map_err(|error| error.error.to_string())?;
+        .map_err(|error| RuntimeApiError::internal(error.error.to_string()))?;
     Ok(())
 }
 

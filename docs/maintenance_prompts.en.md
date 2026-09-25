@@ -1,66 +1,88 @@
-# MOMO compiled product prompts
+# MOMO Prompt Spaces
 
 [简体中文](maintenance_prompts.zh-CN.md)
 
-MOMO Core owns three System Prompts as reviewable Markdown source files:
+Prompt Spaces are process-wide, named prompt resources. MOMO Core ships reviewed
+Markdown defaults, but the active value is no longer limited to the value
+compiled into the binary. A host replaces an active value through the native
+HTTP API. Core persists overrides as internal JSON state under its data root;
+it does not read prompt content from `momo.toml`.
 
-- `crates/momo-core/src/product_prompts/dmw_distiller.md` for DMW maintenance;
-- `crates/momo-core/src/product_prompts/nsg_governor.md` for NSG governance;
-- `crates/momo-core/src/product_prompts/roleplay_director.md` for foreground character performance.
+## Fixed spaces
 
-`crates/momo-core/src/product_prompts.rs` embeds these files with `include_str!`.
-They are compile-time inputs to `momo_core`, not deployment files and not
-runtime configuration.
+| id | default role |
+| --- | --- |
+| `assistant` | General system instruction; defaults to `You are a helpful assistant.` |
+| `vision_fallback` | Instruction for the text description produced when the conversation route cannot accept images |
+| `roleplay_director` | Foreground character-performance policy |
+| `memory_distillation` | DMW maintenance policy |
+| `semantic_graph_governance` | NSG governance policy |
 
-## Change and runtime boundary
+These identifiers are a closed contract. Arbitrary prompt names are rejected,
+so a typo cannot create unused state. Prompt Spaces are not Spaces, have no
+per-user ownership, and are not included in MOC import or export.
 
-Changing a product prompt requires a Core source change, review, rebuild, and
-deployment of the new binary. At runtime, Core does not discover or read a
-`prompts/` directory and does not depend on the server working directory.
+## HTTP API
 
-Product prompts:
+```http
+GET /v1/prompt-spaces
+GET /v1/prompt-spaces/assistant
+PUT /v1/prompt-spaces/assistant
+Content-Type: application/json
 
-- are not fields or paths in `momo.toml`;
-- cannot be replaced by a native response request;
-- are not imported or exported in a MOC config module;
-- are not a Space and do not have Space-level ownership;
-- cannot be re-read or hot-reloaded while Core is running.
-
-Open source here means that the complete prompt source is tracked and
-reviewable in the Core repository. It does not imply a user-editable runtime
-file or a separate prompt service.
-
-## Benchmark boundary
-
-The MORP names `basic_context`, `dmw_nsg`, and `all_enabled` are test-plan
-labels, not product prompt variants or Cargo features. They exercise the same
-compiled prompt revision. Component switches and counterfactual inputs belong
-to the test layer, so prompt or build differences cannot become hidden
-experimental inputs.
-
-## Responsibilities
-
-The Roleplay Director governs foreground generation. It turns the Character
-Card, transcript, DMW, NSG, and MO State evidence into scene-native performance
-without writing memory or taking control of the user.
-
-The DMW Distiller may emit only DMW YAML Patch operations for durable events,
-relationships, character development, current scene state, and unresolved
-threads. The NSG Governor may propose only durable world rules and graph
-relationships; automatic changes remain Draft and cannot directly mutate Canon.
-
-All product control instructions and structural keys are English. Narrative
-content may use any language and must preserve source spelling and meaning.
-Core does not use a language-specific keyword list or a hidden CJK/Latin gate
-to decide which facts are valid.
-
-## Core-owned validation
-
-From the MOMO Core repository root, run:
-
-```bash
-cargo test -p momo_core product_prompts::tests::compiled_product_prompts_are_complete
+{"content":"You answer accurately and concisely."}
 ```
 
-This verifies the three compile-time prompt sources without invoking mobot or a
-model.
+`PUT` replaces the whole value and returns the active resource. Content must be
+non-blank and no larger than 262,144 bytes. The response contains `source`
+(`builtin` or `override`) and a SHA-256 `revision` of the active content.
+
+```http
+DELETE /v1/prompt-spaces/assistant
+```
+
+`DELETE` removes the override and restores the compiled default; it does not
+delete the named resource. Replacements are visible to future prompt lookups
+without restarting Core and survive restart. Persistence happens before the
+in-memory value is committed, so a failed write does not report or expose a
+replacement that was not stored.
+
+The default `assistant` value is used only when a response has neither governed
+request `instructions` nor a non-empty character card. Loading a character
+suppresses the generic assistant default. Explicit request instructions remain
+when the override policy allows them.
+
+`roleplay_director` is the static execution policy placed in the final System
+context's `# Roleplay Direction` section. It is not MO State: MO State supplies
+current scene, epistemic, and state evidence, while the director tells the
+model how to perform the character from the card and that evidence.
+`roleplay.enabled` and `vision.enabled` belong to `/v1/runtime-settings`; their
+prompt bodies are Prompt Spaces.
+
+## Host configuration boundary
+
+A host may keep user-facing configuration in any format. For example, mobot
+may read its own TOML prompt settings and issue one `PUT` request per configured
+Prompt Space during reconciliation. That translation belongs to mobot:
+
+```text
+user configuration -> host validation -> HTTP PUT /v1/prompt-spaces/:id -> MOMO
+```
+
+MOMO does not parse mobot configuration, accept prompt file paths from it, or
+restore the former TOML prompt fields. This keeps the API usable by every host
+without making mobot a protocol dependency.
+
+## Source and validation
+
+Defaults remain reviewable under `crates/momo-core/src/product_prompts/` and are
+embedded with `include_str!`. Compilation therefore still fails when a default
+source is absent, while operators are free to replace active values through the
+same HTTP contract in every build.
+
+From the repository root:
+
+```bash
+cargo test -p momo_core prompt_spaces
+cargo test -p momo-server prompt_spaces
+```

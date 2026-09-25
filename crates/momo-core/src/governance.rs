@@ -1,12 +1,12 @@
-//! Portable request-governance and visual-description configuration.
+//! Typed process-wide runtime settings and request governance.
 
-use std::{collections::BTreeSet, fs, path::Path};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
-pub const MOMO_CONFIG_SCHEMA_VERSION: u32 = 1;
+pub const RUNTIME_SETTINGS_SCHEMA_VERSION: u32 = 1;
 
 mod ddm;
 
@@ -54,13 +54,11 @@ impl Default for RequestOverridePolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct VisionDescriptionConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_visual_description_prompt")]
-    pub prompt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,7 +75,8 @@ impl Default for RoleplayRuntimeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MomoRuntimeConfig {
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceRuntimeSettings {
     #[serde(default = "default_true")]
     pub memory_distillation_enabled: bool,
     #[serde(default = "default_maintenance_turns")]
@@ -125,6 +124,7 @@ impl MoStateProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MoStateRuntimeConfig {
     #[serde(default)]
     pub profile: MoStateProfile,
@@ -156,7 +156,7 @@ impl Default for MoStateRuntimeConfig {
     }
 }
 
-impl Default for MomoRuntimeConfig {
+impl Default for MaintenanceRuntimeSettings {
     fn default() -> Self {
         Self {
             memory_distillation_enabled: true,
@@ -167,23 +167,15 @@ impl Default for MomoRuntimeConfig {
     }
 }
 
-impl Default for VisionDescriptionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            prompt: default_visual_description_prompt(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MomoConfig {
+#[serde(deny_unknown_fields)]
+pub struct MomoRuntimeSettings {
     #[serde(default = "schema_version")]
     pub schema_version: u32,
     #[serde(default)]
     pub request_overrides: RequestOverridePolicy,
     #[serde(default)]
-    pub runtime: MomoRuntimeConfig,
+    pub runtime: MaintenanceRuntimeSettings,
     #[serde(default)]
     pub mo_state: MoStateRuntimeConfig,
     #[serde(default)]
@@ -192,12 +184,12 @@ pub struct MomoConfig {
     pub vision: VisionDescriptionConfig,
 }
 
-impl Default for MomoConfig {
+impl Default for MomoRuntimeSettings {
     fn default() -> Self {
         Self {
-            schema_version: MOMO_CONFIG_SCHEMA_VERSION,
+            schema_version: RUNTIME_SETTINGS_SCHEMA_VERSION,
             request_overrides: RequestOverridePolicy::default(),
-            runtime: MomoRuntimeConfig::default(),
+            runtime: MaintenanceRuntimeSettings::default(),
             mo_state: MoStateRuntimeConfig::default(),
             roleplay: RoleplayRuntimeConfig::default(),
             vision: VisionDescriptionConfig::default(),
@@ -205,38 +197,15 @@ impl Default for MomoConfig {
     }
 }
 
-impl MomoConfig {
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, GovernanceError> {
-        let path = path.as_ref();
-        let text = fs::read_to_string(path)?;
-        validate_document_ownership(&text)?;
-        let config: Self = toml::from_str(&text)?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    pub fn load_or_default(path: impl AsRef<Path>) -> Result<Self, GovernanceError> {
-        let path = path.as_ref();
-        if path.exists() {
-            Self::load(path)
-        } else {
-            Ok(Self::default())
-        }
-    }
-
+impl MomoRuntimeSettings {
     pub fn validate(&self) -> Result<(), GovernanceError> {
         self.validate_portable_fields()?;
         Ok(())
     }
 
     fn validate_portable_fields(&self) -> Result<(), GovernanceError> {
-        if self.schema_version != MOMO_CONFIG_SCHEMA_VERSION {
+        if self.schema_version != RUNTIME_SETTINGS_SCHEMA_VERSION {
             return Err(GovernanceError::UnsupportedSchema(self.schema_version));
-        }
-        if self.vision.prompt.trim().is_empty() || self.vision.prompt.len() > 64 * 1024 {
-            return Err(GovernanceError::Invalid(
-                "vision.prompt must contain 1 to 65536 bytes".to_owned(),
-            ));
         }
         if !(1..=200).contains(&self.runtime.memory_distill_every_turns)
             || !(1..=200).contains(&self.runtime.nsg_govern_every_turns)
@@ -301,8 +270,7 @@ impl MomoConfig {
         } else if governed.visual_description_prompt.is_some() {
             "request"
         } else {
-            governed.visual_description_prompt = Some(self.vision.prompt.clone());
-            "momo"
+            "prompt_space"
         };
         governed.audit["visual_description_prompt_source"] = json!(visual_source);
         Ok(governed)
@@ -327,38 +295,6 @@ const fn default_max_agent_steps() -> usize {
 
 const fn default_mo_state_operation_timeout_ms() -> u64 {
     30_000
-}
-
-pub fn validate_momo_document(text: &str) -> Result<(), GovernanceError> {
-    validate_document_ownership(text)?;
-    let config: MomoConfig = toml::from_str(text)?;
-    config.validate_portable_fields()
-}
-
-fn validate_document_ownership(text: &str) -> Result<(), GovernanceError> {
-    let table: toml::Table = toml::from_str(text)?;
-    const HOST_ONLY: [&str; 10] = [
-        "providers",
-        "models",
-        "model",
-        "active_model_profile",
-        "modules",
-        "core",
-        "server",
-        "gateway",
-        "discord",
-        "auth",
-    ];
-    if let Some(field) = HOST_ONLY.iter().find(|field| table.contains_key(**field)) {
-        return Err(GovernanceError::HostField((*field).to_owned()));
-    }
-    if table.contains_key("prompts") {
-        return Err(GovernanceError::Invalid(
-            "product prompts are compiled Core policy and cannot be configured by momo.toml"
-                .to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 pub struct RequestedOverrides<'a> {
@@ -555,23 +491,13 @@ const fn allow() -> OverrideMode {
 }
 
 const fn schema_version() -> u32 {
-    MOMO_CONFIG_SCHEMA_VERSION
-}
-
-fn default_visual_description_prompt() -> String {
-    "Describe only visible facts that are relevant to the conversation. Do not infer identity, intent, private attributes, or text that is not legible.".to_owned()
+    RUNTIME_SETTINGS_SCHEMA_VERSION
 }
 
 #[derive(Debug, Error)]
 pub enum GovernanceError {
-    #[error("MOMO configuration I/O failed: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("MOMO configuration TOML is invalid: {0}")]
-    Toml(#[from] toml::de::Error),
-    #[error("unsupported momo.toml schema_version {0}")]
+    #[error("unsupported runtime settings schema_version {0}")]
     UnsupportedSchema(u32),
-    #[error("host-local field {0:?} belongs in config.toml, not momo.toml")]
-    HostField(String),
     #[error("request override {0} is rejected by policy")]
     Rejected(&'static str),
     #[error("request parameter {0:?} is not allowed by policy")]

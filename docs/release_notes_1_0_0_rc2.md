@@ -38,6 +38,7 @@ offline runtime-contract checks, strict Clippy, rustfmt, and rustdoc generation.
 ## Compatibility
 
 - Workspace crate versions remain `1.0.0` and `publish = false`.
-- The historical `v1.0.0` and `v1.0.0-rc.1` tags are not moved.
+- The public `v1.0.0-rc.1` tag is not moved. The early local-only `v1.0.0`
+  test ref was not a GitHub release identity.
 - The stable `v1.0.0` publication gate remains open for broader credentialed,
   human-calibrated, and load evidence.

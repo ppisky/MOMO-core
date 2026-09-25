@@ -99,10 +99,10 @@ async fn preserved_sources_can_be_selected_as_both_lsb_carrier_and_payload() {
     .expect("payload import");
 
     let output_path = directory.path().join("output.png");
-    let report: Value = serde_json::from_str(
-        &embed_lsb_image_json_with_core(
+    let report: Value = serde_json::to_value(
+        embed_lsb_image_with_core(
             &core,
-            json!({
+            serde_json::from_value(json!({
                 "carrier": {
                     "type": "preserved_character_source",
                     "owner_space_id": scope_id,
@@ -116,8 +116,8 @@ async fn preserved_sources_can_be_selected_as_both_lsb_carrier_and_payload() {
                     "character_id": payload.character.id,
                 },
                 "compress": true,
-            })
-            .to_string(),
+            }))
+            .expect("LSB request"),
         )
         .await
         .expect("embed preserved source"),
@@ -148,9 +148,9 @@ async fn preserved_sources_can_be_selected_as_both_lsb_carrier_and_payload() {
     );
 
     let png_payload_output = directory.path().join("png-payload.png");
-    embed_lsb_image_json_with_core(
+    embed_lsb_image_with_core(
         &core,
-        json!({
+        serde_json::from_value(json!({
             "carrier": {
                 "type": "preserved_character_source",
                 "owner_space_id": scope_id,
@@ -164,8 +164,8 @@ async fn preserved_sources_can_be_selected_as_both_lsb_carrier_and_payload() {
                 "character_id": carrier.character.id,
             },
             "compress": true,
-        })
-        .to_string(),
+        }))
+        .expect("LSB request"),
     )
     .await
     .expect("embed preserved PNG source");

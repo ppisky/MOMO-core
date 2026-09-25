@@ -10,7 +10,6 @@ use momo_config::ConfigDocument;
 use momo_domain::{CharacterCard, Conversation, Message};
 use momo_moc::{ExtractionLimits, Manifest, ModuleDefinition, SpaceModuleDefinition};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use tempfile::{NamedTempFile, TempDir};
 use thiserror::Error;
 use toml::{Table, Value as TomlValue};
@@ -32,6 +31,8 @@ const EXTERNAL_SOURCE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum PortableError {
+    #[error(transparent)]
+    Core(#[from] crate::CoreError),
     #[error("portable data I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("configuration failed: {0}")]
@@ -48,8 +49,6 @@ pub enum PortableError {
     Toml(#[from] toml::ser::Error),
     #[error("invalid UUID: {0}")]
     Uuid(#[from] uuid::Error),
-    #[error("configuration contains a credential-like key: {0}")]
-    CredentialInConfig(String),
     #[error("no MOC module was selected")]
     EmptySelection,
     #[error("encrypted MOC requires a passphrase")]
@@ -71,7 +70,6 @@ pub enum PortableError {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum MocModule {
-    MomoConfig,
     Characters,
     Conversations,
     Memory,
@@ -92,8 +90,6 @@ pub enum MocCompatibility {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MocExportPlan {
-    #[serde(default)]
-    pub include_config: bool,
     #[serde(default)]
     pub characters: Vec<MocCharacterSelection>,
     #[serde(default)]
@@ -117,9 +113,6 @@ pub struct MocCharacterSelection {
 impl MocExportPlan {
     fn validate(&self, allow_empty: bool) -> Result<HashSet<MocModule>, PortableError> {
         let mut modules = HashSet::new();
-        if self.include_config {
-            modules.insert(MocModule::MomoConfig);
-        }
         if !self.characters.is_empty() {
             modules.insert(MocModule::Characters);
         }
@@ -189,8 +182,6 @@ pub enum ConflictMode {
 #[serde(deny_unknown_fields)]
 pub struct MocImportPlan {
     #[serde(default)]
-    pub apply_config: bool,
-    #[serde(default)]
     pub space_map: BTreeMap<Uuid, Uuid>,
     #[serde(default = "default_conflict_mode")]
     pub conflict_mode: ConflictMode,
@@ -230,7 +221,6 @@ pub struct ImportReport {
     pub semantic_graph_files_imported: usize,
     pub skipped_conflicts: usize,
     pub unknown_modules: Vec<UnknownMocModule>,
-    pub momo_config: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,65 +269,44 @@ type ParsedCharacterMetadata = (CharacterMetadata, String);
 const DDM_PROFILE_METADATA_KIND: &str = "character_ddm_profile";
 const DDM_PROFILE_ASSET: &str = "extensions/momo-ddm/profile.yaml";
 
-pub fn export_momo_config(
-    core: &MomoCore,
-    output: impl AsRef<Path>,
-    settings: &JsonValue,
-) -> Result<(), PortableError> {
-    let document = merged_momo_config(core, settings)?;
-    crate::validate_momo_document(&document.to_toml_string()?)
-        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    export_config_bundle(&document, &momo_config_path(core), output.as_ref())?;
-    // Exporting a subset must not turn that subset into the local import
-    // baseline. The baseline changes only after an explicit import.
-    Ok(())
-}
-
-pub fn import_momo_config(
-    core: &MomoCore,
-    input: impl AsRef<Path>,
-) -> Result<JsonValue, PortableError> {
-    let input = input.as_ref();
-    let document = ConfigDocument::load(input)?;
-    crate::validate_momo_document(&document.to_toml_string()?)
-        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    crate::MomoConfig::load(input)
-        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    reject_credentials(document.values(), "")?;
-    let destination = momo_config_path(core);
-    import_config_bundle(&document, input, &destination)?;
-    Ok(serde_json::to_value(document.values())?)
-}
-
 pub async fn export_moc(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    settings: &JsonValue,
     plan: &MocExportPlan,
 ) -> Result<Manifest, PortableError> {
-    export_moc_with_host_modules(core, output, settings, plan, &[]).await
+    export_moc_with_host_modules(core, output, plan, &[]).await
 }
 
 pub async fn export_moc_with_host_modules(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    settings: &JsonValue,
     plan: &MocExportPlan,
     host_modules: &[HostMocModule],
 ) -> Result<Manifest, PortableError> {
+    let owned_core = core.clone();
+    let output = output.as_ref().to_path_buf();
+    let plan = plan.clone();
+    let host_modules = host_modules.to_vec();
+    core.finish_commit(
+        async move { export_moc_locked(&owned_core, output, &plan, &host_modules).await },
+    )
+    .await
+    .map_err(|error| PortableError::InvalidData(error.to_string()))?
+}
+
+async fn export_moc_locked(
+    core: &MomoCore,
+    output: impl AsRef<Path>,
+    plan: &MocExportPlan,
+    host_modules: &[HostMocModule],
+) -> Result<Manifest, PortableError> {
+    let _guards = core
+        .lock_spaces(plan.memory.iter().chain(&plan.semantic_graph).copied())
+        .await?;
     let selected = plan.validate(!host_modules.is_empty())?;
     let staging = TempDir::new()?;
     let mut modules = Vec::new();
     let mut space_modules = Vec::new();
-    if selected.contains(&MocModule::MomoConfig) {
-        let document = merged_momo_config(core, settings)?;
-        export_config_bundle(
-            &document,
-            &momo_config_path(core),
-            &staging.path().join("config/momo.toml"),
-        )?;
-        modules.push(known_module_definition("config"));
-    }
     if selected.contains(&MocModule::Characters) {
         for selection in &plan.characters {
             export_characters(
@@ -444,17 +413,15 @@ pub async fn import_moc_claiming_unknown_modules(
 pub async fn export_private_moc(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    settings: &JsonValue,
     plan: &MocExportPlan,
     passphrase: &str,
 ) -> Result<Manifest, PortableError> {
-    export_private_moc_with_host_modules(core, output, settings, plan, &[], passphrase).await
+    export_private_moc_with_host_modules(core, output, plan, &[], passphrase).await
 }
 
 pub async fn export_private_moc_with_host_modules(
     core: &MomoCore,
     output: impl AsRef<Path>,
-    settings: &JsonValue,
     plan: &MocExportPlan,
     host_modules: &[HostMocModule],
     passphrase: &str,
@@ -464,7 +431,7 @@ pub async fn export_private_moc_with_host_modules(
     }
     let temporary = TempDir::new()?;
     let inner_path = temporary.path().join("payload.moc");
-    export_moc_with_host_modules(core, &inner_path, settings, plan, host_modules).await?;
+    export_moc_with_host_modules(core, &inner_path, plan, host_modules).await?;
     let metadata = fs::metadata(&inner_path)?;
     if metadata.len() > PRIVATE_MOC_MAX_BYTES {
         return Err(PortableError::PrivateMocTooLarge);
@@ -506,6 +473,32 @@ pub async fn import_moc_with_passphrase(
 }
 
 pub async fn import_moc_with_passphrase_and_claims(
+    core: &MomoCore,
+    input: impl AsRef<Path>,
+    plan: &MocImportPlan,
+    passphrase: Option<&str>,
+    claim_directory: Option<&Path>,
+) -> Result<ImportReport, PortableError> {
+    let owned_core = core.clone();
+    let input = input.as_ref().to_path_buf();
+    let plan = plan.clone();
+    let passphrase = passphrase.map(str::to_owned);
+    let claim_directory = claim_directory.map(Path::to_path_buf);
+    core.finish_commit(async move {
+        import_moc_locked(
+            &owned_core,
+            input,
+            &plan,
+            passphrase.as_deref(),
+            claim_directory.as_deref(),
+        )
+        .await
+    })
+    .await
+    .map_err(|error| PortableError::InvalidData(error.to_string()))?
+}
+
+async fn import_moc_locked(
     core: &MomoCore,
     input: impl AsRef<Path>,
     plan: &MocImportPlan,
@@ -572,7 +565,6 @@ pub async fn import_moc_with_passphrase_and_claims(
         semantic_graph_files_imported: 0,
         skipped_conflicts: 0,
         unknown_modules: Vec::new(),
-        momo_config: None,
     };
     let source_spaces = payload_manifest
         .space_modules
@@ -600,18 +592,14 @@ pub async fn import_moc_with_passphrase_and_claims(
             "space_map cannot collapse multiple source Spaces into one target Space".to_owned(),
         ));
     }
+    let _guards = core
+        .lock_spaces(
+            source_spaces
+                .iter()
+                .map(|space| plan.space_map.get(space).copied().unwrap_or(*space)),
+        )
+        .await?;
     preflight_moc_payload(core, extracted, &payload_manifest, plan, claim_directory).await?;
-    if plan.apply_config
-        && payload_manifest
-            .modules
-            .iter()
-            .any(|entry| entry.module == "config")
-    {
-        let path = extracted.join("config/momo.toml");
-        if path.exists() {
-            report.momo_config = Some(import_momo_config(core, path)?);
-        }
-    }
     let mut imported_character_ids = HashSet::new();
     for space in ordered_space_modules(&payload_manifest) {
         let source_space = Uuid::parse_str(&space.space_id)?;
@@ -684,15 +672,6 @@ async fn preflight_moc_payload(
     plan: &MocImportPlan,
     claim_directory: Option<&Path>,
 ) -> Result<(), PortableError> {
-    if plan.apply_config
-        && manifest
-            .modules
-            .iter()
-            .any(|entry| entry.module == "config")
-    {
-        preflight_config_bundle(extracted.join("config/momo.toml"))?;
-    }
-
     let existing_character_spaces = core
         .store()
         .list_characters()
@@ -803,19 +782,6 @@ async fn preflight_moc_payload(
             }
         }
     }
-    Ok(())
-}
-
-fn preflight_config_bundle(source: PathBuf) -> Result<(), PortableError> {
-    let document = ConfigDocument::load(&source)?;
-    let text = document.to_toml_string()?;
-    crate::validate_momo_document(&text)
-        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    crate::MomoConfig::load(&source)
-        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    reject_credentials(document.values(), "")?;
-    let destination = TempDir::new()?;
-    import_config_bundle(&document, &source, &destination.path().join("momo.toml"))?;
     Ok(())
 }
 
@@ -1036,61 +1002,6 @@ fn preflight_external_character_sources(
     Ok(())
 }
 
-fn merged_momo_config(
-    core: &MomoCore,
-    settings: &JsonValue,
-) -> Result<ConfigDocument, PortableError> {
-    let baseline = momo_config_path(core);
-    let document = if baseline.exists() {
-        ConfigDocument::load(&baseline)?
-    } else {
-        ConfigDocument::default()
-    };
-    let value = TomlValue::try_from(settings)?;
-    let incoming = value
-        .as_table()
-        .ok_or_else(|| PortableError::InvalidData("settings must be an object".to_owned()))?;
-    reject_credentials(incoming, "")?;
-    let mut values = document.values().clone();
-    merge_table(&mut values, incoming);
-    let document = ConfigDocument::new(values);
-    crate::validate_momo_document(&document.to_toml_string()?)
-        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    Ok(document)
-}
-
-fn export_config_bundle(
-    document: &ConfigDocument,
-    source_config: &Path,
-    destination_config: &Path,
-) -> Result<(), PortableError> {
-    copy_config_bundle(document, source_config, destination_config)
-}
-
-fn import_config_bundle(
-    document: &ConfigDocument,
-    source_config: &Path,
-    destination_config: &Path,
-) -> Result<(), PortableError> {
-    copy_config_bundle(document, source_config, destination_config)
-}
-
-fn copy_config_bundle(
-    document: &ConfigDocument,
-    _source_config: &Path,
-    destination_config: &Path,
-) -> Result<(), PortableError> {
-    let text = document.to_toml_string()?;
-    crate::validate_momo_document(&text)
-        .map_err(|error| PortableError::InvalidData(error.to_string()))?;
-    let destination_base = destination_config
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(destination_base)?;
-    document.save(destination_config)?;
-    Ok(())
-}
-
 fn merge_table(target: &mut Table, incoming: &Table) {
     for (key, value) in incoming {
         if let (Some(TomlValue::Table(target_table)), TomlValue::Table(incoming_table)) =
@@ -1101,36 +1012,6 @@ fn merge_table(target: &mut Table, incoming: &Table) {
             target.insert(key.clone(), value.clone());
         }
     }
-}
-
-fn reject_credentials(table: &Table, prefix: &str) -> Result<(), PortableError> {
-    for (key, value) in table {
-        let path = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
-        let normalized = key.to_ascii_lowercase();
-        if matches!(
-            normalized.as_str(),
-            "api_key" | "password" | "secret" | "access_token" | "refresh_token"
-        ) || normalized.ends_with("_api_key")
-        {
-            return Err(PortableError::CredentialInConfig(path));
-        }
-        match value {
-            TomlValue::Table(child) => reject_credentials(child, &path)?,
-            TomlValue::Array(items) => {
-                for (index, item) in items.iter().enumerate() {
-                    if let TomlValue::Table(child) = item {
-                        reject_credentials(child, &format!("{path}[{index}]"))?;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 async fn export_characters(
@@ -1673,7 +1554,6 @@ fn copy_tree_filtered(
 
 fn known_module_definition(id: &str) -> ModuleDefinition {
     let (path, dependencies, import_order): (&str, &[&str], u32) = match id {
-        "config" => ("config", &[], 10),
         "characters" => ("characters", &[], 20),
         "conversations" => ("conversations", &["characters"], 30),
         "memory" => ("memory", &[], 40),
@@ -1702,8 +1582,7 @@ fn space_module_definition(module: &str, space_id: Uuid) -> SpaceModuleDefinitio
 fn is_core_moc_module(id: &str) -> bool {
     matches!(
         id,
-        "config"
-            | "characters"
+        "characters"
             | "conversations"
             | "memory"
             | "semantic_graph"
@@ -1817,10 +1696,6 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), PortableError> {
     temporary.as_file_mut().sync_all()?;
     temporary.persist(path)?;
     Ok(())
-}
-
-fn momo_config_path(core: &MomoCore) -> PathBuf {
-    core.data_dir().join("config/momo.toml")
 }
 
 fn parse_character_id(value: &str) -> Result<Uuid, PortableError> {

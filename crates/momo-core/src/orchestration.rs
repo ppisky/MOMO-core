@@ -1,5 +1,6 @@
 //! Client-independent implementation of the native high-level MomoApi response pipeline.
 
+pub(crate) mod coordination;
 mod execution;
 mod generation;
 mod maintenance;
@@ -17,25 +18,22 @@ use response::{filter_memory_for_prompt, joined_bodies, retrieval_audit, state_i
 #[cfg(test)]
 use state::{compatible_ddm_bands, state_context_for_prompt};
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex as SyncMutex, Weak},
-};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 use thiserror::Error;
-use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
-    ChatUsage, DEFAULT_VISION_ROUTE, GatewayVisionAdapter, GovernanceError, GovernedOverrides,
-    MomoConfig, VisionDescriptionAdapter,
+    ChatUsage, DEFAULT_VISION_ROUTE, GatewayVisionAdapter, GovernedOverrides, MomoRuntime,
+    MomoRuntimeSettings, VisionDescriptionAdapter,
 };
 #[cfg(test)]
 use crate::{
-    MoStateInjectionMode, MomoResponseRequest, RequestedOverrides, VisionDescriptionRequest,
+    MoStateInjectionMode, MomoResponseRequest, PromptSpaceId, RequestedOverrides,
+    VisionDescriptionRequest,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,24 +53,24 @@ pub struct MomoApiError {
 }
 
 impl MomoApiError {
-    fn bad_request(message: impl Into<String>) -> Self {
+    fn bad_request(message: impl ToString) -> Self {
         Self {
             kind: MomoApiErrorKind::BadRequest,
-            message: message.into(),
+            message: message.to_string(),
         }
     }
 
-    fn model(message: impl Into<String>) -> Self {
+    fn model(message: impl ToString) -> Self {
         Self {
             kind: MomoApiErrorKind::Model,
-            message: message.into(),
+            message: message.to_string(),
         }
     }
 
-    fn conflict(message: impl Into<String>) -> Self {
+    fn conflict(message: impl ToString) -> Self {
         Self {
             kind: MomoApiErrorKind::Conflict,
-            message: message.into(),
+            message: message.to_string(),
         }
     }
 
@@ -83,10 +81,10 @@ impl MomoApiError {
         }
     }
 
-    fn internal(message: impl Into<String>) -> Self {
+    fn internal(message: impl ToString) -> Self {
         Self {
             kind: MomoApiErrorKind::Internal,
-            message: message.into(),
+            message: message.to_string(),
         }
     }
 }
@@ -112,25 +110,12 @@ impl MaintenanceKind {
 
 #[derive(Debug, Clone)]
 pub struct MomoApiService {
+    runtime: Arc<MomoRuntime>,
     gateway_origin: String,
     gateway_api_key: Option<String>,
     gateway_client: reqwest::Client,
-    config: Arc<SyncMutex<MomoConfig>>,
     vision_adapter: Arc<dyn VisionDescriptionAdapter>,
-    response_attempts: Arc<Mutex<HashMap<String, String>>>,
-    operation_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
-    conversation_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
-    operation_states: Arc<SyncMutex<HashMap<String, OperationState>>>,
-    maintenance_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
-    generation_gates: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
-    maintenance_tasks: Arc<SyncMutex<Vec<tokio::task::JoinHandle<()>>>>,
-}
-
-#[derive(Debug, Default)]
-struct OperationState {
-    active: usize,
-    cancelled: bool,
-    scope_id: String,
+    coordination: Arc<coordination::ResponseCoordination>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,41 +155,20 @@ struct GovernedResponseAttempt<'a> {
     request_id: &'a str,
     operation_key: &'a str,
     request_fingerprint: &'a str,
-    persisted: Option<&'a Value>,
+    persisted: Option<&'a momo_storage::ResponseOperation>,
     resolved_input: &'a ResolvedResponseInput,
     governed: GovernedOverrides,
     warnings: Vec<String>,
     stream: Option<&'a dyn MomoResponseEventSink>,
 }
 
-struct OperationGuard {
-    request_id: String,
-    states: Arc<SyncMutex<HashMap<String, OperationState>>>,
-}
-
-impl Drop for OperationGuard {
-    fn drop(&mut self) {
-        let mut states = self
-            .states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(state) = states.get_mut(&self.request_id) else {
-            return;
-        };
-        state.active -= 1;
-        if state.active == 0 {
-            states.remove(&self.request_id);
-        }
-    }
-}
-
 impl MomoApiService {
     #[must_use]
     pub fn new(
+        runtime: Arc<MomoRuntime>,
         gateway_origin: impl Into<String>,
         gateway_api_key: Option<String>,
         gateway_client: reqwest::Client,
-        config: Arc<MomoConfig>,
     ) -> Self {
         let gateway_origin = gateway_origin.into();
         let vision_adapter = Arc::new(GatewayVisionAdapter::new(
@@ -214,19 +178,19 @@ impl MomoApiService {
             DEFAULT_VISION_ROUTE,
         ));
         Self {
+            coordination: runtime.response_coordination(),
+            runtime,
             gateway_origin,
             gateway_api_key,
             gateway_client,
-            config: Arc::new(SyncMutex::new((*config).clone())),
             vision_adapter,
-            response_attempts: Arc::new(Mutex::new(HashMap::new())),
-            operation_locks: Arc::new(Mutex::new(HashMap::new())),
-            conversation_locks: Arc::new(Mutex::new(HashMap::new())),
-            operation_states: Arc::new(SyncMutex::new(HashMap::new())),
-            maintenance_locks: Arc::new(Mutex::new(HashMap::new())),
-            generation_gates: Arc::new(Mutex::new(HashMap::new())),
-            maintenance_tasks: Arc::new(SyncMutex::new(Vec::new())),
         }
+    }
+
+    /// Returns the single runtime instance owned by this application service.
+    #[must_use]
+    pub(crate) fn runtime(&self) -> &MomoRuntime {
+        &self.runtime
     }
 
     #[must_use]
@@ -235,22 +199,8 @@ impl MomoApiService {
         self
     }
 
-    /// Atomically replaces the portable runtime configuration used by future
-    /// response and maintenance operations.
-    pub fn update_config(&self, config: MomoConfig) -> Result<(), GovernanceError> {
-        config.validate()?;
-        *self
-            .config
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
-        Ok(())
-    }
-
-    fn config_snapshot(&self) -> MomoConfig {
-        self.config
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+    fn config_snapshot(&self) -> MomoRuntimeSettings {
+        self.runtime.runtime_settings()
     }
 
     /// Maximum number of pending turns supplied to one maintenance-model call.
@@ -262,72 +212,6 @@ impl MomoApiService {
         match kind {
             MaintenanceKind::Memory => config.runtime.memory_distill_every_turns,
             MaintenanceKind::SemanticGraph => config.runtime.nsg_govern_every_turns,
-        }
-    }
-
-    fn enter_operation(&self, request_id: &str, scope_id: &str) -> OperationGuard {
-        let mut states = self
-            .operation_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let state = states.entry(request_id.to_owned()).or_default();
-        state.active += 1;
-        state.scope_id = scope_id.to_owned();
-        OperationGuard {
-            request_id: request_id.to_owned(),
-            states: Arc::clone(&self.operation_states),
-        }
-    }
-
-    fn ensure_active(&self, request_id: &str) -> Result<(), MomoApiError> {
-        if self
-            .operation_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(request_id)
-            .is_some_and(|state| state.cancelled)
-        {
-            Err(MomoApiError::cancelled())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn has_active_responses(&self, scope_id: &str) -> bool {
-        self.operation_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .any(|state| state.active > 0 && state.scope_id == scope_id)
-    }
-
-    async fn generation_gate(&self, scope_id: &str, lane: &str) -> Arc<Semaphore> {
-        let mut gates = self.generation_gates.lock().await;
-        let gate_key = format!("{lane}:{scope_id}");
-        if gates.len() >= 1_024 {
-            gates.retain(|_, gate| gate.strong_count() > 0);
-        }
-        if let Some(gate) = gates.get(&gate_key).and_then(Weak::upgrade) {
-            gate
-        } else {
-            let gate = Arc::new(Semaphore::new(1));
-            gates.insert(gate_key, Arc::downgrade(&gate));
-            gate
-        }
-    }
-
-    async fn conversation_lock(&self, scope_id: &str, conversation_id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.conversation_locks.lock().await;
-        if locks.len() >= 1_024 {
-            locks.retain(|_, lock| lock.strong_count() > 0);
-        }
-        let key = format!("{scope_id}:{conversation_id}");
-        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-            lock
-        } else {
-            let lock = Arc::new(Mutex::new(()));
-            locks.insert(key, Arc::downgrade(&lock));
-            lock
         }
     }
 }

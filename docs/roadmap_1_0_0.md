@@ -1,22 +1,44 @@
 # MOMO Core 1.0.0 release contract
 
-**Status:** `v1.0.0-rc.3` is published with a complete opt-in
-implementation of the experimental DDM contract. An rc.4 candidate tightens
-runtime ownership and retrieval performance without changing frozen product or
-portable contracts. The existing `v1.0.0`, `v1.0.0-rc.1`, and `v1.0.0-rc.2`
-tags remain historical and must not move.
+**Status:** `v1.0.0-rc.5` completes the current runtime-ownership and recovery
+candidate while keeping the frozen product and portable contracts unchanged.
+The architecture described in `architecture_1_0.md` is the stabilization baseline;
+further changes require a concrete defect, measured bottleneck or agreed product
+requirement. Stable `v1.0.0` follows the final candidate only after every stable
+gate is closed.
 
-**Updated:** 2026-09-21
+**Updated:** 2026-09-25
 
-The checks and artifact hashes below describe the existing tagged candidate,
-not later work made after that tag. Current contract precedence is
+The rc.5 candidate is described in
+[its release notes](release_notes_1_0_0_rc5.md). It removes internal compatibility
+facades, closes Space ownership gaps and isolates memory-recovery conflicts.
+Its publication requires CI on the exact candidate commit; prior release
+evidence is not reused as proof for the modified candidate.
+
+The checks and artifact hashes below describe their named tagged candidates,
+not later work made after those tags. Current contract precedence is
 defined by [`spec_index.md`](spec_index.md), and the supported transport
 surface is defined by [`http_api_1_0.md`](http_api_1_0.md).
 
 MOMO 1.0 is a stability release, not a version-number-only release. Core owns
-native orchestration and portable policy, while provider and application
+native orchestration and instance runtime policy, while provider and application
 integrations remain adapters. The unpublished 0.5 wire and ownership shapes are
 not compatibility surfaces.
+
+## Release-train authority
+
+- GitHub `origin/main`, its public tags, and GitHub Releases are the release
+  source of truth. Local-only refs never define a published version.
+- Public `v1.0.0-rc.1` through `v1.0.0-rc.4` tags are immutable. Each later RC
+  receives a new tag, release note, complete CI run, and reproducible evidence.
+- The working plan may continue through rc.10. Candidate numbering is an upper
+  planning target rather than permission to waive a gate or add scope merely to
+  consume a number.
+- The final RC is a soak candidate: no new product scope, frozen wire and
+  portable formats, only release-blocking corrections and evidence collection.
+- GitHub has no published `v1.0.0` tag as of 2026-09-21. The old local-only
+  test ref was removed, leaving `v1.0.0` available for the eventual stable
+  release after the final RC.
 
 ## Gate 1: native contract and Space boundaries
 
@@ -79,10 +101,10 @@ and cross-protocol tests are green.
 - [x] Expose host hand-off for unknown MOC modules: explicit validated claim on
   import and explicit extension-module contribution on export, without Core
   interpreting or executing extension payloads.
-- [x] Replace abbreviated inline maintenance prompts with complete tracked
-  Markdown sources under `momo_core` and embed the fixed DMW, NSG, and Roleplay
-  Director prompts at compile time. Do not expose replacement paths in
-  `momo.toml`, move them through MOC, or hot-reload them.
+- [x] Replace abbreviated inline prompts with complete tracked Markdown
+  defaults under `momo_core`, then expose all Core-consumed slots as Prompt
+  Spaces with GET, idempotent PUT replacement, and DELETE-to-default semantics.
+  Do not read replacement paths from `momo.toml` or move prompts through MOC.
 - [x] Replace the unpublished MOC v2 shape with MOC v3 Space modules. Export
   selects character ownership, conversations, DMW, and NSG independently;
   import preserves source Space IDs unless an explicit one-to-one `space_map`
@@ -91,8 +113,9 @@ and cross-protocol tests are green.
   committing imported data. Unknown host modules are reported and copied only
   after an explicit claim.
 - [x] Keep workspace file access inside validated filesystem boundaries and
-  reject credential-like portable keys. Product prompts have no runtime
-  filesystem access because they are compile-time Core inputs.
+  reject credential-like portable keys. Product prompt defaults are compile-time
+  Core inputs; runtime overrides are validated Prompt Space values persisted as
+  internal Core state rather than user-selected filesystem paths.
 
 ## Gate 4: release candidate reproducibility
 
@@ -104,18 +127,19 @@ and cross-protocol tests are green.
   revisions.
 - [x] Confirm both services remain stopped, scan Release binaries for the
   removed default UUID/constants, and record SHA-256 hashes.
-- [x] Commit and move the annotated local `v1.0.0` tag to the verified commit.
-  Do not push the commit/tag and do not create a GitHub Release.
+- [x] Create an annotated local-only `v1.0.0` test ref for the early candidate
+  exercise without publishing it. That non-authoritative ref was later removed
+  when GitHub was established as the release source of truth.
 - [x] Receive owner authorization for local-only commit/tag creation.
-- [x] Receive owner authorization to publish the post-tag corrections as the
-  `v1.0.0-rc.1` GitHub prerelease without moving the historical `v1.0.0` tag.
+- [x] Receive owner authorization to publish the corrections as the
+  `v1.0.0-rc.1` GitHub prerelease.
 - [x] Add the default Roleplay Director and MORP 1.0 role-play-only benchmark,
   run all 64 bilingual cases, and retain provider failures as scored zeroes.
 - [x] Reduce the recommended rc.2 topology to one Qwen deployment shared by
   the three core scenarios plus one embedding deployment; use one auditable
   Codex reviewer instead of requiring two external judge models.
 - [x] Receive owner authorization to publish `v1.0.0-rc.2` without moving the
-  historical `v1.0.0` or `v1.0.0-rc.1` tags.
+  public `v1.0.0-rc.1` tag.
 - [x] Complete the optional experimental DDM projection: author-owned MOC
   profile transport, management API, closed typed signals, deterministic
   conflicts/top-k, persisted scoped hysteresis, source fingerprints, and
@@ -134,8 +158,16 @@ and cross-protocol tests are green.
 - [x] Make Core own bounded per-Space memory-workspace lifetimes, retain index
   validation across external edits, and move retrieval filesystem work off
   asynchronous request workers for the rc.4 candidate.
-- [ ] Merge the rc.4 candidate through the complete GitHub CI matrix before
-  creating or publishing a `v1.0.0-rc.4` tag.
+- [x] Merge and publish the `v1.0.0-rc.4` candidate without moving any earlier
+  tag. Post-tag changes require a fresh complete GitHub CI matrix before the
+  next release.
+- [ ] Publish rc.5 through the final planned candidate as distinct immutable
+  GitHub prereleases, each with scoped notes and a complete CI/security record.
+- [ ] Treat approximately rc.10 as the final soak candidate: close all remaining
+  credentialed, longitudinal, fault-recovery, latency, and independent-quality
+  evidence without introducing new product scope.
+- [ ] Publish stable `v1.0.0` only after the final candidate completes its soak,
+  all gates above are checked, and the exact GitHub commit is revalidated.
 
 ## Explicitly outside 1.0
 

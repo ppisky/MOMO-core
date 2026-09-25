@@ -106,10 +106,9 @@ thresholds or authorization percentages. Each may be any value from 1 through
 it. `memory_write_target` is either `personal` or `conversation`; Core does not
 silently fall back to another Space when the selected target is unavailable.
 
-These names are not executable MOMO Core `momo.toml` fields. Portable
-round-tripping preserves them if another host owns them, but Core does not use
-them to construct a request. See [`runtime_config_0_1.md`](runtime_config_0_1.md)
-for the fields executed by this repository.
+These names belong to host user configuration, not a file read by MOMO Core.
+The host resolves them into native response fields and the typed
+`/v1/runtime-settings` resource. See [`runtime_config_0_1.md`](runtime_config_0_1.md).
 
 ## MOC import and export
 
@@ -125,8 +124,8 @@ character directory.
 
 ## Configuration and complete prompts
 
-DMW, NSG, and foreground role-play prompts are complete Markdown sources under
-`crates/momo-core/src/product_prompts/`, compiled into `momo_core` with
-`include_str!`. They are not part of `momo.toml`, MOC, or any Space and cannot
-be replaced while Core is running. See
-[the product prompt guide](maintenance_prompts.en.md).
+The assistant, vision fallback, DMW, NSG, and foreground role-play prompts have
+reviewed Markdown defaults under `crates/momo-core/src/product_prompts/`,
+compiled into `momo_core` with `include_str!`. MOMO does not read `momo.toml`;
+the prompts are not part of MOC or any Space. Process-wide replacements use the
+Prompt Spaces HTTP API. See [the Prompt Spaces guide](maintenance_prompts.en.md).

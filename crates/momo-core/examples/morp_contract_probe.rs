@@ -6,7 +6,7 @@ use std::{
     io::{self, BufRead},
 };
 
-use momo_core::{MomoResponseRequest, api::simple::prepare_context_json};
+use momo_core::{MomoResponseRequest, api::runtime_api::prepare_context_request};
 use momo_memory::{ConservativeTokenCounter, MemoryDocument, MemoryWorkspace, Metadata};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -25,8 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn observe(request: &Value) -> Result<Value, Box<dyn std::error::Error>> {
     match request["op"].as_str().ok_or("op required")? {
-        "context" => Ok(serde_json::from_str(&prepare_context_json(
-            request["input"].to_string(),
+        "context" => Ok(serde_json::to_value(prepare_context_request(
+            serde_json::from_value(request["input"].clone())?,
         )?)?),
         "validate_response" => {
             let result = serde_json::from_value::<MomoResponseRequest>(request["input"].clone())

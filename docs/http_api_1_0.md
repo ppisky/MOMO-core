@@ -53,14 +53,15 @@ machine-readable `code`; callers must not parse human-readable messages.
 All other `/v1` routes are supported local administration APIs, not independent
 1.0 compatibility surfaces. They expose character and conversation CRUD,
 memory and NSG inspection, embedding/index maintenance, capability inspection,
-context diagnostics, configuration import/export, MOC operations, and LSB file
-operations. Their request and response shapes may evolve with the workspace and
+context diagnostics, runtime settings, Prompt Spaces, MOC operations, and LSB
+file operations. Their request and response shapes may evolve with the workspace and
 must not be used as a cross-version or remote public API without a host-owned
 adapter.
 
-Successful `/v1/momo-config/import` and MOC imports that actually apply a config
-atomically update the running response service for subsequent operations; a
-process restart is not required.
+`GET/PUT /v1/runtime-settings` manages the typed process-wide behavior resource.
+`GET/PUT/DELETE /v1/prompt-spaces/{id}` manages the fixed prompt slots. MOMO
+does not read `momo.toml`; hosts translate their user configuration into these
+JSON APIs. MOC import/export does not carry runtime settings or prompt content.
 
 `GET /v1/mo-state/runtime?space_id=<uuid>` exposes the local MO State manager
 status for diagnostics: the active profile, independent DMW/NSG/scene
@@ -94,8 +95,8 @@ endpoints and must not be exposed directly to untrusted remote clients.
 
 HTTP stability and artifact stability are separate. The current portable
 contracts are listed in [`spec_index.md`](spec_index.md). In particular, MOC,
-MOMO Character Card, portable configuration, memory/NSG files, and LSB payloads
-keep their documented format versions even when invoked through an
+MOMO Character Card, memory/NSG files, and LSB payloads keep their documented
+format versions even when invoked through an
 administration route.
 
 ## Rust embedding boundary
@@ -103,8 +104,24 @@ administration route.
 The workspace crates are `publish = false` implementation modules. Embedders
 may use their public Rust items from the same pinned workspace revision, but
 those items do not receive an independent crates.io SemVer promise.
-`momo_core::api::simple` is the process-global JSON facade used by
-`momo-server`; new embedders should prefer typed Core APIs where available.
+`momo_core::MomoRuntime` is the instance-owned composition root used by
+`momo-server`. Runtime-bound typed application operations live under
+`momo_core::api::runtime_api`; they require an explicit runtime reference and
+do not use process-global Core state. HTTP handlers use these typed operations
+directly. The internal JSON wrapper API has been removed; native callers update
+to typed operations with the workspace. Runtime settings and persistent Prompt
+Spaces belong to `MomoRuntime`, not independently constructed execution services.
+See [architecture_1_0.md](architecture_1_0.md) for ownership and recovery boundaries.
+
+## Memory recovery (local management)
+
+`GET /v1/memory/recovery` returns an object mapping affected Space UUIDs to
+recovery diagnostics. A pending or conflicting Space is unavailable for memory
+access; unrelated Spaces remain usable. After restoring conflicting files to
+their original or intended bytes, `POST /v1/memory/recovery/:space_id/retry`
+replays the durable plan and returns `{"ok":true}`. An unresolved conflict is
+HTTP 409. Retry does not discard journals or overwrite unexpected contents.
+
 ## Evaluation maintenance barrier (local management)
 
 `POST /v1/momo/maintenance/turns` records an already-completed user/assistant

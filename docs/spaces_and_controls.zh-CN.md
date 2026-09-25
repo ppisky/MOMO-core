@@ -102,8 +102,8 @@ memory_write_target = "personal"
 `conversation`；选后者时若当前运行环境没有会话记忆来源，配置/请求会被拒绝，而不是退回
 个人 Space。
 
-这些字段不是 MOMO Core `momo.toml` 的可执行字段。若把它们原样放进可移植配置，容器
-往返会保留它们，但 Core 不会据此构造请求；官方可执行字段见
+这些字段属于宿主的用户配置，不属于 MOMO Core 读取的文件。宿主把它们转换为原生响应
+字段与 `/v1/runtime-settings` 资源；详见
 [`runtime_config_0_1.md`](runtime_config_0_1.md)。
 
 ## MOC 导入导出
@@ -119,8 +119,8 @@ Space、DMW Space 与 NSG Space。导入默认保留来源 UUID；只有显式 `
 
 ## 配置和完整提示词
 
-DMW、NSG 与前台角色扮演提示词是
-`crates/momo-core/src/product_prompts/` 下的完整 Markdown 源码，通过
-`include_str!` 编译进 `momo_core`。它们不属于 `momo.toml`、MOC 或任何 Space，
-Core 运行期间不能替换。
-详见[产品提示词资产说明](maintenance_prompts.zh-CN.md)。
+通用助手、视觉回退、DMW、NSG 与前台角色扮演提示词都具有
+`crates/momo-core/src/product_prompts/` 下的 Markdown 默认值，并通过
+`include_str!` 编译进 `momo_core`。MOMO 不读取 `momo.toml`；这些提示词也不属于
+MOC 或任何 Space。进程级覆盖值只能通过 Prompt Spaces HTTP API 管理。
+详见[Prompt Spaces 说明](maintenance_prompts.zh-CN.md)。

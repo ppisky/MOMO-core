@@ -38,19 +38,12 @@ fn denied_ignored_and_allowed_overrides_are_distinct() {
 }
 
 #[test]
-fn full_portable_document_keeps_unowned_sections_and_uses_momo_vision_prompt() {
-    let document = r#"
-schema_version = 1
-
-[model_use.chat]
-route = "primary"
-
-[vision]
-enabled = true
-prompt = "Describe the visible scene."
-
-"#;
-    let config: MomoConfig = toml::from_str(document).expect("portable config");
+fn runtime_settings_select_the_vision_prompt_space() {
+    let config: MomoRuntimeSettings = serde_json::from_value(json!({
+        "schema_version": 1,
+        "vision": {"enabled": true}
+    }))
+    .expect("runtime settings");
     config.validate().expect("valid config");
     let parameters = Map::new();
     let effective = config
@@ -68,45 +61,55 @@ prompt = "Describe the visible scene."
             },
         )
         .expect("governed request");
+    assert!(effective.visual_description_prompt.is_none());
     assert_eq!(
-        effective.visual_description_prompt.as_deref(),
-        Some("Describe the visible scene.")
+        effective.audit["visual_description_prompt_source"],
+        "prompt_space"
     );
-    assert_eq!(effective.audit["visual_description_prompt_source"], "momo");
 }
 
 #[test]
-fn rejects_host_adapter_wiring_in_portable_document() {
-    let error =
-        validate_momo_document("schema_version = 1\n[[providers]]\nprovider_id = 'unsafe'\n")
-            .expect_err("host field");
-    assert!(matches!(error, GovernanceError::HostField(field) if field == "providers"));
+fn runtime_settings_reject_legacy_vision_prompt_content() {
+    assert!(
+        serde_json::from_value::<MomoRuntimeSettings>(json!({
+            "schema_version": 1,
+            "vision": {"enabled": true, "prompt": "legacy"}
+        }))
+        .is_err()
+    );
 }
 
 #[test]
-fn maintenance_runtime_is_portable_and_bounded() {
-    let config: MomoConfig = toml::from_str(
-        r#"
-schema_version = 1
+fn runtime_settings_reject_host_adapter_wiring() {
+    assert!(
+        serde_json::from_value::<MomoRuntimeSettings>(json!({
+            "schema_version": 1,
+            "providers": [{"provider_id": "unsafe"}]
+        }))
+        .is_err()
+    );
+}
 
-[runtime]
-memory_distillation_enabled = false
-memory_distill_every_turns = 7
-semantic_graph_enabled = true
-nsg_govern_every_turns = 19
-max_concurrent_chats = 4
-
-[mo_state]
-profile = "closed_autonomous"
-scene_management = true
-max_reconcile_steps = 4
-max_agent_steps = 8
-operation_timeout_ms = 30000
-injection_mode = "shadow"
-
-"#,
-    )
-    .expect("portable runtime");
+#[test]
+fn maintenance_runtime_settings_are_bounded() {
+    let config: MomoRuntimeSettings = serde_json::from_value(json!({
+        "schema_version": 1,
+        "runtime": {
+            "memory_distillation_enabled": false,
+            "memory_distill_every_turns": 7,
+            "semantic_graph_enabled": true,
+            "nsg_govern_every_turns": 19
+        },
+        "mo_state": {
+            "profile": "closed_autonomous",
+            "scene_management": true,
+            "max_reconcile_steps": 4,
+            "max_agent_steps": 8,
+            "operation_timeout_ms": 30000,
+            "injection_mode": "shadow"
+        }
+    }))
+    .expect("runtime settings");
     config.validate().expect("valid runtime");
     assert!(!config.runtime.memory_distillation_enabled);
     assert_eq!(config.runtime.memory_distill_every_turns, 7);
@@ -125,33 +128,31 @@ injection_mode = "shadow"
 }
 
 #[test]
-fn portable_config_rejects_prompt_substitution() {
-    let document = "schema_version = 1\n[prompts]\nroleplay_director_file = 'other.md'\n";
-    assert!(matches!(
-        validate_momo_document(document),
-        Err(GovernanceError::Invalid(message))
-            if message.contains("cannot be configured by momo.toml")
-    ));
+fn runtime_settings_reject_prompt_space_content() {
+    assert!(
+        serde_json::from_value::<MomoRuntimeSettings>(json!({
+            "schema_version": 1,
+            "prompt_spaces": {"roleplay_director": "other"}
+        }))
+        .is_err()
+    );
 }
 
 #[test]
 fn ddm_rollout_switch_does_not_accept_runtime_profile_paths() {
-    let directory = tempfile::tempdir().expect("directory");
-    let path = directory.path().join("momo.toml");
-    fs::write(
-        &path,
-        "schema_version = 1\n[mo_state.ddm]\nenabled = true\n",
-    )
-    .expect("config");
-
-    let config = MomoConfig::load(&path).expect("load config");
+    let config: MomoRuntimeSettings = serde_json::from_value(json!({
+        "schema_version": 1,
+        "mo_state": {"ddm": {"enabled": true}}
+    }))
+    .expect("runtime settings");
     assert!(config.mo_state.ddm.enabled);
-    assert!(!MomoConfig::default().mo_state.ddm.enabled);
+    assert!(!MomoRuntimeSettings::default().mo_state.ddm.enabled);
 
-    fs::write(
-        &path,
-        "schema_version = 1\n[mo_state.ddm]\nenabled = true\nprofile_files = {}\n",
-    )
-    .expect("invalid config");
-    assert!(MomoConfig::load(&path).is_err());
+    assert!(
+        serde_json::from_value::<MomoRuntimeSettings>(json!({
+            "schema_version": 1,
+            "mo_state": {"ddm": {"enabled": true, "profile_files": {}}}
+        }))
+        .is_err()
+    );
 }

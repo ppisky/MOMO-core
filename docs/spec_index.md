@@ -1,13 +1,17 @@
 # MOMO Core 1.0 specification index
 
 **Status:** normative document precedence index
-**Updated:** 2026-09-12
+**Updated:** 2026-09-25
 
 When documents disagree, the current contracts in this section take
 precedence. Historical records explain earlier designs but do not define Core
 1.0 behaviour.
 
 ## Current contracts
+
+The current ownership, dependency and recovery implementation is described in
+[`architecture_1_0.md`](architecture_1_0.md). It does not override the wire or
+artifact contracts below.
 
 | Area | Current contract | Status |
 | --- | --- | --- |
@@ -20,7 +24,8 @@ precedence. Historical records explain earlier designs but do not define Core
 | NSG | [`Narrative_Semantic_Graph_v2.md`](../Narrative_Semantic_Graph_v2.md) | Implemented normative v2 |
 | MO State | [`MO_State_v2.md`](../MO_State_v2.md) | Implemented v2 baseline |
 | MOC | [`MOMO_Container_v3.md`](../MOMO_Container_v3.md) | Implemented v3 |
-| Portable runtime config | [`runtime_config_0_1.md`](runtime_config_0_1.md) | Implemented schema 1 |
+| Instance runtime settings | [`runtime_config_0_1.md`](runtime_config_0_1.md) | Implemented local administration API |
+| Prompt Spaces | [`maintenance_prompts.en.md`](maintenance_prompts.en.md) | Implemented local administration API |
 | LSB carrier | [`momo_lsb_carrier_v1.md`](momo_lsb_carrier_v1.md) | Implemented carrier v1 |
 | Private MOC encryption | [`encryption_profile_0_1.md`](encryption_profile_0_1.md) | Implemented envelope v1 |
 | External character compatibility | [`character_card_compatibility.md`](character_card_compatibility.md) | Implemented profile |

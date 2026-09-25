@@ -3,6 +3,14 @@
 MOMO Core is a local-first Rust workspace. Its crates are internal modules of
 the same system and may be used directly or through the local HTTP/SSE server.
 
+Read [the 1.0 architecture](architecture_1_0.md) before changing runtime ownership,
+application interfaces, lock ordering or cross-store commit behavior. Rust
+callers use typed operations; internal JSON compatibility wrappers have been removed.
+
+The complete local candidate check is `./scripts/test-release.ps1` on Windows
+or `bash scripts/test-release.sh` on Linux/macOS. Both use the committed lockfile.
+Skipping the security audit must be reported as an incomplete release gate.
+
 ## Requirements
 
 - Rust `1.96.1`, pinned by `rust-toolchain.toml`
@@ -29,7 +37,7 @@ cargo doc --workspace --all-features --no-deps
   validation, and MO State.
 - `momo-moc` implements verified MOC containers.
 - `momo-crypto` implements private-container encryption.
-- `momo-config` parses and serializes portable runtime configuration.
+- `momo-config` parses and serializes TOML documents used by portable assets.
 - `momo-server` exposes Core over a loopback HTTP/SSE interface.
 
 ## Storage layout

@@ -59,7 +59,7 @@ MOMO Core 已经是一套扎实的“角色扮演运行基础设施”，但还�
 | MO State v2 | 中高 | 实现已在一个锁窗口中绑定来源版本与检索正文，并加入按 scope 持久化的 DDM 迟滞；工具续跑与跨系统 Saga 仍是未完成边界。 |
 | Native response runtime | 中高 | 幂等、持久化、流、视觉和维护顺序与实现一致。本次补全了消息角色、指令优先位置、角色卡热更新、开场、图片历史和工具续接语义。 |
 | Space model | 高 | 归属与访问职责清楚。此前称 Space 权重同时影响“排名和预算”，实际代码只按权重切分 Space 预算、在各 Space 内独立排名；现已纠正。 |
-| Portable runtime config | 中高 | Core 实际只执行治理、维护、MO State 和视觉字段。产品提示词是仓库追踪并编译进 `momo_core` 的 Markdown 源码，不属于运行时配置或 MOC 内容。旧 `momo.example.toml` 混入了由宿主拥有且会被 Core 忽略的路由/默认角色/权重/并发字段；现已清理并说明未知字段仅被保留。 |
+| 运行设置 API | 中高 | Core 从类型化 HTTP 资源执行治理、维护、MO State 和视觉字段。Prompt Space 默认值是仓库追踪并编译进 `momo_core` 的 Markdown 源码，运行覆盖值由 HTTP 管理；两者都不属于 MOC 内容。路由、默认角色、权重与并发仍由宿主持有。 |
 
 ## 本次直接修正
 

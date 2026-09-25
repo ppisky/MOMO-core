@@ -1,6 +1,97 @@
 use super::*;
 
 #[tokio::test]
+async fn prepared_journal_cannot_be_discarded_or_acknowledged_with_different_evidence() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let space = Uuid::new_v4().to_string();
+    let batch = MaintenanceBatch {
+        batch_key: "prepared".to_owned(),
+        scope_id: space.clone(),
+        kind: "memory".to_owned(),
+        request_ids: vec!["turn".to_owned()],
+        patch_yaml: "patches: []".to_owned(),
+    };
+    store
+        .append_maintenance_turn(
+            &MaintenanceTurn {
+                request_id: "turn".to_owned(),
+                scope_id: space.clone(),
+                user_content: "user".to_owned(),
+                assistant_content: "assistant".to_owned(),
+            },
+            true,
+            true,
+        )
+        .await
+        .expect("turn");
+    store.stage_maintenance_batch(&batch).await.expect("batch");
+    assert_eq!(
+        store
+            .prepare_maintenance_commit(&batch.batch_key, "first-plan")
+            .await
+            .expect("prepare"),
+        "first-plan"
+    );
+    assert_eq!(
+        store
+            .prepare_maintenance_commit(&batch.batch_key, "replacement-plan")
+            .await
+            .expect("replay"),
+        "first-plan"
+    );
+    assert!(
+        !store
+            .discard_maintenance_batch(&batch.batch_key)
+            .await
+            .expect("cannot discard")
+    );
+    assert!(
+        store
+            .complete_maintenance_batch(
+                &batch.batch_key,
+                &["wrong-turn".to_owned()],
+                MaintenanceKind::Memory
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .complete_maintenance_batch(
+                &batch.batch_key,
+                &batch.request_ids,
+                MaintenanceKind::SemanticGraph
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .pending_maintenance_turns(&space, MaintenanceKind::Memory, 32)
+            .await
+            .expect("still pending")
+            .len(),
+        1
+    );
+    store
+        .complete_maintenance_batch(
+            &batch.batch_key,
+            &batch.request_ids,
+            MaintenanceKind::Memory,
+        )
+        .await
+        .expect("correct acknowledgement");
+    assert_eq!(
+        store
+            .pending_maintenance_turns(&space, MaintenanceKind::SemanticGraph, 32)
+            .await
+            .expect("independent lane")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn migrated_schema_uses_scope_id_exclusively() {
     let store = LocalStore::in_memory().await.expect("store");
     for table_info_sql in [

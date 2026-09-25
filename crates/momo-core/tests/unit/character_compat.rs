@@ -209,9 +209,7 @@ async fn import_and_export_preserve_unknown_source_fields() {
     crate::export_moc(
         &core,
         &moc,
-        &json!({}),
         &crate::MocExportPlan {
-            include_config: false,
             characters: vec![crate::MocCharacterSelection {
                 space_id: scope_id,
                 character_ids: vec![imported.character.id],
@@ -232,7 +230,6 @@ async fn import_and_export_preserve_unknown_source_fields() {
         &destination,
         &moc,
         &crate::MocImportPlan {
-            apply_config: false,
             space_map: [(scope_id, destination_scope)].into_iter().collect(),
             conflict_mode: crate::ConflictMode::Replace,
         },
@@ -278,9 +275,7 @@ async fn moc_keep_existing_does_not_replace_the_preserved_source() {
     crate::export_moc(
         &core,
         &moc,
-        &json!({}),
         &crate::MocExportPlan {
-            include_config: false,
             characters: vec![crate::MocCharacterSelection {
                 space_id: scope_id,
                 character_ids: vec![imported.character.id],
@@ -325,7 +320,6 @@ async fn moc_keep_existing_does_not_replace_the_preserved_source() {
         &core,
         &moc,
         &crate::MocImportPlan {
-            apply_config: false,
             space_map: Default::default(),
             conflict_mode: crate::ConflictMode::KeepExisting,
         },
@@ -477,9 +471,7 @@ async fn charx_assets_and_risu_extensions_round_trip_through_moc() {
     crate::export_moc(
         &core,
         &moc,
-        &json!({}),
         &crate::MocExportPlan {
-            include_config: false,
             characters: vec![crate::MocCharacterSelection {
                 space_id: scope_id,
                 character_ids: vec![imported.character.id],
@@ -500,7 +492,6 @@ async fn charx_assets_and_risu_extensions_round_trip_through_moc() {
         &destination,
         &moc,
         &crate::MocImportPlan {
-            apply_config: false,
             space_map: [(scope_id, destination_scope)].into_iter().collect(),
             conflict_mode: crate::ConflictMode::Replace,
         },

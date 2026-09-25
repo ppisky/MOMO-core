@@ -684,7 +684,42 @@ pub struct MomoResponseRequest {
 }
 
 impl MomoResponseRequest {
+    pub(crate) fn normalize_identifiers(&mut self) -> Result<(), ResponseContractError> {
+        fn normalize(value: &mut String, name: &'static str) -> Result<(), ResponseContractError> {
+            *value = uuid::Uuid::parse_str(value)
+                .map_err(|_| ResponseContractError::InvalidUuid(name))?
+                .to_string();
+            Ok(())
+        }
+        for (value, name) in [
+            (&mut self.momo.personal_space_id, "personal_space_id"),
+            (
+                &mut self.momo.conversation_space_id,
+                "conversation_space_id",
+            ),
+            (
+                &mut self.momo.memory_write_space_id,
+                "memory_write_space_id",
+            ),
+            (&mut self.momo.conversation_id, "conversation_id"),
+            (&mut self.momo.character_id, "character_id"),
+        ] {
+            if let Some(value) = value {
+                normalize(value, name)?;
+            }
+        }
+        for source in &mut self.momo.memory_sources {
+            normalize(&mut source.space_id, "memory_sources.space_id")?;
+        }
+        Ok(())
+    }
     pub fn validate(&self) -> Result<String, ResponseContractError> {
+        let mut normalized = self.clone();
+        normalized.normalize_identifiers()?;
+        normalized.validate_canonical()
+    }
+
+    fn validate_canonical(&self) -> Result<String, ResponseContractError> {
         if self.momo.schema != MOMO_RESPONSE_SCHEMA {
             return Err(ResponseContractError::UnsupportedSchema(
                 self.momo.schema.clone(),

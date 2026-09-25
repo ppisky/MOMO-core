@@ -10,7 +10,7 @@ fn plain_sfnt_font_bytes_pass_through() {
 #[test]
 fn unsupported_font_signature_is_rejected() {
     let error = normalize_font_bytes_inner(b"not-a-font!!").unwrap_err();
-    assert!(error.contains("Unsupported font format"));
+    assert!(error.message.contains("Unsupported font format"));
 }
 
 #[test]
@@ -22,6 +22,7 @@ fn web_font_header_must_match_file_length_and_size_limit() {
     assert!(
         normalize_font_bytes_inner(&bytes)
             .unwrap_err()
+            .message
             .contains("length")
     );
 
@@ -30,6 +31,7 @@ fn web_font_header_must_match_file_length_and_size_limit() {
     assert!(
         normalize_font_bytes_inner(&bytes)
             .unwrap_err()
+            .message
             .contains("supported range")
     );
 }

@@ -24,6 +24,33 @@ local HTTP interface in one workspace.
 - capability discovery and context budgeting
 - vector-store contracts and deterministic retrieval
 
+## Quick local smoke test
+
+Install Rust `1.96.1` (pinned by `rust-toolchain.toml`) and a working C/C++
+build toolchain. The following starts the local server and checks its health
+endpoint without calling a model:
+
+```powershell
+$env:MOMO_DATA_DIR = "$PWD/.momo-data/dev"
+cargo run -p momo-server
+```
+
+In another PowerShell window:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/health
+```
+
+On Linux or macOS, use
+`MOMO_DATA_DIR=.momo-data/dev cargo run -p momo-server` and
+`curl http://127.0.0.1:8765/health`. The server binds only to loopback by
+default. Generation additionally requires a model gateway configured through
+`MOMO_MODEL_GATEWAY_ORIGIN` and, when needed,
+`MOMO_MODEL_GATEWAY_API_KEY`. See [`momo.example.toml`](momo.example.toml) for
+portable product policy, [`contracts/1.0/response_request.json`](contracts/1.0/response_request.json)
+for a stable request example, and [`docs/http_api_1_0.md`](docs/http_api_1_0.md)
+for the deployment trust boundary.
+
 The crates under `crates/` are implementation modules of MOMO Core. They are
 not separate products or independently published crates.io packages. The 1.0
 product stability surface is the versioned native HTTP wire
@@ -65,13 +92,16 @@ separately from the specification.
 
 ## Workspace
 
+See [the 1.0 architecture](docs/architecture_1_0.md) for dependencies, runtime
+ownership, lock ordering and cross-store recovery boundaries.
+
 - `momo-core`: orchestration and client-facing Rust APIs
 - `momo-domain`: shared domain types
 - `momo-storage`: SQLite application persistence and Turso vector storage
 - `momo-memory`: DMW, NSG, retrieval, scene parsing, and MO State projection
 - `momo-moc`: MOC containers
 - `momo-crypto`: encrypted private containers
-- `momo-config`: portable runtime configuration
+- `momo-config`: TOML document utilities used by portable asset formats
 - `momo-server`: local HTTP/SSE interface
 
 ## Data storage
@@ -125,17 +155,22 @@ projection, including character-owned MOC profiles, typed signals, deterministic
 selection, persisted hysteresis, and atomic audit state; broader credentialed
 and MORP coverage remains the stable `v1.0.0` gate. See the
 [1.0.0 release contract](docs/roadmap_1_0_0.md).
-The rc.4 candidate keeps those contracts frozen while tightening orchestration
+The published rc.4 keeps those contracts frozen while tightening orchestration
 boundaries and making per-Space retrieval workspaces persistent across requests.
-Release-candidate changes are summarized in the
+The rc.5 candidate completes instance-owned runtime coordination, typed Rust
+application APIs and recoverable maintenance commits. Subsequent stabilization
+focuses on concrete defects and release evidence within these architecture
+boundaries. GitHub public tags and Releases are the release source of truth.
+See the [rc.5 notes](docs/release_notes_1_0_0_rc5.md) and the
 [rc.4 release notes](docs/release_notes_1_0_0_rc4.md); the published rc.3 notes
 remain [available here](docs/release_notes_1_0_0_rc3.md).
 DDM's implementation boundary and remaining experimental limitations are in
 the [DDM status report](docs/ddm_implementation_status.md).
 
-Product prompts are tracked Markdown source assets compiled into `momo_core`
-with `include_str!`; they are not runtime files or portable configuration.
-read the [English prompt-asset guide](docs/maintenance_prompts.en.md) or the
+Prompt Spaces are named runtime resources with reviewed defaults compiled into
+`momo_core`. Their active values can be replaced through the native HTTP API;
+MOMO itself does not read `momo.toml` or carry them in MOC content. Read the
+[English Prompt Spaces guide](docs/maintenance_prompts.en.md) or the
 [简体中文指南](docs/maintenance_prompts.zh-CN.md).
 
 ## Space identity

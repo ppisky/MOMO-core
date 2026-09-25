@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Weak};
 
-use serde_json::{Value, json};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     ChatUsage, DEFAULT_VISION_ROUTE, GovernedOverrides, MomoResponse, MomoResponseRequest,
-    RequestedOverrides, VisionDescriptionRequest, api::simple,
+    PromptSpaceId, RequestedOverrides, VisionDescriptionRequest,
 };
 
 impl MomoApiService {
@@ -26,6 +26,11 @@ impl MomoApiService {
         request_id: &str,
         stream: Option<&dyn MomoResponseEventSink>,
     ) -> Result<MomoResponse, MomoApiError> {
+        let mut normalized = request.clone();
+        normalized
+            .normalize_identifiers()
+            .map_err(MomoApiError::bad_request)?;
+        let request = &normalized;
         request
             .validate()
             .map_err(|error| MomoApiError::bad_request(error.to_string()))?;
@@ -35,25 +40,22 @@ impl MomoApiService {
             .as_deref()
             .ok_or_else(|| MomoApiError::bad_request("personal_space_id is required"))?;
         let operation_key = scoped_operation_key(personal_space_id, request_id);
-        let _operation = self.enter_operation(&operation_key, personal_space_id);
+        let _operation = self
+            .coordination
+            .enter_operation(&operation_key, personal_space_id);
         self.execute_active(request, request_id, &operation_key, stream)
             .await
     }
 
     /// Cancels a currently active response and its upstream model request.
     pub fn cancel(&self, scope_id: &str, request_id: &str) -> bool {
-        let operation_key = scoped_operation_key(scope_id, request_id);
-        let known = {
-            let mut states = self
-                .operation_states
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            states.get_mut(&operation_key).is_some_and(|state| {
-                state.cancelled = true;
-                state.active > 0
-            })
+        let Ok(scope_id) = uuid::Uuid::parse_str(scope_id) else {
+            return false;
         };
-        let upstream = simple::cancel_chat(operation_key);
+        let scope_id = scope_id.to_string();
+        let operation_key = scoped_operation_key(&scope_id, request_id);
+        let known = self.coordination.cancel_operation(&operation_key);
+        let upstream = self.runtime().cancel_chat(&operation_key);
         known || upstream
     }
 
@@ -65,9 +67,9 @@ impl MomoApiService {
         stream: Option<&dyn MomoResponseEventSink>,
     ) -> Result<MomoResponse, MomoApiError> {
         let config = self.config_snapshot();
-        self.ensure_active(operation_key)?;
+        self.coordination.ensure_active(operation_key)?;
         let request_lock = {
-            let mut locks = self.operation_locks.lock().await;
+            let mut locks = self.coordination.operation_locks.lock().await;
             if locks.len() >= 1_024 {
                 locks.retain(|_, lock| lock.strong_count() > 0);
             }
@@ -80,16 +82,16 @@ impl MomoApiService {
             }
         };
         let _request_guard = request_lock.lock().await;
-        self.ensure_active(operation_key)?;
+        self.coordination.ensure_active(operation_key)?;
         let fingerprint = response_request_fingerprint(request)?;
-        let persisted = load_response_operation(operation_key).await?;
+        let persisted = load_response_operation(self.runtime(), operation_key).await?;
         if let Some(operation) = &persisted {
-            if operation["request_fingerprint"].as_str() != Some(fingerprint.as_str()) {
+            if operation.request_fingerprint != fingerprint {
                 return Err(MomoApiError::conflict(
                     "request_id was already used with a different response request",
                 ));
             }
-            if let Some(response_json) = operation["response_json"].as_str() {
+            if let Some(response_json) = operation.response_json.as_deref() {
                 return serde_json::from_str(response_json)
                     .map_err(|error| MomoApiError::internal(error.to_string()));
             }
@@ -151,6 +153,18 @@ impl MomoApiService {
                 },
             )
             .map_err(|error| MomoApiError::bad_request(error.to_string()))?;
+        if config.vision.enabled
+            && request.input.has_images()
+            && !direct_multimodal
+            && governed.visual_description_prompt.is_none()
+        {
+            let prompt_space = self
+                .runtime
+                .prompt_spaces()
+                .get(PromptSpaceId::VisionFallback);
+            governed.audit["visual_description_prompt_revision"] = json!(prompt_space.revision);
+            governed.visual_description_prompt = Some(prompt_space.content);
+        }
         let resolved_input = self
             .resolve_response_input(
                 request,
@@ -165,7 +179,7 @@ impl MomoApiService {
             governed.audit["visual_description_prompt_source"] =
                 json!("not_used_direct_multimodal");
         }
-        self.ensure_active(operation_key)?;
+        self.coordination.ensure_active(operation_key)?;
 
         let (mut response, mo_state_operation_id) = self
             .respond(
@@ -208,7 +222,7 @@ impl MomoApiService {
             "usage": &resolved_input.vision_usage,
             "upstream_request_ids": &resolved_input.vision_upstream_request_ids,
         });
-        self.ensure_active(operation_key)?;
+        self.coordination.ensure_active(operation_key)?;
         let write_source = request
             .momo
             .memory_write_space_id
@@ -224,31 +238,48 @@ impl MomoApiService {
         let semantic_graph = !response.output_text.is_empty()
             && write_source.is_some_and(|source| source.semantic_graph);
         let memory_write_space_id = request.momo.memory_write_space_id.clone();
-        let maintenance_turn = (memory || semantic_graph).then(|| {
-            json!({
-                "request_id": operation_key,
-                "scope_id": memory_write_space_id,
-                "user_content": resolved_input.maintenance_user_text(),
-                "assistant_content": response.output_text,
-            })
-        });
-        simple::commit_response_completion_json(
-            json!({
-                "request_id": operation_key,
-                "conversation_scope_id": request.momo.conversation_space_id,
-                "conversation_id": response.momo.conversation_id,
-                "assistant_content": (!response.output_text.is_empty()).then_some(response.output_text.as_str()),
-                "maintenance_turn": maintenance_turn,
-                "memory_enabled": memory,
-                "nsg_enabled": semantic_graph,
-                "mo_state_operation_id": mo_state_operation_id,
-                "response_json": serde_json::to_string(&response)
-                    .map_err(|error| MomoApiError::internal(error.to_string()))?,
-            })
-            .to_string(),
+        let conversation_scope_id = uuid::Uuid::parse_str(
+            request
+                .momo
+                .conversation_space_id
+                .as_deref()
+                .expect("conversation Space was validated"),
         )
-        .await
-        .map_err(MomoApiError::internal)?;
+        .map_err(MomoApiError::bad_request)?;
+        let conversation_id = uuid::Uuid::parse_str(&response.momo.conversation_id)
+            .map_err(MomoApiError::internal)?;
+        let assistant_message = (!response.output_text.is_empty()).then(|| momo_domain::Message {
+            id: momo_domain::new_id(),
+            conversation_id,
+            role: momo_domain::MessageRole::Assistant,
+            content: response.output_text.clone(),
+            created_at: chrono::Utc::now(),
+        });
+        let maintenance_turn = (memory || semantic_graph).then(|| momo_storage::MaintenanceTurn {
+            request_id: operation_key.to_owned(),
+            scope_id: memory_write_space_id
+                .clone()
+                .expect("maintenance write Space was validated"),
+            user_content: resolved_input.maintenance_user_text().to_owned(),
+            assistant_content: response.output_text.clone(),
+        });
+        let response_json = serde_json::to_string(&response)
+            .map_err(|error| MomoApiError::internal(error.to_string()))?;
+        self.runtime()
+            .core()
+            .store()
+            .commit_response_completion(momo_storage::ResponseCompletion {
+                request_id: operation_key,
+                conversation_scope_id,
+                assistant_message: assistant_message.as_ref(),
+                maintenance_turn: maintenance_turn.as_ref(),
+                memory_enabled: memory,
+                nsg_enabled: semantic_graph,
+                mo_state_operation_id: mo_state_operation_id.as_deref(),
+                response_json: &response_json,
+            })
+            .await
+            .map_err(MomoApiError::internal)?;
         if memory || semantic_graph {
             self.schedule_maintenance(
                 memory_write_space_id.expect("maintenance write Space was validated"),
@@ -264,6 +295,7 @@ impl MomoApiService {
         operation_key: &str,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, MomoApiError> {
         let guard = self
+            .coordination
             .conversation_lock(conversation_space_id, conversation_id)
             .await
             .lock_owned()
@@ -271,7 +303,7 @@ impl MomoApiService {
         // Cancellation can happen while this request is queued behind another
         // response in the same conversation. Re-check before capability or
         // vision calls are allowed to start.
-        self.ensure_active(operation_key)?;
+        self.coordination.ensure_active(operation_key)?;
         Ok(guard)
     }
 
@@ -279,12 +311,12 @@ impl MomoApiService {
         &self,
         request: &MomoResponseRequest,
         request_id: &str,
-        persisted: Option<&Value>,
+        persisted: Option<&momo_storage::ResponseOperation>,
         governed: &GovernedOverrides,
         chat_supports_images: bool,
     ) -> Result<ResolvedResponseInput, MomoApiError> {
         if let Some(resolved) =
-            persisted.and_then(|operation| operation["resolved_input_json"].as_str())
+            persisted.and_then(|operation| operation.resolved_input_json.as_deref())
         {
             return serde_json::from_str(resolved)
                 .map_err(|error| MomoApiError::internal(error.to_string()));
@@ -332,11 +364,15 @@ impl MomoApiService {
                 vision_upstream_request_ids: Vec::new(),
             });
         }
-        let prompt = governed.visual_description_prompt.clone().ok_or_else(|| {
-            MomoApiError::bad_request(
-                "image input requires vision.enabled = true in the portable MOMO configuration",
-            )
-        })?;
+        let prompt = governed
+            .visual_description_prompt
+            .clone()
+            .unwrap_or_else(|| {
+                self.runtime
+                    .prompt_spaces()
+                    .get(PromptSpaceId::VisionFallback)
+                    .content
+            });
         let batch = self
             .vision_adapter
             .describe(VisionDescriptionRequest {
@@ -346,7 +382,7 @@ impl MomoApiService {
             })
             .await
             .map_err(|error| MomoApiError::model(error.to_string()))?;
-        self.ensure_active(request_id)?;
+        self.coordination.ensure_active(request_id)?;
         let text = request
             .input
             .text_with_image_descriptions(&batch.descriptions)
@@ -362,14 +398,16 @@ impl MomoApiService {
     }
 }
 
-async fn load_response_operation(request_id: &str) -> Result<Option<Value>, MomoApiError> {
-    simple::response_operation_json(request_id.to_owned())
+async fn load_response_operation(
+    runtime: &crate::MomoRuntime,
+    request_id: &str,
+) -> Result<Option<momo_storage::ResponseOperation>, MomoApiError> {
+    runtime
+        .core()
+        .store()
+        .response_operation(request_id)
         .await
-        .map_err(MomoApiError::internal)?
-        .map(|value| {
-            serde_json::from_str(&value).map_err(|error| MomoApiError::internal(error.to_string()))
-        })
-        .transpose()
+        .map_err(MomoApiError::internal)
 }
 
 pub(super) fn scoped_operation_key(scope_id: &str, request_id: &str) -> String {
@@ -380,8 +418,13 @@ pub(super) fn scoped_operation_key(scope_id: &str, request_id: &str) -> String {
     format!("op_{}", hex::encode(digest.finalize()))
 }
 
-fn response_request_fingerprint(request: &MomoResponseRequest) -> Result<String, MomoApiError> {
+pub(super) fn response_request_fingerprint(
+    request: &MomoResponseRequest,
+) -> Result<String, MomoApiError> {
     let mut normalized = request.clone();
+    normalized
+        .normalize_identifiers()
+        .map_err(MomoApiError::bad_request)?;
     normalized.stream = false;
     normalized.momo.stream = false;
     normalized.momo.request_id = None;

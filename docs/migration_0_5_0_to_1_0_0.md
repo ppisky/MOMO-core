@@ -26,6 +26,15 @@ The workspace crates are implementation modules and now use `publish = false`.
 The supported product stability surface is the native HTTP contract and the
 documented MOC/character/memory formats, not independent crates.io packages.
 
+The local rc.5 candidate removes `api::simple` and the internal JSON forwarding
+facade. Use `api::runtime_api` with typed Rust requests/results; serialize only
+at the host's transport boundary. `MomoApiService::new` takes the shared runtime,
+model origin, API key and HTTP client, not a separate settings object. Apply
+settings through `MomoRuntime::update_runtime_settings`; read/replace prompts
+through `MomoRuntime::prompt_spaces`. Constructing another service around that
+runtime preserves both policy and prompt state. No deprecated forwarding
+signatures are retained.
+
 ## Image input
 
 Structured native input may contain `input_image` either as a top-level user
@@ -34,23 +43,26 @@ or `data:image/` URLs; `detail` is `auto`, `low`, or `high`. A request may
 contain at most eight images, and image input cannot be mixed with function
 call continuation items.
 
-Image input is disabled until portable configuration enables it:
+Image input is disabled until the runtime settings resource enables it:
 
-```toml
-[vision]
-enabled = true
-prompt = "Describe only visible facts relevant to the conversation."
+```json
+{"vision":{"enabled":true}}
 ```
+
+Hosts send the complete resource with `PUT /v1/runtime-settings`; MOMO does not
+read this value from TOML.
 
 Core discovers `/v1/models/conversation` first. When its `momo.modalities`
 contains `"image"`, Core sends the original images directly to the final
-conversation request and does not use the vision prompt. The existing roleplay
+conversation request and does not use the `vision_fallback` Prompt Space. The existing roleplay
 and context instructions remain the authority for that call.
 
 When the conversation model is text-only, the adapter host must expose a
 logical model named `vision`, report `"image"` in that route's discovered
 modalities, and accept OpenAI-compatible multimodal Chat Completions content.
 Portable configuration never contains provider URLs or credentials.
+The fallback prompt body is managed with `PUT /v1/prompt-spaces/vision_fallback`,
+not `momo.toml`.
 
 In `mobot`, every `[[models]]` entry declares `modalities`; `[model_use].vision`
 optionally selects the fallback model profile while the provider URL, real
@@ -110,13 +122,19 @@ directories during export. Core returns module metadata and claimed paths but
 does not interpret or execute those payloads. Without an explicit claim,
 temporary unknown payloads are discarded when import finishes.
 
-## Compiled product prompt sources
+## Prompt Spaces
 
-The DMW Distiller, NSG Governor, and Roleplay Director are full Markdown files
-tracked under `crates/momo-core/src/product_prompts/` and embedded into
-`momo_core` with `include_str!`. They are not deployment files, fields or paths
-in `momo.toml`, request overrides, or MOC content. Changing them requires a Core
-source change and rebuild. A former `[prompts]` table must be removed.
+The assistant, visual fallback, DMW Distiller, NSG Governor, and Roleplay
+Director defaults are full Markdown sources embedded into `momo_core` with
+`include_str!`. They are fallback values, not immutable behavior: every fixed
+slot can be inspected and replaced through `/v1/prompt-spaces`, and an override
+can be deleted to restore its embedded default. MOMO does not read prompt paths
+or `momo.toml`; a host may translate its user configuration into these HTTP
+operations. Prompt values are not carried by MOC.
+
+Process-wide behavior follows the same ownership boundary through the typed
+`GET/PUT /v1/runtime-settings` resource. MOMO no longer reads a configuration
+file or `MOMO_CONFIG_PATH`.
 
 ## Wire compatibility
 

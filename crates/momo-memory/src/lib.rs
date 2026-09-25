@@ -5,7 +5,9 @@ pub mod nsg;
 pub mod scene;
 pub mod state;
 
+mod commit;
 mod filesystem;
+pub use commit::PreparedMemoryCommit;
 mod patch;
 mod retrieval;
 
@@ -100,6 +102,8 @@ pub enum MemoryError {
         operation: &'static str,
         kind: String,
     },
+    #[error("memory workspace capacity exhausted ({limit} active or initializing Spaces)")]
+    WorkspaceCapacity { limit: usize },
     #[error("memory entry was not found: {0}")]
     NotFound(String),
     #[error("failed to persist memory atomically: {0}")]

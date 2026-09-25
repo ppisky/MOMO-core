@@ -18,7 +18,6 @@ fn test_export_plan(
 ) -> MocExportPlan {
     let selected = modules.iter().copied().collect::<HashSet<_>>();
     MocExportPlan {
-        include_config: selected.contains(&MocModule::MomoConfig),
         characters: selected
             .contains(&MocModule::Characters)
             .then(|| MocCharacterSelection {
@@ -48,7 +47,6 @@ fn test_export_plan(
 
 fn test_import_plan(source: Uuid, target: Uuid, conflict_mode: ConflictMode) -> MocImportPlan {
     MocImportPlan {
-        apply_config: true,
         space_map: [(source, target)].into_iter().collect(),
         conflict_mode,
     }
@@ -162,22 +160,12 @@ async fn round_trips_selected_moc_modules_and_rebinds_scope() {
         .expect("DDM profile");
 
     let output = source_directory.path().join("backup.moc");
-    let settings = serde_json::json!({
-        "schema_version": 1,
-        "model_use": { "chat": "primary" },
-        "mo_state": {
-            "ddm": { "enabled": true }
-        },
-        "future": { "preserved": true }
-    });
     let manifest = export_moc(
         &source,
         &output,
-        &settings,
         &test_export_plan(
             original_scope,
             &[
-                MocModule::MomoConfig,
                 MocModule::Characters,
                 MocModule::Conversations,
                 MocModule::Memory,
@@ -218,10 +206,6 @@ async fn round_trips_selected_moc_modules_and_rebinds_scope() {
     assert_eq!(report.messages_imported, 1);
     assert!(report.memory_files_imported >= 3);
     assert_eq!(
-        report.momo_config.expect("config")["future"]["preserved"],
-        true
-    );
-    assert_eq!(
         destination
             .store()
             .portable_metadata(DDM_PROFILE_METADATA_KIND, &character_id.to_string())
@@ -238,7 +222,6 @@ async fn round_trips_selected_moc_modules_and_rebinds_scope() {
     export_moc(
         &destination,
         &second_output,
-        &settings,
         &test_export_plan(
             new_scope,
             &[MocModule::Characters],
@@ -298,11 +281,10 @@ async fn round_trips_selected_moc_modules_and_rebinds_scope() {
     export_private_moc(
         &source,
         &private_output,
-        &settings,
         &test_export_plan(
             original_scope,
-            &[MocModule::MomoConfig],
-            None,
+            &[MocModule::Characters],
+            Some(character_id),
             MocCompatibility::None,
         ),
         "private-password",
@@ -310,16 +292,12 @@ async fn round_trips_selected_moc_modules_and_rebinds_scope() {
     .await
     .expect("private export");
     assert!(moc_is_encrypted(&private_output).expect("inspect private"));
-    let config_import = MocImportPlan {
-        apply_config: true,
-        space_map: BTreeMap::new(),
-        conflict_mode: ConflictMode::KeepExisting,
-    };
+    let private_import = test_import_plan(original_scope, new_scope, ConflictMode::KeepExisting);
     assert!(matches!(
         import_moc_with_passphrase(
             &destination,
             &private_output,
-            &config_import,
+            &private_import,
             Some("wrong-password")
         )
         .await,
@@ -330,12 +308,12 @@ async fn round_trips_selected_moc_modules_and_rebinds_scope() {
     let private_report = import_moc_with_passphrase(
         &destination,
         &private_output,
-        &config_import,
+        &private_import,
         Some("private-password"),
     )
     .await
     .expect("private import");
-    assert!(private_report.momo_config.is_some());
+    assert_eq!(private_report.skipped_conflicts, 1);
     assert_eq!(
         destination
             .store()
@@ -370,7 +348,6 @@ async fn host_modules_are_explicitly_exported_reported_and_claimed() {
     let manifest = export_moc_with_host_modules(
         &source,
         &output,
-        &serde_json::json!({}),
         &test_export_plan(new_id(), &[], None, MocCompatibility::None),
         std::slice::from_ref(&host_module),
     )
@@ -384,7 +361,6 @@ async fn host_modules_are_explicitly_exported_reported_and_claimed() {
         .await
         .expect("destination core");
     let host_import = MocImportPlan {
-        apply_config: false,
         space_map: BTreeMap::new(),
         conflict_mode: ConflictMode::Replace,
     };
@@ -416,7 +392,6 @@ async fn host_modules_are_explicitly_exported_reported_and_claimed() {
         export_moc_with_host_modules(
             &source,
             source_directory.path().join("invalid.moc"),
-            &serde_json::json!({}),
             &test_export_plan(new_id(), &[], None, MocCompatibility::None),
             &[reserved],
         )
@@ -622,7 +597,6 @@ async fn import_uses_declared_module_order_when_space_declarations_are_reordered
     export_moc(
         &source,
         &canonical,
-        &serde_json::json!({}),
         &test_export_plan(
             source_space,
             &[MocModule::Characters, MocModule::Conversations],
@@ -682,7 +656,6 @@ async fn preflight_rejects_cross_space_conversation_conflicts_before_importing_c
     export_moc(
         &source,
         &package,
-        &serde_json::json!({}),
         &test_export_plan(
             source_space,
             &[MocModule::Characters, MocModule::Conversations],
@@ -745,7 +718,6 @@ async fn preflight_rejects_cross_space_character_conflicts() {
     export_moc(
         &source,
         &package,
-        &serde_json::json!({}),
         &test_export_plan(
             source_space,
             &[MocModule::Characters, MocModule::Conversations],
@@ -834,7 +806,6 @@ async fn preflight_rejects_message_ids_owned_by_another_conversation() {
     export_moc(
         &source,
         &package,
-        &serde_json::json!({}),
         &test_export_plan(
             source_space,
             &[MocModule::Characters, MocModule::Conversations],
@@ -939,7 +910,6 @@ async fn imports_conversation_only_moc_without_missing_character_foreign_key() {
     export_moc(
         &source,
         &output,
-        &serde_json::json!({}),
         &test_export_plan(
             scope_id,
             &[MocModule::Conversations],
@@ -974,62 +944,6 @@ async fn imports_conversation_only_moc_without_missing_character_foreign_key() {
 }
 
 #[tokio::test]
-async fn refuses_credentials_in_momo_config() {
-    let directory = tempfile::tempdir().expect("directory");
-    let core = MomoCore::initialize(directory.path()).await.expect("core");
-    let error = export_momo_config(
-        &core,
-        directory.path().join("unsafe.toml"),
-        &serde_json::json!({ "model": { "api_key": "secret" } }),
-    )
-    .expect_err("credential must be rejected");
-    assert!(matches!(error, PortableError::CredentialInConfig(_)));
-
-    let array_error = export_momo_config(
-        &core,
-        directory.path().join("unsafe-models.toml"),
-        &serde_json::json!({
-            "models": [{ "profile_id": "profile", "api_key": "secret" }]
-        }),
-    )
-    .expect_err("credential in an array table must be rejected");
-    assert!(matches!(array_error, PortableError::CredentialInConfig(_)));
-}
-
-#[tokio::test]
-async fn momo_config_preserves_product_extensions_and_rejects_host_wiring() {
-    let directory = tempfile::tempdir().expect("directory");
-    let core = MomoCore::initialize(directory.path()).await.expect("core");
-    let output = directory.path().join("portable.toml");
-    export_momo_config(
-        &core,
-        &output,
-        &serde_json::json!({
-            "schema_version": 1,
-            "model_use": { "chat": "primary" },
-            "runtime": { "memory_enabled": true },
-            "extension": { "preserved": true }
-        }),
-    )
-    .expect("portable export");
-    let document = ConfigDocument::load(output).expect("portable document");
-    assert!(document.values().contains_key("model_use"));
-    assert!(document.values().contains_key("runtime"));
-    assert!(document.values().contains_key("extension"));
-
-    let error = export_momo_config(
-        &core,
-        directory.path().join("host-wiring.toml"),
-        &serde_json::json!({
-            "schema_version": 1,
-            "providers": [{ "provider_id": "not-portable" }]
-        }),
-    )
-    .expect_err("host wiring must be rejected");
-    assert!(error.to_string().contains("config.toml"));
-}
-
-#[tokio::test]
 async fn selected_character_export_and_generated_compatibility_are_explicit() {
     let directory = tempfile::tempdir().expect("directory");
     let core = MomoCore::initialize(directory.path()).await.expect("core");
@@ -1058,7 +972,6 @@ async fn selected_character_export_and_generated_compatibility_are_explicit() {
     export_moc(
         &core,
         &output,
-        &serde_json::json!({}),
         &test_export_plan(
             scope_id,
             &[MocModule::Characters],
@@ -1093,7 +1006,6 @@ async fn selected_character_export_and_generated_compatibility_are_explicit() {
     export_moc(
         &core,
         &compatible_output,
-        &serde_json::json!({}),
         &test_export_plan(
             scope_id,
             &[MocModule::Characters],

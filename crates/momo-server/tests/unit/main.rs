@@ -11,20 +11,41 @@ static TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 static TEST_DATA_DIR: std::sync::LazyLock<tempfile::TempDir> =
     std::sync::LazyLock::new(|| tempfile::tempdir().expect("shared test data directory"));
+static TEST_RUNTIME: std::sync::OnceLock<Arc<MomoRuntime>> = std::sync::OnceLock::new();
 
 async fn initialize_test_core() -> String {
-    simple::initialize_core(TEST_DATA_DIR.path().to_string_lossy().into_owned())
-        .await
-        .expect("initialize core")
+    if TEST_RUNTIME.get().is_none() {
+        let runtime = Arc::new(
+            MomoRuntime::initialize(TEST_DATA_DIR.path())
+                .await
+                .expect("initialize runtime"),
+        );
+        let _ = TEST_RUNTIME.set(runtime);
+    }
+    TEST_RUNTIME
+        .get()
+        .expect("test runtime")
+        .data_dir()
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn test_runtime() -> &'static MomoRuntime {
+    TEST_RUNTIME.get().expect("initialize_test_core first")
+}
+
+fn test_runtime_arc() -> Arc<MomoRuntime> {
+    Arc::clone(TEST_RUNTIME.get().expect("initialize_test_core first"))
 }
 
 fn test_momo_api(origin: impl Into<String>) -> Arc<MomoApiService> {
-    Arc::new(MomoApiService::new(
-        origin,
-        None,
-        reqwest::Client::new(),
-        Arc::new(MomoConfig::default()),
-    ))
+    Arc::new({
+        let runtime = test_runtime_arc();
+        runtime
+            .update_runtime_settings((*Arc::new(MomoRuntimeSettings::default())).clone())
+            .expect("runtime settings");
+        MomoApiService::new(runtime, origin, None, reqwest::Client::new())
+    })
 }
 
 async fn read_test_http_request(socket: &mut tokio::net::TcpStream) -> String {
@@ -80,13 +101,13 @@ fn remote_bind_requires_explicit_opt_in() {
 
 #[test]
 fn embedding_errors_use_client_and_gateway_status_codes() {
-    let client = embedding_api_error(simple::GenerateEmbeddingsError::Provider(
-        momo_core::EmbeddingError::InvalidInput("bad input".to_owned()),
+    let client = embedding_api_error(momo_core::EmbeddingError::InvalidInput(
+        "bad input".to_owned(),
     ));
     assert_eq!(client.status, StatusCode::BAD_REQUEST);
 
-    let upstream = embedding_api_error(simple::GenerateEmbeddingsError::Provider(
-        momo_core::EmbeddingError::InvalidResponse("bad response".to_owned()),
+    let upstream = embedding_api_error(momo_core::EmbeddingError::InvalidResponse(
+        "bad response".to_owned(),
     ));
     assert_eq!(upstream.status, StatusCode::BAD_GATEWAY);
 }
@@ -111,11 +132,106 @@ fn response_errors_are_typed_bounded_and_redacted() {
 }
 
 #[tokio::test]
+async fn prompt_spaces_can_be_listed_replaced_and_reset_over_http() {
+    let _test_guard = TEST_LOCK.lock().await;
+    let _initialized_dir = initialize_test_core().await;
+    let app = build_app(AppState {
+        runtime: test_runtime_arc(),
+        momo_api: test_momo_api("http://127.0.0.1:9/v1"),
+        response_concurrency: Arc::new(Semaphore::new(8)),
+        response_timeout: std::time::Duration::from_secs(120),
+        metrics: Arc::new(Mutex::new(HashMap::new())),
+    });
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/prompt-spaces")
+                .body(Body::empty())
+                .expect("list request"),
+        )
+        .await
+        .expect("list response");
+    assert_eq!(list.status(), StatusCode::OK);
+    let list: Value = serde_json::from_slice(
+        &to_bytes(list.into_body(), 1024 * 1024)
+            .await
+            .expect("list body"),
+    )
+    .expect("list JSON");
+    assert!(
+        list.as_array()
+            .expect("Prompt Space list")
+            .iter()
+            .any(|item| item["id"] == "assistant"
+                && item["content"] == "You are a helpful assistant.\n"
+                && item["source"] == "builtin")
+    );
+
+    let replace = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/v1/prompt-spaces/assistant")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"content": "You answer with exact, concise facts."}).to_string(),
+                ))
+                .expect("replace request"),
+        )
+        .await
+        .expect("replace response");
+    assert_eq!(replace.status(), StatusCode::OK);
+    let replaced: Value = serde_json::from_slice(
+        &to_bytes(replace.into_body(), 1024 * 1024)
+            .await
+            .expect("replace body"),
+    )
+    .expect("replace JSON");
+    assert_eq!(replaced["source"], "override");
+
+    let reset = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/v1/prompt-spaces/assistant")
+                .body(Body::empty())
+                .expect("reset request"),
+        )
+        .await
+        .expect("reset response");
+    assert_eq!(reset.status(), StatusCode::OK);
+    let reset: Value = serde_json::from_slice(
+        &to_bytes(reset.into_body(), 1024 * 1024)
+            .await
+            .expect("reset body"),
+    )
+    .expect("reset JSON");
+    assert_eq!(reset["source"], "builtin");
+
+    let missing = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/prompt-spaces/not_a_prompt")
+                .body(Body::empty())
+                .expect("unknown request"),
+        )
+        .await
+        .expect("unknown response");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn response_json_rejections_use_the_unified_error_envelope() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
+    let _initialized_dir = initialize_test_core().await;
     let app = build_app(AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
@@ -143,59 +259,57 @@ async fn response_json_rejections_use_the_unified_error_envelope() {
 }
 
 #[tokio::test]
-async fn imported_momo_config_updates_the_live_service() {
+async fn runtime_settings_api_updates_the_live_service_without_a_config_file() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
-    let live_config_path = std::path::Path::new(&initialized_dir).join("config/momo.toml");
-    let original_config = std::fs::read(&live_config_path).ok();
+    let _initialized_dir = initialize_test_core().await;
     let momo_api = test_momo_api("http://127.0.0.1:9/v1");
     let app = build_app(AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: Arc::clone(&momo_api),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
         metrics: Arc::new(Mutex::new(HashMap::new())),
     });
-    let input_path = TEST_DATA_DIR
-        .path()
-        .join(format!("runtime-{}.toml", simple::new_request_id()));
-    let export = app
+    let replaced = app
         .clone()
         .oneshot(
             Request::builder()
-                .method(Method::POST)
-                .uri("/v1/momo-config/export")
+                .method(Method::PUT)
+                .uri("/v1/runtime-settings")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
-                        "output_path": input_path,
-                        "settings": {
-                            "runtime": {
-                                "memory_distill_every_turns": 13,
-                                "nsg_govern_every_turns": 17
-                            }
+                        "runtime": {
+                            "memory_distill_every_turns": 13,
+                            "nsg_govern_every_turns": 17
                         }
                     })
                     .to_string(),
                 ))
-                .expect("config export request"),
+                .expect("runtime settings request"),
         )
         .await
-        .expect("config export response");
-    assert_eq!(export.status(), StatusCode::OK);
+        .expect("runtime settings response");
+    assert_eq!(replaced.status(), StatusCode::OK);
 
-    let imported = app
+    let current = app
         .oneshot(
             Request::builder()
-                .method(Method::POST)
-                .uri("/v1/momo-config/import")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({"input_path": input_path}).to_string()))
-                .expect("config import request"),
+                .method(Method::GET)
+                .uri("/v1/runtime-settings")
+                .body(Body::empty())
+                .expect("runtime settings get request"),
         )
         .await
-        .expect("config import response");
-    assert_eq!(imported.status(), StatusCode::OK);
+        .expect("runtime settings get response");
+    assert_eq!(current.status(), StatusCode::OK);
+    let current: Value = serde_json::from_slice(
+        &to_bytes(current.into_body(), 64 * 1024)
+            .await
+            .expect("runtime settings body"),
+    )
+    .expect("runtime settings JSON");
+    assert_eq!(current["runtime"]["memory_distill_every_turns"], 13);
     assert_eq!(
         momo_api.maintenance_batch_limit(momo_core::MaintenanceKind::Memory),
         13
@@ -204,19 +318,14 @@ async fn imported_momo_config_updates_the_live_service() {
         momo_api.maintenance_batch_limit(momo_core::MaintenanceKind::SemanticGraph),
         17
     );
-    if let Some(original_config) = original_config {
-        std::fs::write(live_config_path, original_config).expect("restore config");
-    } else if live_config_path.exists() {
-        std::fs::remove_file(live_config_path).expect("remove test config");
-    }
 }
 
 #[tokio::test]
 async fn http_core_contract_and_character_round_trip() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
+    let _initialized_dir = initialize_test_core().await;
     let app = build_app(AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
@@ -938,7 +1047,7 @@ async fn http_core_contract_and_character_round_trip() {
 #[tokio::test]
 async fn http_moc_host_modules_export_and_claim() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
+    let _initialized_dir = initialize_test_core().await;
     let extension = TEST_DATA_DIR.path().join("host-weather-module");
     std::fs::create_dir_all(&extension).expect("host module directory");
     std::fs::write(extension.join("module.json"), br#"{"unit":"celsius"}"#)
@@ -946,7 +1055,7 @@ async fn http_moc_host_modules_export_and_claim() {
     let output = TEST_DATA_DIR.path().join("host-module.moc");
     let claims = TEST_DATA_DIR.path().join("host-module-claims");
     let app = build_app(AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(5),
@@ -964,7 +1073,6 @@ async fn http_moc_host_modules_export_and_claim() {
                     json!({
                         "output_path": output,
                         "plan": {
-                            "include_config": false,
                             "characters": [],
                             "conversations": [],
                             "memory": [],
@@ -995,7 +1103,6 @@ async fn http_moc_host_modules_export_and_claim() {
                     json!({
                         "input_path": output,
                         "plan": {
-                            "apply_config": false,
                             "space_map": {},
                             "conflict_mode": "replace"
                         },
@@ -1027,9 +1134,10 @@ async fn conversation_and_messages_fail_closed_across_scopes() {
     const OTHER_SCOPE: &str = "00000000-0000-4000-8000-000000000082";
 
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
-    let character: Value = serde_json::from_str(
-        &simple::stage_character_json(
+    let _initialized_dir = initialize_test_core().await;
+    let character: Value = serde_json::to_value(
+        runtime_api::stage_character(
+            test_runtime(),
             OWNER_SCOPE.to_owned(),
             "scope-test".to_owned(),
             "Scoped character".to_owned(),
@@ -1041,8 +1149,9 @@ async fn conversation_and_messages_fail_closed_across_scopes() {
     )
     .expect("character JSON");
     let character_id = character["id"].as_str().expect("character ID").to_owned();
-    let conversation: Value = serde_json::from_str(
-        &simple::stage_conversation_json(
+    let conversation: Value = serde_json::to_value(
+        runtime_api::stage_conversation(
+            test_runtime(),
             None,
             OWNER_SCOPE.to_owned(),
             "private conversation".to_owned(),
@@ -1056,8 +1165,9 @@ async fn conversation_and_messages_fail_closed_across_scopes() {
         .as_str()
         .expect("conversation ID")
         .to_owned();
-    let message: Value = serde_json::from_str(
-        &simple::stage_message_json(
+    let message: Value = serde_json::to_value(
+        runtime_api::stage_message(
+            test_runtime(),
             OWNER_SCOPE.to_owned(),
             conversation_id.clone(),
             "user".to_owned(),
@@ -1070,7 +1180,7 @@ async fn conversation_and_messages_fail_closed_across_scopes() {
     let message_id = message["id"].as_str().expect("message ID").to_owned();
 
     let app = build_app(AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(5),
@@ -1243,8 +1353,8 @@ async fn conversation_and_messages_fail_closed_across_scopes() {
         .expect("cross-scope native response");
     assert_eq!(cross_scope_response.status(), StatusCode::BAD_REQUEST);
 
-    let owner_messages: Value = serde_json::from_str(
-        &simple::local_messages_json(OWNER_SCOPE.to_owned(), conversation_id)
+    let owner_messages: Value = serde_json::to_value(
+        runtime_api::local_messages(test_runtime(), OWNER_SCOPE.to_owned(), conversation_id)
             .await
             .expect("owner messages"),
     )
@@ -1255,9 +1365,10 @@ async fn conversation_and_messages_fail_closed_across_scopes() {
 #[tokio::test]
 async fn responses_forwards_upstream_sse_deltas_before_completion() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
-    let character: Value = serde_json::from_str(
-        &simple::stage_character_json(
+    let _initialized_dir = initialize_test_core().await;
+    let character: Value = serde_json::to_value(
+        runtime_api::stage_character(
+            test_runtime(),
             TEST_SCOPE_ID.to_owned(),
             "stream-contract".to_owned(),
             "MO".to_owned(),
@@ -1339,16 +1450,22 @@ async fn responses_forwards_upstream_sse_deltas_before_completion() {
             .expect("write remaining deltas");
     });
 
-    let mut config = MomoConfig::default();
+    let mut config = MomoRuntimeSettings::default();
     config.request_overrides.sampling = momo_core::OverrideMode::Allow;
     let app = build_app(AppState {
-        data_dir: initialized_dir,
-        momo_api: Arc::new(MomoApiService::new(
-            format!("http://{address}/v1"),
-            None,
-            reqwest::Client::new(),
-            Arc::new(config),
-        )),
+        runtime: test_runtime_arc(),
+        momo_api: Arc::new({
+            let runtime = test_runtime_arc();
+            runtime
+                .update_runtime_settings((*Arc::new(config)).clone())
+                .expect("runtime settings");
+            MomoApiService::new(
+                runtime,
+                format!("http://{address}/v1"),
+                None,
+                reqwest::Client::new(),
+            )
+        }),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
         metrics: Arc::new(Mutex::new(HashMap::new())),
@@ -1372,7 +1489,7 @@ async fn responses_forwards_upstream_sse_deltas_before_completion() {
                         }],
                         "momo": {
                             "schema": "momo.responses/1.0",
-                            "request_id": format!("stream-{}", simple::new_request_id()),
+                            "request_id": format!("stream-{}", runtime_api::new_request_id()),
                             "personal_space_id": TEST_SCOPE_ID,
                             "conversation_space_id": TEST_SCOPE_ID,
                             "character_id": character_id,
@@ -1450,9 +1567,10 @@ async fn responses_forwards_upstream_sse_deltas_before_completion() {
 #[tokio::test]
 async fn responses_orchestrates_once_and_replays_by_request_id() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
-    let character: Value = serde_json::from_str(
-        &simple::stage_character_json(
+    let _initialized_dir = initialize_test_core().await;
+    let character: Value = serde_json::to_value(
+        runtime_api::stage_character(
+            test_runtime(),
             TEST_SCOPE_ID.to_owned(),
             "contract".to_owned(),
             "MO".to_owned(),
@@ -1464,7 +1582,8 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
     )
     .expect("character JSON");
     let character_id = character["id"].as_str().expect("character ID").to_owned();
-    simple::upsert_character_ddm_profile_json(
+    runtime_api::upsert_character_ddm_profile(
+        test_runtime(),
         TEST_SCOPE_ID.to_owned(),
         character_id.clone(),
         format!(
@@ -1530,6 +1649,8 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
                 _ => {
                     assert!(request.starts_with("POST /v1/chat/completions "));
                     assert!(request.contains("\"model\":\"conversation\""));
+                    assert!(!request.contains("You are a helpful assistant."));
+                    assert!(request.contains("# Roleplay Direction"));
                     assert!(request.contains("Respond carefully."));
                     json!({
                         "id": "chatcmpl-contract",
@@ -1558,16 +1679,22 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
         }
     });
 
-    let mut config = MomoConfig::default();
+    let mut config = MomoRuntimeSettings::default();
     config.mo_state.ddm.enabled = true;
     let app = build_app(AppState {
-        data_dir: initialized_dir,
-        momo_api: Arc::new(MomoApiService::new(
-            format!("http://{address}/v1"),
-            None,
-            reqwest::Client::new(),
-            Arc::new(config.clone()),
-        )),
+        runtime: test_runtime_arc(),
+        momo_api: Arc::new({
+            let runtime = test_runtime_arc();
+            runtime
+                .update_runtime_settings((*Arc::new(config.clone())).clone())
+                .expect("runtime settings");
+            MomoApiService::new(
+                runtime,
+                format!("http://{address}/v1"),
+                None,
+                reqwest::Client::new(),
+            )
+        }),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
         metrics: Arc::new(Mutex::new(HashMap::new())),
@@ -1617,6 +1744,16 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
     assert_eq!(first["momo"]["warnings"], json!([]));
     assert_eq!(first["usage"]["total_tokens"], 15);
     assert_eq!(
+        first["momo"]["request_audit"]["instructions_source"],
+        "omitted_for_character"
+    );
+    assert!(first["momo"]["request_audit"]["prompt_spaces"]["assistant_revision"].is_null());
+    assert!(
+        first["momo"]["request_audit"]["prompt_spaces"]["roleplay_director_revision"]
+            .as_str()
+            .is_some_and(|revision| revision.len() == 64)
+    );
+    assert_eq!(
         first["momo"]["state_audit"]["manager"]["profile"],
         "closed_autonomous"
     );
@@ -1642,7 +1779,8 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
         .as_str()
         .expect("conversation ID")
         .to_owned();
-    let ddm_state = simple::ddm_projection_state_json(
+    let ddm_state = runtime_api::ddm_projection_state(
+        test_runtime(),
         TEST_SCOPE_ID.to_owned(),
         conversation_id,
         character_id.clone(),
@@ -1650,7 +1788,7 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
     .await
     .expect("DDM state query")
     .expect("persisted DDM state");
-    let ddm_state: Value = serde_json::from_str(&ddm_state).expect("DDM state JSON");
+    let ddm_state: Value = serde_json::to_value(&ddm_state).expect("DDM state JSON");
     assert_eq!(ddm_state["bands"]["attentive"], "salient");
     let runtime = app
         .clone()
@@ -1680,13 +1818,19 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
 
     drop(app);
     let restarted_app = build_app(AppState {
-        data_dir: TEST_DATA_DIR.path().to_string_lossy().into_owned(),
-        momo_api: Arc::new(MomoApiService::new(
-            format!("http://{address}/v1"),
-            None,
-            reqwest::Client::new(),
-            Arc::new(config),
-        )),
+        runtime: test_runtime_arc(),
+        momo_api: Arc::new({
+            let runtime = test_runtime_arc();
+            runtime
+                .update_runtime_settings((*Arc::new(config)).clone())
+                .expect("runtime settings");
+            MomoApiService::new(
+                runtime,
+                format!("http://{address}/v1"),
+                None,
+                reqwest::Client::new(),
+            )
+        }),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
         metrics: Arc::new(Mutex::new(HashMap::new())),
@@ -1722,10 +1866,14 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
     let conversation_id = first["momo"]["conversation_id"]
         .as_str()
         .expect("conversation id");
-    let messages: Value = serde_json::from_str(
-        &simple::local_messages_json(TEST_SCOPE_ID.to_owned(), conversation_id.to_owned())
-            .await
-            .expect("stored messages"),
+    let messages: Value = serde_json::to_value(
+        runtime_api::local_messages(
+            test_runtime(),
+            TEST_SCOPE_ID.to_owned(),
+            conversation_id.to_owned(),
+        )
+        .await
+        .expect("stored messages"),
     )
     .expect("messages JSON");
     assert_eq!(messages.as_array().map(Vec::len), Some(2));
@@ -1734,9 +1882,10 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
 #[tokio::test]
 async fn multimodal_conversation_receives_original_image_and_roleplay_prompt() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
-    let character: Value = serde_json::from_str(
-        &simple::stage_character_json(
+    let _initialized_dir = initialize_test_core().await;
+    let character: Value = serde_json::to_value(
+        runtime_api::stage_character(
+            test_runtime(),
             TEST_SCOPE_ID.to_owned(),
             "multimodal-test".to_owned(),
             "Direct multimodal character".to_owned(),
@@ -1818,17 +1967,23 @@ async fn multimodal_conversation_receives_original_image_and_roleplay_prompt() {
             .expect("write chat response");
     });
 
-    let mut config = MomoConfig::default();
+    let mut config = MomoRuntimeSettings::default();
     config.vision.enabled = true;
-    config.vision.prompt = "FALLBACK_ONLY_PROMPT".to_owned();
-    let momo_api = Arc::new(MomoApiService::new(
-        format!("http://{address}/v1"),
-        None,
-        reqwest::Client::new(),
-        Arc::new(config),
-    ));
+    let runtime = test_runtime_arc();
+    let momo_api = Arc::new({
+        let runtime = Arc::clone(&runtime);
+        runtime
+            .update_runtime_settings((*Arc::new(config)).clone())
+            .expect("runtime settings");
+        MomoApiService::new(
+            runtime,
+            format!("http://{address}/v1"),
+            None,
+            reqwest::Client::new(),
+        )
+    });
     let app = build_app(AppState {
-        data_dir: initialized_dir,
+        runtime,
         momo_api,
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
@@ -1886,7 +2041,7 @@ async fn multimodal_conversation_receives_original_image_and_roleplay_prompt() {
 #[tokio::test]
 async fn successful_turns_drive_persistent_background_maintenance() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
+    let _initialized_dir = initialize_test_core().await;
     let scope_id = "00000000-0000-4000-8000-000000000077".to_owned();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1983,7 +2138,7 @@ async fn successful_turns_drive_persistent_background_maintenance() {
         assert_eq!(memory_generations, 2);
     });
     let state = AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
@@ -2061,10 +2216,15 @@ async fn successful_turns_drive_persistent_background_maintenance() {
         assert_eq!(body["completed"], true);
     }
     for kind in ["memory", "semantic_graph"] {
-        let pending: Value = serde_json::from_str(
-            &simple::pending_maintenance_turns_json(scope_id.clone(), kind.to_owned(), 10)
-                .await
-                .expect("pending turns"),
+        let pending: Value = serde_json::to_value(
+            runtime_api::pending_maintenance_turns(
+                test_runtime(),
+                scope_id.clone(),
+                kind.to_owned(),
+                10,
+            )
+            .await
+            .expect("pending turns"),
         )
         .expect("pending JSON");
         assert_eq!(pending, json!([]));
@@ -2077,7 +2237,8 @@ async fn hybrid_retrieval_keeps_room_for_a_complete_nsg_node() {
     initialize_test_core().await;
     let scope_id = uuid::Uuid::now_v7().to_string();
     let padding = "x".repeat(500);
-    simple::apply_memory_patch_json(
+    runtime_api::apply_memory_patch(
+        test_runtime(),
         scope_id.clone(),
         format!(
             r#"
@@ -2104,7 +2265,8 @@ patches:
     )
     .await
     .expect("create large DMW document");
-    simple::apply_nsg_patch_json(
+    runtime_api::apply_nsg_patch(
+        test_runtime(),
         scope_id.clone(),
         r#"
 patches:
@@ -2130,9 +2292,10 @@ patches:
     .await
     .expect("create NSG node");
 
-    let retrieved: Value = serde_json::from_str(
-        &simple::retrieve_scoped_memory_json(
-            json!({
+    let retrieved: Value = serde_json::to_value(
+        runtime_api::retrieve_scoped_memory(
+            test_runtime(),
+            serde_json::from_value(json!({
                 "spaces": [{
                     "space_id": scope_id,
                     "label": "test",
@@ -2142,8 +2305,8 @@ patches:
                 }],
                 "query": "Where should I look for Mara's silver astrolabe now?",
                 "max_tokens": 961
-            })
-            .to_string(),
+            }))
+            .expect("retrieval request"),
         )
         .await
         .expect("hybrid retrieval"),
@@ -2164,16 +2327,17 @@ patches:
 #[tokio::test]
 async fn maintenance_repairs_invalid_memory_patch_before_staging() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
+    let _initialized_dir = initialize_test_core().await;
     let scope_id = uuid::Uuid::now_v7().to_string();
-    simple::append_maintenance_turn_json(
-        json!({
+    runtime_api::append_maintenance_turn(
+        test_runtime(),
+        serde_json::from_value(json!({
             "request_id": uuid::Uuid::now_v7().to_string(),
             "scope_id": scope_id,
             "user_content": "Remember that I prefer tea.",
             "assistant_content": "Understood."
-        })
-        .to_string(),
+        }))
+        .expect("maintenance turn"),
         true,
         false,
     )
@@ -2250,7 +2414,7 @@ async fn maintenance_repairs_invalid_memory_patch_before_staging() {
         }
     });
     let state = AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
@@ -2265,8 +2429,8 @@ async fn maintenance_repairs_invalid_memory_patch_before_staging() {
     .await;
     assert!(result.is_ok(), "repair invalid maintenance patch");
     gateway.await.expect("mock gateway task");
-    let pending: Value = serde_json::from_str(
-        &simple::pending_maintenance_turns_json(scope_id, "memory".to_owned(), 10)
+    let pending: Value = serde_json::to_value(
+        runtime_api::pending_maintenance_turns(test_runtime(), scope_id, "memory".to_owned(), 10)
             .await
             .expect("pending turns"),
     )
@@ -2277,16 +2441,17 @@ async fn maintenance_repairs_invalid_memory_patch_before_staging() {
 #[tokio::test]
 async fn maintenance_repairs_invalid_semantic_graph_patch_before_staging() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
+    let _initialized_dir = initialize_test_core().await;
     let scope_id = uuid::Uuid::now_v7().to_string();
-    simple::append_maintenance_turn_json(
-        json!({
+    runtime_api::append_maintenance_turn(
+        test_runtime(),
+        serde_json::from_value(json!({
             "request_id": uuid::Uuid::now_v7().to_string(),
             "scope_id": scope_id,
             "user_content": "Black flame consumes the caster's vitality.",
             "assistant_content": "Understood."
-        })
-        .to_string(),
+        }))
+        .expect("maintenance turn"),
         false,
         true,
     )
@@ -2375,7 +2540,7 @@ async fn maintenance_repairs_invalid_semantic_graph_patch_before_staging() {
         }
     });
     let state = AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
@@ -2390,8 +2555,8 @@ async fn maintenance_repairs_invalid_semantic_graph_patch_before_staging() {
     .await;
     assert!(result.is_ok(), "repair invalid semantic-graph patch");
     gateway.await.expect("mock gateway task");
-    let nodes: Value = serde_json::from_str(
-        &simple::list_nsg_nodes_json(scope_id, false)
+    let nodes: Value = serde_json::to_value(
+        runtime_api::list_nsg_nodes(test_runtime(), scope_id, false)
             .await
             .expect("list semantic-graph nodes"),
     )
@@ -2403,16 +2568,17 @@ async fn maintenance_repairs_invalid_semantic_graph_patch_before_staging() {
 #[tokio::test]
 async fn maintenance_rechecks_an_empty_first_pass_before_acknowledging_turns() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
+    let _initialized_dir = initialize_test_core().await;
     let scope_id = uuid::Uuid::now_v7().to_string();
-    simple::append_maintenance_turn_json(
-        json!({
+    runtime_api::append_maintenance_turn(
+        test_runtime(),
+        serde_json::from_value(json!({
             "request_id": uuid::Uuid::now_v7().to_string(),
             "scope_id": scope_id,
             "user_content": "Remember that the meeting is at Glass-Archive-f41e9.",
             "assistant_content": "Understood."
-        })
-        .to_string(),
+        }))
+        .expect("maintenance turn"),
         true,
         false,
     )
@@ -2481,7 +2647,7 @@ async fn maintenance_rechecks_an_empty_first_pass_before_acknowledging_turns() {
         }
     });
     let state = AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
@@ -2496,10 +2662,15 @@ async fn maintenance_rechecks_an_empty_first_pass_before_acknowledging_turns() {
     .await;
     assert!(result.is_ok(), "retry empty memory patch");
     gateway.await.expect("mock gateway task");
-    let retrieved: Value = serde_json::from_str(
-        &simple::retrieve_memory_json(scope_id, "meeting".to_owned(), 4096)
-            .await
-            .expect("retrieve repaired memory"),
+    let retrieved: Value = serde_json::to_value(
+        runtime_api::retrieve_memory_items(
+            test_runtime(),
+            uuid::Uuid::parse_str(&scope_id).expect("Space UUID"),
+            "meeting".to_owned(),
+            4096,
+        )
+        .await
+        .expect("retrieve repaired memory"),
     )
     .expect("retrieval JSON");
     assert!(
@@ -2512,16 +2683,17 @@ async fn maintenance_rechecks_an_empty_first_pass_before_acknowledging_turns() {
 #[tokio::test]
 async fn maintenance_retries_a_length_truncated_patch_before_staging() {
     let _test_guard = TEST_LOCK.lock().await;
-    let initialized_dir = initialize_test_core().await;
+    let _initialized_dir = initialize_test_core().await;
     let scope_id = uuid::Uuid::now_v7().to_string();
-    simple::append_maintenance_turn_json(
-        json!({
+    runtime_api::append_maintenance_turn(
+        test_runtime(),
+        serde_json::from_value(json!({
             "request_id": uuid::Uuid::now_v7().to_string(),
             "scope_id": scope_id,
             "user_content": "Remember that the meeting is at Glass-Archive-f41e9.",
             "assistant_content": "Understood."
-        })
-        .to_string(),
+        }))
+        .expect("maintenance turn"),
         true,
         false,
     )
@@ -2592,7 +2764,7 @@ async fn maintenance_retries_a_length_truncated_patch_before_staging() {
         }
     });
     let state = AppState {
-        data_dir: initialized_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
@@ -2607,10 +2779,15 @@ async fn maintenance_retries_a_length_truncated_patch_before_staging() {
     .await;
     assert!(result.is_ok(), "retry truncated memory patch");
     gateway.await.expect("mock gateway task");
-    let retrieved: Value = serde_json::from_str(
-        &simple::retrieve_memory_json(scope_id, "meeting".to_owned(), 4096)
-            .await
-            .expect("retrieve repaired memory"),
+    let retrieved: Value = serde_json::to_value(
+        runtime_api::retrieve_memory_items(
+            test_runtime(),
+            uuid::Uuid::parse_str(&scope_id).expect("Space UUID"),
+            "meeting".to_owned(),
+            4096,
+        )
+        .await
+        .expect("retrieve repaired memory"),
     )
     .expect("retrieval JSON");
     assert!(
@@ -2623,21 +2800,22 @@ async fn maintenance_retries_a_length_truncated_patch_before_staging() {
 #[tokio::test]
 async fn maintenance_barrier_reports_upstream_failure_and_keeps_pending_work() {
     let _test_guard = TEST_LOCK.lock().await;
-    let data_dir = initialize_test_core().await;
+    let _data_dir = initialize_test_core().await;
     let space_id = uuid::Uuid::now_v7().to_string();
-    simple::append_maintenance_turn_json(
-        json!({
+    runtime_api::append_maintenance_turn(
+        test_runtime(),
+        serde_json::from_value(json!({
             "request_id": uuid::Uuid::now_v7().to_string(), "scope_id": space_id,
             "user_content": "Remember this event", "assistant_content": "Acknowledged",
-        })
-        .to_string(),
+        }))
+        .expect("maintenance turn"),
         true,
         true,
     )
     .await
     .expect("pending turn");
     let state = AppState {
-        data_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(2),
@@ -2658,28 +2836,27 @@ async fn maintenance_barrier_reports_upstream_failure_and_keeps_pending_work() {
         error.status,
         StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT
     ));
-    let pending: Vec<Value> = serde_json::from_str(
-        &simple::pending_maintenance_turns_json(space_id, "memory".to_owned(), 32)
+    let pending =
+        runtime_api::pending_maintenance_turns(test_runtime(), space_id, "memory".to_owned(), 32)
             .await
-            .expect("pending query"),
-    )
-    .expect("pending JSON");
+            .expect("pending query");
     assert_eq!(pending.len(), 1);
 }
 
 #[tokio::test]
 async fn maintenance_barrier_keeps_memory_progress_when_nsg_fails() {
     let _test_guard = TEST_LOCK.lock().await;
-    let data_dir = initialize_test_core().await;
+    let _data_dir = initialize_test_core().await;
     let space_id = uuid::Uuid::now_v7().to_string();
-    simple::append_maintenance_turn_json(
-        json!({
+    runtime_api::append_maintenance_turn(
+        test_runtime(),
+        serde_json::from_value(json!({
             "request_id": uuid::Uuid::now_v7().to_string(),
             "scope_id": space_id,
             "user_content": "Remember this event",
             "assistant_content": "Acknowledged",
-        })
-        .to_string(),
+        }))
+        .expect("maintenance turn"),
         true,
         true,
     )
@@ -2742,7 +2919,7 @@ async fn maintenance_barrier_keeps_memory_progress_when_nsg_fails() {
         }
     });
     let state = AppState {
-        data_dir,
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
         response_timeout: std::time::Duration::from_secs(120),
@@ -2762,18 +2939,22 @@ async fn maintenance_barrier_keeps_memory_progress_when_nsg_fails() {
     assert_eq!(error.status, StatusCode::BAD_GATEWAY);
     gateway.await.expect("mock gateway task");
 
-    let memory_pending: Vec<Value> = serde_json::from_str(
-        &simple::pending_maintenance_turns_json(space_id.clone(), "memory".to_owned(), 32)
-            .await
-            .expect("pending memory query"),
+    let memory_pending = runtime_api::pending_maintenance_turns(
+        test_runtime(),
+        space_id.clone(),
+        "memory".to_owned(),
+        32,
     )
-    .expect("pending memory JSON");
-    let nsg_pending: Vec<Value> = serde_json::from_str(
-        &simple::pending_maintenance_turns_json(space_id, "semantic_graph".to_owned(), 32)
-            .await
-            .expect("pending NSG query"),
+    .await
+    .expect("pending memory query");
+    let nsg_pending = runtime_api::pending_maintenance_turns(
+        test_runtime(),
+        space_id,
+        "semantic_graph".to_owned(),
+        32,
     )
-    .expect("pending NSG JSON");
+    .await
+    .expect("pending NSG query");
     assert!(memory_pending.is_empty());
     assert_eq!(nsg_pending.len(), 1);
 }
@@ -2783,8 +2964,9 @@ async fn structured_controls_switch_clear_and_delete_without_a_model() {
     let _test_guard = TEST_LOCK.lock().await;
     let initialized_dir = initialize_test_core().await;
     let test_space_id = uuid::Uuid::now_v7().to_string();
-    let first: Value = serde_json::from_str(
-        &simple::stage_character_json(
+    let first: Value = serde_json::to_value(
+        runtime_api::stage_character(
+            test_runtime(),
             test_space_id.clone(),
             "control".to_owned(),
             "First".to_owned(),
@@ -2795,8 +2977,9 @@ async fn structured_controls_switch_clear_and_delete_without_a_model() {
         .expect("first character"),
     )
     .expect("first character JSON");
-    let second: Value = serde_json::from_str(
-        &simple::stage_character_json(
+    let second: Value = serde_json::to_value(
+        runtime_api::stage_character(
+            test_runtime(),
             test_space_id.clone(),
             "control".to_owned(),
             "Second".to_owned(),
@@ -2807,8 +2990,9 @@ async fn structured_controls_switch_clear_and_delete_without_a_model() {
         .expect("second character"),
     )
     .expect("second character JSON");
-    let conversation: Value = serde_json::from_str(
-        &simple::stage_conversation_json(
+    let conversation: Value = serde_json::to_value(
+        runtime_api::stage_conversation(
+            test_runtime(),
             None,
             test_space_id.clone(),
             "controlled".to_owned(),
@@ -2820,7 +3004,7 @@ async fn structured_controls_switch_clear_and_delete_without_a_model() {
     .expect("conversation JSON");
     let conversation_id = conversation["id"].as_str().expect("conversation id");
     let state = AppState {
-        data_dir: initialized_dir.clone(),
+        runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1".to_owned()),
         response_concurrency: Arc::new(Semaphore::new(1)),
         response_timeout: std::time::Duration::from_secs(1),
@@ -2958,8 +3142,8 @@ async fn structured_controls_switch_clear_and_delete_without_a_model() {
         .await
         .expect("switch conflict");
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
-    let conversations: Value = serde_json::from_str(
-        &simple::local_conversations_json(test_space_id.clone())
+    let conversations: Value = serde_json::to_value(
+        runtime_api::local_conversations(test_runtime(), test_space_id.clone())
             .await
             .expect("conversations"),
     )
@@ -3023,8 +3207,8 @@ async fn structured_controls_switch_clear_and_delete_without_a_model() {
         .await
         .expect("delete response");
     assert_eq!(response.status(), StatusCode::OK);
-    let conversations: Value = serde_json::from_str(
-        &simple::local_conversations_json(test_space_id)
+    let conversations: Value = serde_json::to_value(
+        runtime_api::local_conversations(test_runtime(), test_space_id)
             .await
             .expect("conversations after delete"),
     )

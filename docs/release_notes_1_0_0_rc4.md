@@ -55,10 +55,11 @@ changes still validate or rebuild indexes by design.
 
 ## Verification
 
-The candidate passed the repository's full local validation surface on
+The tagged candidate passed the repository's full local validation surface on
 2026-09-21: 273 Rust tests, 102 Python tests, and 21/21 offline runtime contract
-probes. Publication still requires the complete Linux, Windows, and security
-GitHub CI matrix to pass:
+probes. It was subsequently merged and published as `v1.0.0-rc.4`. Any
+post-tag stabilization change must pass the complete Linux, Windows, and
+security GitHub CI matrix again before another release:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`

@@ -211,6 +211,19 @@ pub struct MaintenanceBatch {
     pub patch_yaml: String,
 }
 
+/// Durable maintenance operation. A prepared file plan survives changes to batching policy.
+#[derive(Debug, Clone)]
+pub struct PendingMaintenanceBatch {
+    pub batch: MaintenanceBatch,
+    pub prepared_commit_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingMemoryPatchReview {
+    pub review: MemoryPatchReview,
+    pub prepared_commit_json: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceKind {
     Memory,

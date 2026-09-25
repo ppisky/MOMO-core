@@ -56,6 +56,8 @@ E_i(t) = sigmoid(logit(B_i) + delta_context_i(t) + delta_state_i(t))
 实现证据与剩余限制单独记录在
 [DDM 实现状态](ddm_implementation_status.zh-CN.md)。
 
-rc.3 只在 `momo.toml` 保留全局启用开关。角色 profile 由管理 API 维护，并随角色在
-MOC 的 `extensions/momo-ddm/profile.yaml` 固定路径传输；它不进入 Character Card v2
-核心元数据，也不新增 DDM Space。实现符合性不改变规范的实验状态。
+全局启用开关位于 `PUT /v1/runtime-settings` 的 `mo_state.ddm.enabled`。若 mobot
+继续向用户提供 `momo.toml`，由 mobot 将该值翻译成上述 JSON 请求；MOMO 本身不读取
+配置文件。角色 profile 由管理 API 维护，并随角色在 MOC 的
+`extensions/momo-ddm/profile.yaml` 固定路径传输；它不进入 Character Card v2 核心
+元数据，也不新增 DDM Space。实现符合性不改变规范的实验状态。

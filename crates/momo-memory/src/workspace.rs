@@ -1004,7 +1004,7 @@ impl MemoryWorkspace {
         commit_mutations_with(&mutations, writer)
     }
 
-    fn prepare_patch(&self, yaml: &str) -> Result<Vec<FileMutation>, MemoryError> {
+    pub(crate) fn prepare_patch(&self, yaml: &str) -> Result<Vec<FileMutation>, MemoryError> {
         let access = self.load_access()?;
         let patch = parse_patch_document(yaml)?;
         if patch.patches.is_empty() {
@@ -1154,7 +1154,7 @@ impl MemoryWorkspace {
         Ok(())
     }
 
-    fn resolve(&self, relative: &Path) -> Result<PathBuf, MemoryError> {
+    pub(crate) fn resolve(&self, relative: &Path) -> Result<PathBuf, MemoryError> {
         validate_relative(relative)?;
         let mut resolved = self.root.clone();
         let component_count = relative.components().count();

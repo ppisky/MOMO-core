@@ -3,13 +3,18 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{MomoApiError, MomoApiService, MomoResponseEventSink};
-use crate::{EmbeddingNormalization, EmbeddingProfile, ResponseUsage, api::simple};
+use crate::{
+    ChatParameters, ChatStreamDelta, EmbeddingEndpoint, EmbeddingInput, EmbeddingNormalization,
+    EmbeddingProfile, EmbeddingProvider, EmbeddingPurpose, GatewayError, GatewayMessage,
+    OpenAiEmbeddingProvider, OpenAiGateway, ProviderEndpoint, ResponseUsage,
+};
 
 pub(super) struct GatewayGenerationCapability {
     pub(super) context_window: usize,
@@ -22,9 +27,9 @@ pub(super) struct GatewayResponseAttempt<'a> {
     pub(super) operation_key: &'a str,
     pub(super) personal_space_id: &'a str,
     pub(super) model: &'a str,
-    pub(super) messages: Vec<Value>,
+    pub(super) messages: Vec<GatewayMessage>,
     pub(super) temperature: Option<f32>,
-    pub(super) request_parameters: Value,
+    pub(super) request_parameters: serde_json::Map<String, Value>,
     pub(super) stream: Option<&'a dyn MomoResponseEventSink>,
 }
 
@@ -47,7 +52,7 @@ impl MomoApiService {
     pub(super) async fn generate_response_completion(
         &self,
         attempt: GatewayResponseAttempt<'_>,
-    ) -> Result<Value, MomoApiError> {
+    ) -> Result<crate::ChatCompletion, MomoApiError> {
         let GatewayResponseAttempt {
             request_id,
             operation_key,
@@ -58,20 +63,36 @@ impl MomoApiService {
             request_parameters,
             stream,
         } = attempt;
-        let gateway_request = json!({
-            "base_url": self.gateway_origin,
-            "api_key": self.gateway_api_key,
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "request_parameters": request_parameters,
-        });
+        if temperature.is_some_and(|value| !(0.0..=2.0).contains(&value)) {
+            return Err(MomoApiError::bad_request(
+                "temperature must be between 0 and 2",
+            ));
+        }
+        if request_parameters.contains_key("messages") || request_parameters.contains_key("stream")
+        {
+            return Err(MomoApiError::bad_request(
+                "messages and stream are managed by MOMO",
+            ));
+        }
+        let endpoint = ProviderEndpoint {
+            base_url: self.gateway_origin.clone(),
+            api_key: self.gateway_api_key.clone(),
+            model: model.to_owned(),
+        };
+        let parameters = ChatParameters {
+            temperature,
+            request_parameters,
+        };
 
-        let generation_gate = self.generation_gate(personal_space_id, "foreground").await;
+        let generation_gate = self
+            .coordination
+            .generation_gate(personal_space_id, "foreground")
+            .await;
         let generation_permit = generation_gate
             .acquire_owned()
             .await
             .map_err(|_| MomoApiError::internal("generation gate closed"))?;
+        self.coordination.ensure_active(operation_key)?;
         let completion = if let Some(stream) = stream {
             let message_item_id = format!("msg_{request_id}");
             stream.send(json!({
@@ -94,31 +115,42 @@ impl MomoApiService {
                 usize,
                 (String, String, bool),
             >::new()));
-            let sink = |event_json: String| {
-                forward_stream_event(
-                    stream,
-                    request_id,
-                    &message_item_id,
-                    &streamed_tools,
-                    &event_json,
-                )
-            };
-            let mut stream_request = gateway_request.clone();
-            stream_request
-                .as_object_mut()
-                .expect("gateway request is an object")
-                .insert("request_id".to_owned(), json!(operation_key));
-            simple::chat_stream_json(stream_request.to_string(), sink)
-                .await
-                .map_err(MomoApiError::model)?
+            let result = stream_gateway_completion(
+                self.runtime(),
+                operation_key,
+                &endpoint,
+                &messages,
+                parameters,
+                |event| {
+                    forward_stream_delta(
+                        stream,
+                        request_id,
+                        &message_item_id,
+                        &streamed_tools,
+                        event,
+                    )
+                    .is_ok()
+                },
+            )
+            .await;
+            match result {
+                Ok(completion) => completion,
+                Err(GatewayError::Cancelled) => return Err(MomoApiError::cancelled()),
+                Err(error) => return Err(MomoApiError::model(error)),
+            }
         } else {
-            simple::chat_complete_json(gateway_request.to_string())
-                .await
-                .map_err(MomoApiError::model)?
+            let registration = self
+                .runtime()
+                .register_cancellation(operation_key.to_owned());
+            self.coordination.ensure_active(operation_key)?;
+            let gateway = OpenAiGateway::default();
+            tokio::select! {
+                result = gateway.complete_messages(&endpoint, &messages, parameters) => result.map_err(MomoApiError::model)?,
+                () = registration.notified() => return Err(MomoApiError::cancelled()),
+            }
         };
         drop(generation_permit);
-        serde_json::from_str(&completion)
-            .map_err(|error| MomoApiError::model(format!("model returned invalid JSON: {error}")))
+        Ok(completion)
     }
 
     pub(super) async fn gateway_response_budget(
@@ -208,68 +240,91 @@ impl MomoApiService {
             query_prefix: metadata.query_prefix,
             document_prefix: metadata.document_prefix,
         };
-        let result = simple::generate_embeddings_json(json!({
-            "embedding": {"endpoint": {"base_url": self.gateway_origin, "api_key": self.gateway_api_key}, "profile": profile, "timeout_seconds": 120},
-            "inputs": [{"id": "query", "text": input, "purpose": "query"}],
-        }).to_string()).await?;
-        let batch: Value = serde_json::from_str(&result).map_err(|error| error.to_string())?;
-        let vector_space_id = batch
-            .get("vector_space_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "embedding response lacks vector_space_id".to_owned())?
-            .to_owned();
+        profile.validate().map_err(|error| error.to_string())?;
+        let provider = OpenAiEmbeddingProvider::new(
+            EmbeddingEndpoint {
+                base_url: self.gateway_origin.clone(),
+                api_key: self.gateway_api_key.clone(),
+            },
+            Duration::from_secs(120),
+        )
+        .map_err(|error| error.to_string())?;
+        let batch = provider
+            .embed_batch(
+                &profile,
+                &[EmbeddingInput {
+                    id: "query".to_owned(),
+                    text: input.to_owned(),
+                    purpose: EmbeddingPurpose::Query,
+                }],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         let vector = batch
-            .pointer("/vectors/0/vector")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "embedding response lacks vectors[0].vector".to_owned())?
-            .iter()
-            .map(|value| {
-                value
-                    .as_f64()
-                    .ok_or_else(|| "embedding vector contains a non-number".to_owned())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((vector_space_id, vector))
+            .vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| "embedding provider returned no query vector".to_owned())?;
+        Ok((batch.vector_space_id, vector.vector))
     }
 }
 
-fn forward_stream_event(
+async fn stream_gateway_completion<F>(
+    runtime: &crate::MomoRuntime,
+    operation_key: &str,
+    endpoint: &ProviderEndpoint,
+    messages: &[GatewayMessage],
+    parameters: ChatParameters,
+    on_delta: F,
+) -> Result<crate::ChatCompletion, GatewayError>
+where
+    F: FnMut(ChatStreamDelta) -> bool,
+{
+    let cancelled = runtime.register_cancellation(operation_key.to_owned());
+    runtime
+        .response_coordination()
+        .ensure_active(operation_key)
+        .map_err(|_| GatewayError::Cancelled)?;
+    let gateway = OpenAiGateway::default();
+    let stream_request = gateway.stream_messages(endpoint, messages, parameters, on_delta);
+    tokio::pin!(stream_request);
+    let cancellation = cancelled.notified();
+    tokio::pin!(cancellation);
+    let result = tokio::select! {
+        result = &mut stream_request => result,
+        () = &mut cancellation => Err(GatewayError::Cancelled),
+    };
+    result
+}
+
+fn forward_stream_delta(
     stream: &dyn MomoResponseEventSink,
     request_id: &str,
     message_item_id: &str,
     streamed_tools: &Mutex<HashMap<usize, (String, String, bool)>>,
-    event_json: &str,
+    event: ChatStreamDelta,
 ) -> Result<(), String> {
-    let event: Value = serde_json::from_str(event_json).map_err(|error| error.to_string())?;
-    if event.get("type").and_then(Value::as_str) != Some("delta") {
-        return Ok(());
-    }
-    let delta = event
-        .get("delta")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !delta.is_empty() {
+    if !event.delta.is_empty() {
         stream.send(json!({
             "type": "response.output_text.delta", "request_id": request_id,
-            "item_id": message_item_id, "output_index": 0, "content_index": 0, "delta": delta,
+            "item_id": message_item_id, "output_index": 0, "content_index": 0, "delta": event.delta,
         }))?;
     }
     let mut tools = streamed_tools.lock().map_err(|error| error.to_string())?;
-    for call in event
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    for call in event.tool_calls {
+        let index = call.index;
         let tool = tools
             .entry(index)
             .or_insert_with(|| (String::new(), String::new(), false));
-        if let Some(id) = call.get("id").and_then(Value::as_str) {
-            tool.0 = id.to_owned();
+        if let Some(id) = call.id {
+            tool.0 = id;
         }
-        if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
-            tool.1 = name.to_owned();
+        if let Some(name) = call
+            .function
+            .as_ref()
+            .and_then(|function| function.name.as_ref())
+        {
+            tool.1.clone_from(name);
         }
         if !tool.2 && !tool.0.is_empty() && !tool.1.is_empty() {
             stream.send(json!({
@@ -280,8 +335,8 @@ fn forward_stream_event(
             tool.2 = true;
         }
         if let Some(arguments) = call
-            .pointer("/function/arguments")
-            .and_then(Value::as_str)
+            .function
+            .and_then(|function| function.arguments)
             .filter(|value| !value.is_empty())
         {
             stream.send(json!({
@@ -323,22 +378,15 @@ pub(super) fn tool_choice_to_chat(choice: &Value) -> Result<Value, MomoApiError>
     Ok(json!({"type": "function", "function": {"name": name}}))
 }
 
-pub(super) fn response_usage(completion: &Value) -> ResponseUsage {
-    let input_tokens = completion
-        .pointer("/usage/input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let output_tokens = completion
-        .pointer("/usage/output_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let total_tokens = completion
-        .pointer("/usage/total_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
+pub(super) fn response_usage(completion: &crate::ChatCompletion) -> ResponseUsage {
+    let usage = completion.usage.clone().unwrap_or_default();
     ResponseUsage {
-        input_tokens,
-        output_tokens,
-        total_tokens,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/api_simple_chat.rs"]
+mod tests;

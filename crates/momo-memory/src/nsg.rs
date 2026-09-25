@@ -425,6 +425,14 @@ impl NsgWorkspace {
         commit_mutations(&mutations)
     }
 
+    /// Freezes the exact validated automatic patch for a durable maintenance journal.
+    pub fn prepare_patch_commit(
+        &self,
+        yaml: &str,
+    ) -> Result<crate::PreparedMemoryCommit, MemoryError> {
+        crate::PreparedMemoryCommit::prepare(&self.root, &self.prepare_patch(yaml, false)?)
+    }
+
     pub fn apply_patch_authorized(&self, yaml: &str) -> Result<(), MemoryError> {
         let mutations = self.prepare_patch(yaml, true)?;
         commit_mutations(&mutations)

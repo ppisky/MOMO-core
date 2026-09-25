@@ -3,18 +3,18 @@
 use serde_json::{Value, json};
 
 use super::{MomoApiError, MomoApiService, ResolvedResponseInput};
-use crate::{MoStateInjectionMode, MoStateProfile, MomoConfig, MomoResponseRequest, api::simple};
+use crate::{MoStateInjectionMode, MoStateProfile, MomoResponseRequest, MomoRuntimeSettings};
 
 /// Immutable evidence required to produce one governed state projection.
 pub(super) struct StateRequest<'a> {
     pub(super) request: &'a MomoResponseRequest,
-    pub(super) config: &'a MomoConfig,
+    pub(super) config: &'a MomoRuntimeSettings,
     pub(super) operation_key: &'a str,
     pub(super) request_fingerprint: &'a str,
     pub(super) managed_space_id: &'a str,
     pub(super) conversation_id: &'a str,
     pub(super) character_id: &'a str,
-    pub(super) source_observations: &'a Value,
+    pub(super) source_observations: &'a [momo_storage::MoStateSourceObservation],
     pub(super) memory: &'a [Value],
     pub(super) nsg: &'a [Value],
     pub(super) state_input_audit: Value,
@@ -55,7 +55,15 @@ impl MomoApiService {
         let autonomous =
             request.momo.mo_state && config.mo_state.profile == MoStateProfile::ClosedAutonomous;
         let guard = if autonomous {
-            Some(simple::lock_mo_state_space(managed_space_id).await)
+            Some(
+                self.runtime()
+                    .lock_space(
+                        uuid::Uuid::parse_str(managed_space_id)
+                            .map_err(MomoApiError::bad_request)?,
+                    )
+                    .await
+                    .map_err(MomoApiError::internal)?,
+            )
         } else {
             None
         };
@@ -63,24 +71,38 @@ impl MomoApiService {
         let mut operation = None;
         let mut result = if request.momo.mo_state {
             let persisted_snapshot = if autonomous {
-                match simple::observe_mo_state_runtime_json(
-                    operation_key.to_owned(),
-                    managed_space_id.to_owned(),
-                    source_observations.to_string(),
-                    if request.input.has_function_outputs() {
-                        "tool_result".to_owned()
-                    } else {
-                        "user_message".to_owned()
-                    },
-                    request_fingerprint.to_owned(),
-                    config.mo_state.profile.as_str().to_owned(),
-                )
-                .await
-                {
-                    Ok(operation_json) => {
-                        let observed: momo_storage::MoStateOperation =
-                            serde_json::from_str(&operation_json)
-                                .map_err(|error| MomoApiError::internal(error.to_string()))?;
+                let mut observed_sources = source_observations.to_vec();
+                let managed_source = observed_sources
+                    .iter()
+                    .position(|source| source.space_id == managed_space_id)
+                    .map(|index| observed_sources.remove(index));
+                let observed = if let Some(source) = managed_source {
+                    self.runtime()
+                        .core()
+                        .store()
+                        .observe_mo_state_operation(&momo_storage::MoStateObservation {
+                            operation_id: operation_key.to_owned(),
+                            space_id: managed_space_id.to_owned(),
+                            event_type: if request.input.has_function_outputs() {
+                                "tool_result".to_owned()
+                            } else {
+                                "user_message".to_owned()
+                            },
+                            event_fingerprint: request_fingerprint.to_owned(),
+                            profile: config.mo_state.profile.as_str().to_owned(),
+                            dmw_fingerprint: source.dmw_fingerprint,
+                            nsg_fingerprint: source.nsg_fingerprint,
+                            scene_fingerprint: source.scene_fingerprint,
+                            scene_json: source.scene_json,
+                            source_observations: observed_sources,
+                        })
+                        .await
+                        .map_err(|error| error.to_string())
+                } else {
+                    Err("managed Space source was not observed".to_owned())
+                };
+                match observed {
+                    Ok(observed) => {
                         operation_id = Some(observed.operation_id.clone());
                         let snapshot_json = observed.snapshot_json.clone();
                         operation = Some(observed);
@@ -99,32 +121,36 @@ impl MomoApiService {
                     .map_err(|error| MomoApiError::internal(error.to_string()))?;
                 state_result_from_snapshot(&snapshot)
             } else {
-                let ddm_profile_json = if config.mo_state.ddm.enabled {
-                    simple::character_ddm_profile_json(character_id.to_owned())
+                let ddm_profile = if config.mo_state.ddm.enabled {
+                    let character_uuid =
+                        uuid::Uuid::parse_str(character_id).map_err(MomoApiError::internal)?;
+                    self.runtime()
+                        .core()
+                        .store()
+                        .portable_metadata("character_ddm_profile", &character_uuid.to_string())
                         .await
+                        .map_err(MomoApiError::internal)?
+                        .map(|yaml| momo_memory::DdmProfile::parse_yaml(&yaml))
+                        .transpose()
                         .map_err(MomoApiError::internal)?
                 } else {
                     None
                 };
-                let previous_ddm_state = if autonomous && ddm_profile_json.is_some() {
-                    simple::ddm_projection_state_json(
-                        managed_space_id.to_owned(),
-                        conversation_id.to_owned(),
-                        character_id.to_owned(),
-                    )
-                    .await
-                    .map_err(MomoApiError::internal)?
-                    .map(|state| serde_json::from_str::<Value>(&state))
-                    .transpose()
-                    .map_err(|error| MomoApiError::internal(error.to_string()))?
+                let previous_ddm_state = if autonomous && ddm_profile.is_some() {
+                    self.runtime()
+                        .core()
+                        .store()
+                        .ddm_projection_state(managed_space_id, conversation_id, character_id)
+                        .await
+                        .map_err(MomoApiError::internal)?
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .map_err(MomoApiError::internal)?
                 } else {
                     None
                 };
-                let profile_identity = ddm_profile_json
-                    .as_deref()
-                    .map(serde_json::from_str::<momo_memory::DdmProfile>)
-                    .transpose()
-                    .map_err(|error| MomoApiError::internal(error.to_string()))?
+                let profile_identity = ddm_profile
+                    .as_ref()
                     .map(|profile| (profile.revision, profile.profile_fingerprint()));
                 let previous_bands =
                     compatible_ddm_bands(previous_ddm_state.as_ref(), profile_identity.as_ref());
@@ -132,45 +158,53 @@ impl MomoApiService {
                     .as_ref()
                     .map(|operation| operation.observed_scene.clone())
                     .or_else(|| {
-                        source_observations.as_array().and_then(|sources| {
-                            sources.iter().find_map(|source| {
-                                (source["space_id"].as_str() == Some(managed_space_id))
-                                    .then(|| source["scene_json"].as_str())
-                                    .flatten()
-                                    .and_then(|scene| serde_json::from_str::<Value>(scene).ok())
-                            })
+                        source_observations.iter().find_map(|source| {
+                            (source.space_id == managed_space_id)
+                                .then(|| serde_json::from_str::<Value>(&source.scene_json).ok())
+                                .flatten()
                         })
                     });
-                let ddm_runtime_json = ddm_profile_json.as_ref().map(|_| {
-                    json!({
-                        "previous_bands": previous_bands,
-                        "scene": observed_scene,
-                        "request_event_type": if request.input.has_function_outputs() {
-                            "tool_result"
-                        } else {
-                            "user_message"
-                        },
-                        "request_has_image": resolved_input.visual_input_count > 0,
-                        "request_evidence_id": operation_key,
+                let ddm_runtime = ddm_profile
+                    .as_ref()
+                    .map(|_| {
+                        serde_json::from_value(json!({
+                            "previous_bands": previous_bands,
+                            "scene": observed_scene,
+                            "request_event_type": if request.input.has_function_outputs() {
+                                "tool_result"
+                            } else {
+                                "user_message"
+                            },
+                            "request_has_image": resolved_input.visual_input_count > 0,
+                            "request_evidence_id": operation_key,
+                        }))
                     })
-                    .to_string()
-                });
+                    .transpose()
+                    .map_err(MomoApiError::internal)?;
+                let parsed_scope_id =
+                    uuid::Uuid::parse_str(managed_space_id).map_err(MomoApiError::internal)?;
+                let retrieved_memory = serde_json::from_value::<Vec<momo_memory::RetrievedMemory>>(
+                    Value::Array(memory.to_vec()),
+                )
+                .map_err(MomoApiError::internal)?;
+                let retrieved_nsg = serde_json::from_value::<Vec<momo_memory::nsg::RetrievedNsg>>(
+                    Value::Array(nsg.to_vec()),
+                )
+                .map_err(MomoApiError::internal)?;
                 let (compiled, degraded, compile_error) =
-                    match simple::compile_mo_state_with_ddm_json(
-                        managed_space_id.to_owned(),
-                        serde_json::to_string(memory)
-                            .map_err(|error| MomoApiError::internal(error.to_string()))?,
-                        serde_json::to_string(nsg)
-                            .map_err(|error| MomoApiError::internal(error.to_string()))?,
+                    match crate::api::runtime_api::compile_mo_state_with_ddm(
+                        self.runtime(),
+                        parsed_scope_id,
+                        retrieved_memory,
+                        retrieved_nsg,
                         context_window,
-                        ddm_profile_json,
-                        ddm_runtime_json,
+                        ddm_profile,
+                        ddm_runtime,
                     )
                     .await
                     {
                         Ok(value) => (
-                            serde_json::from_str::<Value>(&value)
-                                .map_err(|error| MomoApiError::internal(error.to_string()))?,
+                            serde_json::to_value(value).map_err(MomoApiError::internal)?,
                             false,
                             None,
                         ),
@@ -179,16 +213,16 @@ impl MomoApiService {
                             (
                                 json!({"context": "", "audit": {"degraded": true}}),
                                 true,
-                                Some(error),
+                                Some(error.to_string()),
                             )
                         }
                     };
                 if let Some(state_operation_id) = operation_id.as_ref() {
-                    let ddm_update_json = compiled
+                    let ddm_update = compiled
                         .get("audit")
                         .and_then(|audit| audit.get("ddm"))
                         .map(|ddm| {
-                            json!({
+                            serde_json::from_value::<momo_storage::DdmProjectionUpdate>(json!({
                                 "managed_space_id": managed_space_id,
                                 "conversation_id": conversation_id,
                                 "character_id": character_id,
@@ -196,31 +230,35 @@ impl MomoApiService {
                                 "profile_fingerprint": ddm["profile_fingerprint"],
                                 "source_fingerprint": ddm["source_fingerprint"],
                                 "bands": ddm["next_bands"],
-                            })
-                            .to_string()
-                        });
-                    match simple::publish_mo_state_snapshot_json(
-                        state_operation_id.clone(),
-                        serde_json::to_string(&compiled)
-                            .map_err(|error| MomoApiError::internal(error.to_string()))?,
-                        degraded,
-                        compile_error.clone(),
-                        ddm_update_json,
-                    )
-                    .await
+                            }))
+                        })
+                        .transpose()
+                        .map_err(MomoApiError::internal)?;
+                    let compiled_json =
+                        serde_json::to_string(&compiled).map_err(MomoApiError::internal)?;
+                    match self
+                        .runtime()
+                        .core()
+                        .store()
+                        .publish_mo_state_snapshot(
+                            state_operation_id,
+                            &compiled_json,
+                            degraded,
+                            compile_error.as_deref(),
+                            ddm_update.as_ref(),
+                        )
+                        .await
                     {
-                        Ok(snapshot_json) => {
-                            let snapshot: momo_storage::MoStateSnapshot =
-                                serde_json::from_str(&snapshot_json)
-                                    .map_err(|error| MomoApiError::internal(error.to_string()))?;
-                            state_result_from_snapshot(&snapshot)
-                        }
+                        Ok(snapshot) => state_result_from_snapshot(&snapshot),
                         Err(error) => {
                             warnings
                                 .push(format!("MO State snapshot persistence degraded: {error}"));
-                            let _ =
-                                simple::fail_mo_state_operation(state_operation_id.clone(), error)
-                                    .await;
+                            let _ = self
+                                .runtime()
+                                .core()
+                                .store()
+                                .fail_mo_state_operation(state_operation_id, &error.to_string())
+                                .await;
                             operation_id = None;
                             compiled
                         }

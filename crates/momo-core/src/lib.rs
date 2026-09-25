@@ -12,7 +12,10 @@ mod lsb;
 mod orchestration;
 mod portable;
 mod product_prompts;
+mod prompt_spaces;
+mod recovery;
 mod response;
+mod runtime;
 mod vision;
 
 use std::{
@@ -20,7 +23,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
 };
 
 use fs2::FileExt;
@@ -56,10 +59,10 @@ pub use gateway::{
     GatewayMessageRole, OpenAiGateway, ProviderEndpoint, SseDecoder,
 };
 pub use governance::{
-    DdmRuntimeConfig, GovernanceError, GovernedOverrides, MOMO_CONFIG_SCHEMA_VERSION,
-    MoStateInjectionMode, MoStateProfile, MoStateRuntimeConfig, MomoConfig, MomoRuntimeConfig,
-    OverrideMode, RequestOverridePolicy, RequestedOverrides, RoleplayRuntimeConfig,
-    VisionDescriptionConfig, validate_momo_document,
+    DdmRuntimeConfig, GovernanceError, GovernedOverrides, MaintenanceRuntimeSettings,
+    MoStateInjectionMode, MoStateProfile, MoStateRuntimeConfig, MomoRuntimeSettings, OverrideMode,
+    RUNTIME_SETTINGS_SCHEMA_VERSION, RequestOverridePolicy, RequestedOverrides,
+    RoleplayRuntimeConfig, VisionDescriptionConfig,
 };
 pub use lsb::{
     LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,
@@ -82,10 +85,13 @@ pub use orchestration::{
 pub use portable::{
     ConflictMode, HostMocModule, ImportReport, MocCharacterSelection, MocCompatibility,
     MocExportPlan, MocImportPlan, MocModule, MocProtection, PortableError, UnknownMocModule,
-    export_moc, export_moc_with_host_modules, export_momo_config, export_private_moc,
+    export_moc, export_moc_with_host_modules, export_private_moc,
     export_private_moc_with_host_modules, import_moc, import_moc_claiming_unknown_modules,
-    import_moc_with_passphrase, import_moc_with_passphrase_and_claims, import_momo_config,
-    moc_is_encrypted,
+    import_moc_with_passphrase, import_moc_with_passphrase_and_claims, moc_is_encrypted,
+};
+pub use prompt_spaces::{
+    MAX_PROMPT_SPACE_BYTES, PROMPT_SPACES_SCHEMA, PromptSpace, PromptSpaceId, PromptSpaceSource,
+    PromptSpaces, PromptSpacesError,
 };
 pub use response::{
     MAX_GATEWAY_HOPS, MAX_RESPONSE_ID_BYTES, MAX_RESPONSE_IMAGE_REFERENCE_BYTES,
@@ -97,6 +103,7 @@ pub use response::{
     ResponseContractError, ResponseError, ResponseImageInput, ResponseInput, ResponseInputItem,
     ResponseMessageContent, ResponseOutputContent, ResponseOutputItem, ResponseTool, ResponseUsage,
 };
+pub use runtime::MomoRuntime;
 pub use vision::{
     DEFAULT_VISION_ROUTE, GatewayVisionAdapter, MAX_VISUAL_DESCRIPTION_BYTES,
     VisionDescriptionAdapter, VisionDescriptionBatch, VisionDescriptionRequest, VisionError,
@@ -104,6 +111,13 @@ pub use vision::{
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error(transparent)]
+    Prompts(#[from] PromptSpacesError),
+    #[error("Space {space_id} requires memory recovery: {message}")]
+    Recovery {
+        space_id: uuid::Uuid,
+        message: String,
+    },
     #[error("data directory {path} is already owned by another MOMO Core process: {source}")]
     InstanceLock {
         path: PathBuf,
@@ -123,6 +137,10 @@ pub struct MomoCore {
     store: LocalStore,
     vector_store: TursoVectorStore,
     memory_workspaces: Arc<Mutex<MemoryWorkspaceRegistry>>,
+    space_locks:
+        Arc<tokio::sync::Mutex<HashMap<uuid::Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
+    recovery_failures: Arc<Mutex<std::collections::BTreeMap<uuid::Uuid, String>>>,
+    commit_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 const MAX_CACHED_MEMORY_WORKSPACES: usize = 1_024;
@@ -131,6 +149,7 @@ const MAX_CACHED_MEMORY_WORKSPACES: usize = 1_024;
 struct MemoryWorkspaceRegistry {
     generation: u64,
     entries: HashMap<uuid::Uuid, MemoryWorkspaceEntry>,
+    initializing: HashMap<uuid::Uuid, Arc<WorkspaceInitialization>>,
 }
 
 #[derive(Debug)]
@@ -139,16 +158,43 @@ struct MemoryWorkspaceEntry {
     last_used: u64,
 }
 
+#[derive(Debug, Default)]
+struct WorkspaceInitialization {
+    complete: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl WorkspaceInitialization {
+    fn wait(&self) {
+        let mut complete = self
+            .complete
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*complete {
+            complete = self
+                .changed
+                .wait(complete)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn finish(&self) {
+        let mut complete = self
+            .complete
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *complete = true;
+        self.changed.notify_all();
+    }
+}
+
 impl MemoryWorkspaceRegistry {
     fn next_generation(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
 
-    fn evict_idle_workspace(&mut self) {
-        if self.entries.len() < MAX_CACHED_MEMORY_WORKSPACES {
-            return;
-        }
+    fn evict_oldest_idle_workspace(&mut self) -> bool {
         let oldest = self
             .entries
             .iter()
@@ -157,7 +203,27 @@ impl MemoryWorkspaceRegistry {
             .map(|(space_id, _)| *space_id);
         if let Some(space_id) = oldest {
             self.entries.remove(&space_id);
+            true
+        } else {
+            false
         }
+    }
+
+    fn reserve_initialization(
+        &mut self,
+        space_id: uuid::Uuid,
+    ) -> Result<Arc<WorkspaceInitialization>, momo_memory::MemoryError> {
+        if self.entries.len() + self.initializing.len() >= MAX_CACHED_MEMORY_WORKSPACES
+            && !self.evict_oldest_idle_workspace()
+        {
+            return Err(momo_memory::MemoryError::WorkspaceCapacity {
+                limit: MAX_CACHED_MEMORY_WORKSPACES,
+            });
+        }
+        let initialization = Arc::new(WorkspaceInitialization::default());
+        self.initializing
+            .insert(space_id, Arc::clone(&initialization));
+        Ok(initialization)
     }
 }
 
@@ -170,13 +236,18 @@ impl MomoCore {
         let vector_store = TursoVectorStore::open(data_dir.join("nsg-vectors.db")).await?;
         migrate_space_directories(data_dir)?;
         std::fs::create_dir_all(data_dir.join("spaces")).map_err(momo_memory::MemoryError::from)?;
-        Ok(Self {
+        let core = Self {
             data_dir: data_dir.to_path_buf(),
             _instance_lock: Arc::new(instance_lock),
             store,
             vector_store,
             memory_workspaces: Arc::new(Mutex::new(MemoryWorkspaceRegistry::default())),
-        })
+            space_locks: Arc::default(),
+            recovery_failures: Arc::default(),
+            commit_tasks: Arc::default(),
+        };
+        core.recover_maintenance_commits().await?;
+        Ok(core)
     }
 
     #[must_use]
@@ -198,31 +269,68 @@ impl MomoCore {
         &self,
         space_id: uuid::Uuid,
     ) -> Result<Arc<MemoryWorkspace>, momo_memory::MemoryError> {
-        let mut registry = self
-            .memory_workspaces
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let generation = registry.next_generation();
-        if let Some(entry) = registry.entries.get_mut(&space_id) {
-            entry.last_used = generation;
-            return Ok(Arc::clone(&entry.workspace));
+        if let Some(message) = self.memory_recovery_status().get(&space_id) {
+            return Err(momo_memory::MemoryError::InvalidPatch(format!(
+                "Space {space_id} requires recovery: {message}"
+            )));
         }
+        self.memory_for_space_unchecked(space_id)
+    }
 
-        let workspace = Arc::new(MemoryWorkspace::initialize(
-            self.data_dir
-                .join("spaces")
-                .join(space_id.to_string())
-                .join("memory"),
-        )?);
-        registry.evict_idle_workspace();
-        registry.entries.insert(
-            space_id,
-            MemoryWorkspaceEntry {
-                workspace: Arc::clone(&workspace),
-                last_used: generation,
-            },
-        );
-        Ok(workspace)
+    fn memory_for_space_unchecked(
+        &self,
+        space_id: uuid::Uuid,
+    ) -> Result<Arc<MemoryWorkspace>, momo_memory::MemoryError> {
+        loop {
+            let (initialization, initialize) = {
+                let mut registry = self
+                    .memory_workspaces
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let generation = registry.next_generation();
+                if let Some(entry) = registry.entries.get_mut(&space_id) {
+                    entry.last_used = generation;
+                    return Ok(Arc::clone(&entry.workspace));
+                }
+                if let Some(initialization) = registry.initializing.get(&space_id) {
+                    (Arc::clone(initialization), false)
+                } else {
+                    (registry.reserve_initialization(space_id)?, true)
+                }
+            };
+
+            if !initialize {
+                initialization.wait();
+                continue;
+            }
+
+            let result = MemoryWorkspace::initialize(
+                self.data_dir
+                    .join("spaces")
+                    .join(space_id.to_string())
+                    .join("memory"),
+            )
+            .map(Arc::new);
+            {
+                let mut registry = self
+                    .memory_workspaces
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                registry.initializing.remove(&space_id);
+                if let Ok(workspace) = &result {
+                    let generation = registry.next_generation();
+                    registry.entries.insert(
+                        space_id,
+                        MemoryWorkspaceEntry {
+                            workspace: Arc::clone(workspace),
+                            last_used: generation,
+                        },
+                    );
+                }
+            }
+            initialization.finish();
+            return result;
+        }
     }
 }
 
