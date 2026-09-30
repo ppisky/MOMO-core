@@ -110,6 +110,7 @@ impl MemoryWorkspace {
     }
 
     pub fn import_snapshot(&self, snapshot: &MemorySnapshot) -> Result<(), MemoryError> {
+        provenance::validate_snapshot_provenance(snapshot)?;
         if snapshot.version != 1 {
             return Err(MemoryError::InvalidPatch(format!(
                 "unsupported memory snapshot version: {}",
@@ -158,6 +159,7 @@ impl MemoryWorkspace {
         snapshot: &MemorySnapshot,
         includes: fn(&str) -> bool,
     ) -> Result<(), MemoryError> {
+        provenance::validate_snapshot_provenance(snapshot)?;
         if snapshot.version != 1 {
             return Err(MemoryError::InvalidPatch(format!(
                 "unsupported memory snapshot version: {}",
@@ -205,6 +207,16 @@ impl MemoryWorkspace {
         max_tokens: usize,
         counter: &impl TokenCounter,
     ) -> Result<Vec<RetrievedMemory>, MemoryError> {
+        self.retrieve_in_scope(query, max_tokens, counter, None)
+    }
+
+    pub fn retrieve_in_scope(
+        &self,
+        query: &str,
+        max_tokens: usize,
+        counter: &impl TokenCounter,
+        scope: Option<&MemoryRetrievalScope>,
+    ) -> Result<Vec<RetrievedMemory>, MemoryError> {
         let access = self.load_access()?;
         access.require_read("current")?;
         let index = self.load_index()?;
@@ -215,63 +227,49 @@ impl MemoryWorkspace {
         let mut loaded_ids = Vec::new();
         let mut touch_ids = HashSet::new();
 
-        let mut hot_documents = Vec::new();
-        for relative in ["current/scene.md", "current/active_threads.md"] {
-            let document = self.read_unchecked(Path::new(relative))?;
-            hot_documents.push((relative.to_owned(), document));
-        }
-        let hot_text = hot_documents
+        let mut hot_documents = if let Some(scope) = scope {
+            scope.current.clone()
+        } else {
+            let mut current = Vec::new();
+            for path in ["current/scene.md", "current/active_threads.md"] {
+                let document = self.read_unchecked(Path::new(path))?;
+                current.push(RetrievedMemory {
+                    id: document.metadata.id.clone(),
+                    path: path.into(),
+                    body: document.body.clone(),
+                    estimated_tokens: counter.count(&document.body),
+                    source_character_ids: document
+                        .metadata
+                        .relations
+                        .get("characters")
+                        .cloned()
+                        .unwrap_or_default(),
+                    injection_scope: document.metadata.injection_scope.clone(),
+                    injection_conversation_id: document.metadata.injection_conversation_id.clone(),
+                    injection_character_id: document.metadata.injection_character_id.clone(),
+                    state_signal: Some(retrieved_state_signal(&document)),
+                });
+            }
+            current
+        };
+        hot_documents.sort_by_key(|d| (d.path != Path::new("current/scene.md"), d.path.clone()));
+        // References are evaluated before presentation trimming. A small prompt
+        // budget must not erase a valid recall cue or manufacture irrelevance.
+        let hot_reference_ids: HashSet<_> = hot_documents
             .iter()
-            .map(|(_, document)| document.body.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let hot_reference_ids = explicit_memory_references(&hot_text);
-        let hot_tokens = hot_documents
-            .iter()
-            .map(|(_, document)| counter.count(&document.body))
-            .fold(0_usize, usize::saturating_add);
-        let hot_over_budget = hot_tokens > max_tokens;
-        for (path, document) in hot_documents {
-            let remaining = max_tokens.saturating_sub(used);
-            let body = if hot_over_budget {
-                markdown_prefix_within_budget(&document.body, remaining, counter)
-            } else {
-                document.body.clone()
-            };
-            if body.is_empty() {
+            .flat_map(|d| explicit_memory_references(&d.body))
+            .collect();
+        let hot_budget = max_tokens.saturating_mul(45) / 100;
+        for mut memory in hot_documents {
+            let remaining = hot_budget.saturating_sub(used);
+            memory.body = markdown_prefix_within_budget(&memory.body, remaining, counter);
+            if memory.body.is_empty() {
                 continue;
             }
-            let tokens = counter.count(&body);
-            if tokens > remaining {
-                continue;
-            }
-            used += tokens;
-            let id = document.metadata.id.clone();
-            let source_character_ids = document
-                .metadata
-                .relations
-                .get("characters")
-                .cloned()
-                .unwrap_or_default();
-            loaded_ids.push(id.clone());
-            result.push(RetrievedMemory {
-                id,
-                path: PathBuf::from(path),
-                body,
-                estimated_tokens: tokens,
-                source_character_ids,
-                injection_scope: document.metadata.injection_scope.clone(),
-                injection_conversation_id: document.metadata.injection_conversation_id.clone(),
-                injection_character_id: document.metadata.injection_character_id.clone(),
-                state_signal: Some(retrieved_state_signal(&document)),
-            });
-        }
-        if hot_over_budget {
-            self.record_memory_activity(now, &loaded_ids, &mut mutations)?;
-            if !mutations.is_empty() {
-                commit_mutations(&mutations)?;
-            }
-            return Ok(result);
+            memory.estimated_tokens = counter.count(&memory.body);
+            used += memory.estimated_tokens;
+            loaded_ids.push(memory.id.clone());
+            result.push(memory);
         }
 
         let normalized_query = normalize(query);
@@ -284,7 +282,8 @@ impl MemoryWorkspace {
 
         for (id, entry) in &index.entries {
             by_id.insert(id.clone(), entry);
-            if !access.can_read(&entry.kind) {
+            if !access.can_read(&entry.kind) || scope.is_some_and(|s| !s.eligible_ids.contains(id))
+            {
                 continue;
             }
             let query_hit = query_hit(entry, id, &normalized_query, &query_terms);
@@ -329,7 +328,9 @@ impl MemoryWorkspace {
                 let Some(entry) = by_id.get(related_id) else {
                     continue;
                 };
-                if !access.can_read(&entry.kind) {
+                if !access.can_read(&entry.kind)
+                    || scope.is_some_and(|s| !s.eligible_ids.contains(related_id))
+                {
                     continue;
                 }
                 let document = self.read_unchecked(Path::new(&entry.path))?;
@@ -403,7 +404,14 @@ impl MemoryWorkspace {
             } else {
                 remaining
             };
-            let body = markdown_prefix_within_budget(&document.body, allowed, counter);
+            let body = if scope.is_some() {
+                if counter.count(&document.body) > allowed {
+                    continue;
+                }
+                document.body.clone()
+            } else {
+                markdown_prefix_within_budget(&document.body, allowed, counter)
+            };
             if body.is_empty() {
                 continue;
             }
@@ -464,7 +472,14 @@ impl MemoryWorkspace {
                 continue;
             }
             let remaining = max_tokens.saturating_sub(used);
-            let body = markdown_prefix_within_budget(&document.body, remaining, counter);
+            let body = if scope.is_some() {
+                if counter.count(&document.body) > remaining {
+                    continue;
+                }
+                document.body.clone()
+            } else {
+                markdown_prefix_within_budget(&document.body, remaining, counter)
+            };
             if body.is_empty() {
                 continue;
             }
@@ -511,7 +526,11 @@ impl MemoryWorkspace {
         }
         self.record_memory_activity(now, &loaded_ids, &mut mutations)?;
         if !mutations.is_empty() {
-            commit_mutations(&mutations)?;
+            provenance::commit_traced(
+                &self.root,
+                &mutations,
+                &momo_domain::provenance::RevisionContext::manual("document_edit"),
+            )?;
             // Retrieval only changes touch timestamps in long-term documents;
             // the searchable index remains valid. Refresh the file signature
             // so the next request can use the cached index while still
@@ -522,8 +541,13 @@ impl MemoryWorkspace {
     }
 
     pub fn apply_patch(&self, yaml: &str) -> Result<(), MemoryError> {
-        let mut writer = atomic_write_bytes;
-        self.apply_patch_with_writer(yaml, &mut writer)
+        let plan = self.prepare_patch_commit(yaml)?;
+        let plan = self.trace_commit(
+            plan,
+            None,
+            &momo_domain::provenance::RevisionContext::manual("manual_patch"),
+        )?;
+        self.apply_prepared_commit(&plan)
     }
 
     /// Performs the same complete parse, path, access and operation validation
@@ -549,14 +573,20 @@ impl MemoryWorkspace {
         let previous = self.load_index_for_rebuild()?;
         let index = self.build_index_data(Some(&previous))?;
         let count = index.entries.len();
-        commit_mutations(&[FileMutation::Write {
-            path: self.checked_index_path()?,
-            content: encode_index(&index)?.into_bytes(),
-        }])?;
+        provenance::commit_traced(
+            &self.root,
+            &[FileMutation::Write {
+                path: self.checked_index_path()?,
+                content: encode_index(&index)?.into_bytes(),
+            }],
+            &momo_domain::provenance::RevisionContext::manual("document_edit"),
+        )?;
         self.store_cached_index(index.clone())?;
         Ok(count)
     }
 
+    /// Legacy calendar profile for explicit low-level callers. Native Core
+    /// uses journaled `prepare_lifecycle_activity` instead.
     pub fn run_maintenance(&self) -> Result<MaintenanceReport, MemoryError> {
         self.run_maintenance_at(Utc::now().timestamp())
     }
@@ -764,7 +794,11 @@ impl MemoryWorkspace {
                 path: self.checked_index_path()?,
                 content: encode_index(&index)?.into_bytes(),
             });
-            commit_mutations(&mutations)?;
+            provenance::commit_traced(
+                &self.root,
+                &mutations,
+                &momo_domain::provenance::RevisionContext::manual("document_edit"),
+            )?;
         }
         Ok(report)
     }
@@ -812,13 +846,17 @@ impl MemoryWorkspace {
             )));
         }
         index.entries.remove(id);
-        commit_mutations(&[
-            FileMutation::Delete { path },
-            FileMutation::Write {
-                path: self.checked_index_path()?,
-                content: encode_index(&index)?.into_bytes(),
-            },
-        ])?;
+        provenance::commit_traced(
+            &self.root,
+            &[
+                FileMutation::Delete { path },
+                FileMutation::Write {
+                    path: self.checked_index_path()?,
+                    content: encode_index(&index)?.into_bytes(),
+                },
+            ],
+            &momo_domain::provenance::RevisionContext::manual("document_edit"),
+        )?;
         self.append_audit_event(&format!(
             "{}\tdelete\t{id}\t{}",
             Utc::now().timestamp(),
@@ -872,17 +910,21 @@ impl MemoryWorkspace {
         document.metadata.touch_at = Utc::now().timestamp();
         document.metadata.archived_at = None;
         update_index_entry(&mut index, &destination_relative, &document)?;
-        commit_mutations(&[
-            FileMutation::Write {
-                path: destination,
-                content: document.encode()?.into_bytes(),
-            },
-            FileMutation::Delete { path: source },
-            FileMutation::Write {
-                path: self.checked_index_path()?,
-                content: encode_index(&index)?.into_bytes(),
-            },
-        ])?;
+        provenance::commit_traced(
+            &self.root,
+            &[
+                FileMutation::Write {
+                    path: destination,
+                    content: document.encode()?.into_bytes(),
+                },
+                FileMutation::Delete { path: source },
+                FileMutation::Write {
+                    path: self.checked_index_path()?,
+                    content: encode_index(&index)?.into_bytes(),
+                },
+            ],
+            &momo_domain::provenance::RevisionContext::manual("document_edit"),
+        )?;
         self.append_audit_event(&format!(
             "{}\trestore\t{id}\t{}",
             Utc::now().timestamp(),
@@ -980,18 +1022,23 @@ impl MemoryWorkspace {
         document.metadata.touch_at = Utc::now().timestamp();
         validate_metadata(&document.metadata)?;
         update_index_entry(&mut index, &relative, &document)?;
-        commit_mutations(&[
-            FileMutation::Write {
-                path: self.resolve(&relative)?,
-                content: document.encode()?.into_bytes(),
-            },
-            FileMutation::Write {
-                path: self.checked_index_path()?,
-                content: encode_index(&index)?.into_bytes(),
-            },
-        ])
+        provenance::commit_traced(
+            &self.root,
+            &[
+                FileMutation::Write {
+                    path: self.resolve(&relative)?,
+                    content: document.encode()?.into_bytes(),
+                },
+                FileMutation::Write {
+                    path: self.checked_index_path()?,
+                    content: encode_index(&index)?.into_bytes(),
+                },
+            ],
+            &momo_domain::provenance::RevisionContext::manual("document_edit"),
+        )
     }
 
+    #[cfg(test)]
     pub(super) fn apply_patch_with_writer<F>(
         &self,
         yaml: &str,
@@ -1005,6 +1052,14 @@ impl MemoryWorkspace {
     }
 
     pub(crate) fn prepare_patch(&self, yaml: &str) -> Result<Vec<FileMutation>, MemoryError> {
+        self.prepare_patch_for_identity(yaml, None)
+    }
+
+    pub(crate) fn prepare_patch_for_identity(
+        &self,
+        yaml: &str,
+        identity: Option<&momo_domain::provenance::MemoryIdentity>,
+    ) -> Result<Vec<FileMutation>, MemoryError> {
         let access = self.load_access()?;
         let patch = parse_patch_document(yaml)?;
         if patch.patches.is_empty() {
@@ -1065,7 +1120,28 @@ impl MemoryWorkspace {
                         "create must be the only operation".to_owned(),
                     ));
                 }
-                let mut document = self.read_unchecked(&relative)?;
+                let mut document = if relative.starts_with("current")
+                    && let Some(identity) = identity
+                {
+                    let ledger = self.provenance(false)?;
+                    if let Some(text) = ledger
+                        .scenes
+                        .get(&provenance::scene_key(identity))
+                        .and_then(|s| s.documents.get(&item.target_file))
+                    {
+                        MemoryDocument::parse(text)?
+                    } else {
+                        let mut document = self.read_unchecked(&relative)?;
+                        document.body = if item.target_file == "current/scene.md" {
+                            initial_scene_body("Current Scene")
+                        } else {
+                            "# Active Threads\n\n".into()
+                        };
+                        document
+                    }
+                } else {
+                    self.read_unchecked(&relative)?
+                };
                 let original_id = document.metadata.id.clone();
                 for operation in item.operations {
                     apply_operation(&mut document, operation)?;
@@ -1182,7 +1258,7 @@ impl MemoryWorkspace {
         Ok(resolved)
     }
 
-    fn checked_index_path(&self) -> Result<PathBuf, MemoryError> {
+    pub(super) fn checked_index_path(&self) -> Result<PathBuf, MemoryError> {
         self.resolve(Path::new("indexes/memory_index.yaml"))
     }
 
@@ -1227,10 +1303,14 @@ impl MemoryWorkspace {
         };
         let rebuilt = self.build_index_data(parsed.as_ref())?;
         if parsed.as_ref() != Some(&rebuilt) {
-            commit_mutations(&[FileMutation::Write {
-                path,
-                content: encode_index(&rebuilt)?.into_bytes(),
-            }])?;
+            provenance::commit_traced(
+                &self.root,
+                &[FileMutation::Write {
+                    path,
+                    content: encode_index(&rebuilt)?.into_bytes(),
+                }],
+                &momo_domain::provenance::RevisionContext::manual("document_edit"),
+            )?;
         }
         let index = Arc::new(rebuilt);
         *self
@@ -1310,7 +1390,7 @@ impl MemoryWorkspace {
             .collect()
     }
 
-    fn load_index_for_rebuild(&self) -> Result<MemoryIndex, MemoryError> {
+    pub(super) fn load_index_for_rebuild(&self) -> Result<MemoryIndex, MemoryError> {
         let path = self.checked_index_path()?;
         if !regular_file_exists(&path)? {
             return Ok(MemoryIndex {
@@ -1328,7 +1408,10 @@ impl MemoryWorkspace {
             }))
     }
 
-    fn build_index_data(&self, previous: Option<&MemoryIndex>) -> Result<MemoryIndex, MemoryError> {
+    pub(super) fn build_index_data(
+        &self,
+        previous: Option<&MemoryIndex>,
+    ) -> Result<MemoryIndex, MemoryError> {
         let mut paths = self.all_long_term_memory_paths()?;
         paths.sort();
         let mut entries = BTreeMap::new();
@@ -1366,12 +1449,12 @@ impl MemoryWorkspace {
         })
     }
 
-    fn read_unchecked(&self, relative: &Path) -> Result<MemoryDocument, MemoryError> {
+    pub(super) fn read_unchecked(&self, relative: &Path) -> Result<MemoryDocument, MemoryError> {
         let path = self.resolve(relative)?;
         MemoryDocument::parse(&fs::read_to_string(path)?)
     }
 
-    fn load_access(&self) -> Result<AccessConfig, MemoryError> {
+    pub(super) fn load_access(&self) -> Result<AccessConfig, MemoryError> {
         let path = self.resolve(Path::new("config/access.yaml"))?;
         let text = fs::read_to_string(path)?;
         let access: AccessConfig = yaml_serde::from_str(&text)?;
@@ -1388,7 +1471,7 @@ impl MemoryWorkspace {
         Ok(paths)
     }
 
-    fn all_long_term_memory_paths(&self) -> Result<Vec<PathBuf>, MemoryError> {
+    pub(super) fn all_long_term_memory_paths(&self) -> Result<Vec<PathBuf>, MemoryError> {
         let mut paths = self.active_memory_paths()?;
         for (_, kind) in ACTIVE_MEMORY_DIRECTORIES {
             let relative = Path::new("archive").join(kind);

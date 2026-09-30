@@ -1,7 +1,7 @@
 # MOMO Core 1.0 specification index
 
 **Status:** normative document precedence index
-**Updated:** 2026-09-25
+**Updated:** 2026-09-30
 
 When documents disagree, the current contracts in this section take
 precedence. Historical records explain earlier designs but do not define Core
@@ -23,6 +23,8 @@ artifact contracts below.
 | DMW | [`Dual-Mem_Wiki_v2.md`](../Dual-Mem_Wiki_v2.md) | Implemented normative v2 |
 | NSG | [`Narrative_Semantic_Graph_v2.md`](../Narrative_Semantic_Graph_v2.md) | Implemented normative v2 |
 | MO State | [`MO_State_v2.md`](../MO_State_v2.md) | Implemented v2 baseline |
+| Memory provenance and identity | [`memory_provenance_runtime.md`](memory_provenance_runtime.md) | Implemented working-tree local profile 1; awaiting review |
+| Activity-driven memory lifecycle | [`memory_lifecycle_runtime.md`](memory_lifecycle_runtime.md) | Implemented native MO State profile; replaces calendar aging on native/HTTP paths |
 | MOC | [`MOMO_Container_v3.md`](../MOMO_Container_v3.md) | Implemented v3 |
 | Instance runtime settings | [`runtime_config_0_1.md`](runtime_config_0_1.md) | Implemented local administration API |
 | Prompt Spaces | [`maintenance_prompts.en.md`](maintenance_prompts.en.md) | Implemented local administration API |
@@ -33,6 +35,11 @@ artifact contracts below.
 The implementation notes in [`memory_nsg_implementation.en.md`](memory_nsg_implementation.en.md)
 describe how the current DMW v2 and NSG v2 contracts are realized; they do not
 override those specifications.
+
+The [code-verified maintenance behavior guide](memory_maintenance_current_behavior.zh-CN.md)
+records current provenance limits, 12-turn batches, explicit drains, activity
+lifecycle settings, conversation deletion and default-assistant prompt selection. It
+documents the implemented provenance profile and adds no response request fields.
 
 ## Historical and superseded material
 
@@ -66,6 +73,14 @@ revisions. They never override a current contract.
 
 ## Design drafts
 
+- [Memory identity, provenance, and sharing](memory_identity_and_provenance.md)
+  records the agreed design direction for stable assistant identity (including
+  the default assistant), mutable prompts, record provenance, and explicit
+  sharing across stable user/function Spaces. It is an unimplemented extension;
+  its provenance target requirements do not change current 1.0 wire or artifact schemas.
+  Its lifecycle subsection now links the separately implemented activity profile.
+  References to this extension in DMW v2, NSG v2, MO State v2 and host guides
+  must not be read as implemented guarantees.
 - [`Dynamic_Disposition_Model_v1.md`](../Dynamic_Disposition_Model_v1.md)
   ([简体中文说明](dynamic_disposition_model.zh-CN.md)) is an experimental
   specification for the implemented, opt-in experimental DDM

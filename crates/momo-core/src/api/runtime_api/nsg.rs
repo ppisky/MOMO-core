@@ -80,14 +80,11 @@ pub async fn run_memory_maintenance(
 ) -> Result<momo_memory::MaintenanceReport, RuntimeApiError> {
     let scope_id = uuid::Uuid::parse_str(&scope_id)
         .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
-    let core = runtime.core_handle();
-    let report = run_space_write(runtime, scope_id, "run memory maintenance", move || {
-        core.memory_for_space(scope_id)
-            .map_err(|error| RuntimeApiError::internal(error.to_string()))?
-            .run_maintenance()
-            .map_err(|error| RuntimeApiError::internal(error.to_string()))
-    })
-    .await?;
+    let report = runtime
+        .core()
+        .process_memory_lifecycle(scope_id)
+        .await
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     Ok(report)
 }
 

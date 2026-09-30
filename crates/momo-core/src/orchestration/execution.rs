@@ -265,10 +265,39 @@ impl MomoApiService {
         });
         let response_json = serde_json::to_string(&response)
             .map_err(|error| MomoApiError::internal(error.to_string()))?;
+        let lifecycle_activity_json = if memory
+            && request.momo.mo_state
+            && config.mo_state.profile == crate::MoStateProfile::ClosedAutonomous
+            && config.mo_state.memory_lifecycle.enabled
+        {
+            Some(
+                serde_json::to_string(&momo_memory::lifecycle::LifecycleActivity {
+                    identity: Some(
+                        serde_json::from_value(
+                            response.momo.request_audit["memory_identity"].clone(),
+                        )
+                        .map_err(MomoApiError::internal)?,
+                    ),
+                    conversation_id: response.momo.conversation_id.clone(),
+                    character_id: response.momo.request_audit["active_character_id"]
+                        .as_str()
+                        .ok_or_else(|| {
+                            MomoApiError::internal("missing captured character identity")
+                        })?
+                        .to_owned(),
+                    query: resolved_input.maintenance_user_text().to_owned(),
+                    settings: config.mo_state.memory_lifecycle.clone(),
+                })
+                .map_err(MomoApiError::internal)?,
+            )
+        } else {
+            None
+        };
         self.runtime()
             .core()
             .store()
             .commit_response_completion(momo_storage::ResponseCompletion {
+                lifecycle_activity_json: lifecycle_activity_json.as_deref(),
                 request_id: operation_key,
                 conversation_scope_id,
                 assistant_message: assistant_message.as_ref(),

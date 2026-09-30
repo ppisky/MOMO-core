@@ -108,7 +108,7 @@ impl ResponseCoordination {
         }
     }
 
-    pub(super) async fn conversation_lock(
+    pub(crate) async fn conversation_lock(
         &self,
         scope_id: &str,
         conversation_id: &str,

@@ -13,6 +13,69 @@ static TEST_DATA_DIR: std::sync::LazyLock<tempfile::TempDir> =
     std::sync::LazyLock::new(|| tempfile::tempdir().expect("shared test data directory"));
 static TEST_RUNTIME: std::sync::OnceLock<Arc<MomoRuntime>> = std::sync::OnceLock::new();
 
+#[tokio::test]
+async fn provenance_management_routes_use_typed_records() {
+    let _test_guard = TEST_LOCK.lock().await;
+    initialize_test_core().await;
+    let app = build_app(AppState {
+        runtime: test_runtime_arc(),
+        momo_api: test_momo_api("http://127.0.0.1:9/v1"),
+        response_concurrency: Arc::new(Semaphore::new(8)),
+        response_timeout: std::time::Duration::from_secs(120),
+        metrics: Arc::new(Mutex::new(HashMap::new())),
+    });
+    let space = uuid::Uuid::now_v7();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/memory/provenance?space_id={space}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let data: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(data["ledger"]["schema"], "momo.memory-provenance/1");
+    assert_eq!(data["evidence_status"], json!({}));
+    let character = runtime_api::stage_character(
+        test_runtime(),
+        space.to_string(),
+        "test".into(),
+        "Default".into(),
+        String::new(),
+        String::new(),
+    )
+    .await
+    .unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/v1/memory/default-assistant")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"personal_space_id":space,"character_id":character.id}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        test_runtime()
+            .core()
+            .store()
+            .default_assistant(space)
+            .await
+            .unwrap(),
+        Some(character.id)
+    );
+}
+
 async fn initialize_test_core() -> String {
     if TEST_RUNTIME.get().is_none() {
         let runtime = Arc::new(
@@ -282,6 +345,13 @@ async fn runtime_settings_api_updates_the_live_service_without_a_config_file() {
                         "runtime": {
                             "memory_distill_every_turns": 13,
                             "nsg_govern_every_turns": 17
+                        },
+                        "mo_state": {
+                            "memory_lifecycle": {
+                                "decay_after_turns": 60,
+                                "forget_after_turns": 300,
+                                "auto_forget": false
+                            }
                         }
                     })
                     .to_string(),
@@ -310,6 +380,18 @@ async fn runtime_settings_api_updates_the_live_service_without_a_config_file() {
     )
     .expect("runtime settings JSON");
     assert_eq!(current["runtime"]["memory_distill_every_turns"], 13);
+    assert_eq!(
+        current["mo_state"]["memory_lifecycle"]["decay_after_turns"],
+        60
+    );
+    assert_eq!(
+        current["mo_state"]["memory_lifecycle"]["forget_after_turns"],
+        300
+    );
+    assert_eq!(
+        current["mo_state"]["memory_lifecycle"]["auto_forget"],
+        false
+    );
     assert_eq!(
         momo_api.maintenance_batch_limit(momo_core::MaintenanceKind::Memory),
         13
@@ -1808,6 +1890,19 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
     )
     .expect("runtime JSON");
     assert_eq!(runtime["profile"], "closed_autonomous");
+    assert_eq!(
+        runtime["memory_lifecycle"]["settings"]["decay_after_turns"],
+        48
+    );
+    assert_eq!(
+        runtime["memory_lifecycle"]["pending_events"]
+            .as_u64()
+            .unwrap()
+            + runtime["memory_lifecycle"]["completed_events"]
+                .as_u64()
+                .unwrap(),
+        1
+    );
     assert_eq!(runtime["snapshot_revision"], 1);
     assert_eq!(
         runtime["current_snapshot"]["source_versions"]

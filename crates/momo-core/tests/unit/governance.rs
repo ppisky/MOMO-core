@@ -128,6 +128,30 @@ fn maintenance_runtime_settings_are_bounded() {
 }
 
 #[test]
+fn activity_lifecycle_settings_are_bounded_and_default_to_turns() {
+    let mut settings = MomoRuntimeSettings::default();
+    assert_eq!(settings.mo_state.memory_lifecycle.decay_after_turns, 48);
+    assert_eq!(settings.mo_state.memory_lifecycle.forget_after_turns, 240);
+    assert!(settings.mo_state.memory_lifecycle.enabled);
+    settings.mo_state.memory_lifecycle.decay_after_turns = 0;
+    assert!(settings.validate().is_err());
+    settings.mo_state.memory_lifecycle.decay_after_turns = 10;
+    settings.mo_state.memory_lifecycle.decay_factor = 1.0;
+    assert!(settings.validate().is_err());
+    settings.mo_state.memory_lifecycle.decay_factor = 0.8;
+    settings.mo_state.memory_lifecycle.forget_after_turns = 1_000_001;
+    assert!(settings.validate().is_err());
+    settings.mo_state.memory_lifecycle.forget_after_turns = 100;
+    settings.validate().unwrap();
+    assert!(
+        serde_json::from_value::<MomoRuntimeSettings>(json!({
+            "mo_state": {"memory_lifecycle": {"forget_after_days": 30}}
+        }))
+        .is_err()
+    );
+}
+
+#[test]
 fn runtime_settings_reject_prompt_space_content() {
     assert!(
         serde_json::from_value::<MomoRuntimeSettings>(json!({

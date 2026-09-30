@@ -76,6 +76,8 @@ pub(crate) struct ResolveCapabilityRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RetrieveScopedMemoryRequest {
+    #[serde(default)]
+    pub(crate) identity: Option<momo_core::momo_domain::provenance::MemoryIdentity>,
     pub(crate) spaces: Vec<runtime_api::MemorySpaceSource>,
     pub(crate) query: String,
     #[serde(default = "default_memory_tokens")]

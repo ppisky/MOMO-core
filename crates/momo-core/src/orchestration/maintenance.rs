@@ -75,9 +75,52 @@ pub(super) fn maintenance_finish_error(completion: &Value) -> Option<String> {
 }
 
 impl MomoApiService {
+    async fn maintenance_character_contexts(
+        &self,
+        evidence: &[momo_domain::provenance::Evidence],
+    ) -> Result<Vec<Value>, MomoApiError> {
+        let mut contexts = std::collections::BTreeMap::new();
+        for source in evidence {
+            let (Some(character), Some(revision)) = (
+                source.character_id,
+                source.configuration.get("character_sha256"),
+            ) else {
+                continue;
+            };
+            let key = (character, revision.clone());
+            if !contexts.contains_key(&key) {
+                let profile = self
+                    .runtime()
+                    .core()
+                    .store()
+                    .memory_character_profile(character, revision)
+                    .await
+                    .map_err(MomoApiError::internal)?;
+                contexts.insert(key.clone(), json!({
+                    "character_id": character, "revision": revision, "profile": profile,
+                    "status": if profile.is_some() { "captured" } else { "historical_profile_unavailable" },
+                    "evidence_ids": [],
+                }));
+            }
+            contexts.get_mut(&key).expect("inserted context")["evidence_ids"]
+                .as_array_mut()
+                .expect("evidence list")
+                .push(json!(source.id));
+        }
+        Ok(contexts.into_values().collect())
+    }
+
     pub(super) async fn recover_due_maintenance(&self, scope_id: &str) -> Vec<String> {
         let config = self.config_snapshot();
         let mut warnings = Vec::new();
+        match uuid::Uuid::parse_str(scope_id) {
+            Ok(space) => {
+                if let Err(error) = self.runtime().core().process_memory_lifecycle(space).await {
+                    warnings.push(format!("memory lifecycle recovery degraded: {error}"));
+                }
+            }
+            Err(error) => warnings.push(format!("invalid lifecycle Space: {error}")),
+        }
         for (kind, enabled, threshold) in [
             (
                 MaintenanceKind::Memory,
@@ -93,7 +136,10 @@ impl MomoApiService {
             if !enabled {
                 continue;
             }
-            if let Err(error) = self.maintain(scope_id, kind, threshold).await {
+            if let Err(error) = self
+                .maintain_with_trigger(scope_id, kind, threshold, "autonomous_recovery")
+                .await
+            {
                 warnings.push(format!(
                     "{} maintenance recovery degraded: {error}",
                     kind.storage_name()
@@ -105,6 +151,20 @@ impl MomoApiService {
 
     pub(super) fn schedule_maintenance(&self, scope_id: String) {
         let config = self.config_snapshot();
+        let core = self.runtime().core().clone();
+        let lifecycle_space = scope_id.clone();
+        let task = tokio::spawn(async move {
+            if let Ok(space) = uuid::Uuid::parse_str(&lifecycle_space)
+                && let Err(error) = core.process_memory_lifecycle(space).await
+            {
+                tracing::warn!(%error, "activity lifecycle remains pending for recovery");
+            }
+        });
+        self.coordination
+            .maintenance_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(task);
         for (kind, enabled, threshold) in [
             (
                 MaintenanceKind::Memory,
@@ -171,6 +231,27 @@ impl MomoApiService {
         scope_id: &str,
         kind: MaintenanceKind,
         threshold: usize,
+    ) -> Result<bool, MomoApiError> {
+        self.maintain_with_trigger(scope_id, kind, threshold, "automatic_threshold")
+            .await
+    }
+
+    pub async fn maintain_manually(
+        &self,
+        scope_id: &str,
+        kind: MaintenanceKind,
+        threshold: usize,
+    ) -> Result<bool, MomoApiError> {
+        self.maintain_with_trigger(scope_id, kind, threshold, "manual_drain")
+            .await
+    }
+
+    async fn maintain_with_trigger(
+        &self,
+        scope_id: &str,
+        kind: MaintenanceKind,
+        threshold: usize,
+        trigger: &str,
     ) -> Result<bool, MomoApiError> {
         let normalized_scope = uuid::Uuid::parse_str(scope_id)
             .map_err(MomoApiError::bad_request)?
@@ -246,6 +327,43 @@ impl MomoApiService {
             .map(|pending| pending.batch.batch_key.clone())
             .unwrap_or_else(|| maintenance_batch_key(scope_id, storage_kind, &request_ids));
         let mut repair_error: Option<String> = None;
+        let mut provenance = momo_domain::provenance::RevisionContext {
+            target_evidence: std::collections::BTreeMap::new(),
+            operation_id: batch_key.clone(),
+            proposer: if kind == MaintenanceKind::Memory {
+                "dmw_distiller"
+            } else {
+                "nsg_governor"
+            }
+            .into(),
+            trigger: trigger.into(),
+            coordinator: "mo_state".into(),
+            authorization: "runtime_maintenance_policy/1".into(),
+            configuration: std::collections::BTreeMap::new(),
+            evidence: Vec::new(),
+            identity: None,
+            parent_records: Vec::new(),
+        };
+        for turn in &turns {
+            if let Some((evidence, identity)) = self
+                .runtime()
+                .core()
+                .store()
+                .response_evidence(&turn.request_id)
+                .await
+                .map_err(MomoApiError::internal)?
+            {
+                if provenance
+                    .identity
+                    .as_ref()
+                    .is_some_and(|previous| previous != &identity)
+                {
+                    return Err(MomoApiError::internal("maintenance batch mixes identities"));
+                }
+                provenance.identity = Some(identity);
+                provenance.evidence.push(evidence);
+            }
+        }
         let mut staged = self
             .runtime()
             .core()
@@ -254,8 +372,14 @@ impl MomoApiService {
             .await
             .map_err(MomoApiError::internal)?;
         if let Some(patch) = staged.clone() {
-            let validation =
-                validate_maintenance_patch(self.runtime(), scope_id, kind, patch).await;
+            let validation = validate_maintenance_patch(
+                self.runtime(),
+                scope_id,
+                kind,
+                patch,
+                provenance.clone(),
+            )
+            .await;
             if let Err(error) = validation {
                 if !self
                     .runtime()
@@ -292,18 +416,27 @@ impl MomoApiService {
                 .join("\n\n");
             let parsed_scope_id =
                 uuid::Uuid::parse_str(scope_id).map_err(MomoApiError::bad_request)?;
-            let existing_context = crate::api::runtime_api::retrieve_memory_items(
-                self.runtime(),
-                parsed_scope_id,
-                transcript.clone(),
-                4_096,
-            )
-            .await
-            .map_err(|error| {
-                MomoApiError::internal(format!(
+            let existing_context = if let Some(identity) = &provenance.identity {
+                crate::api::runtime_api::retrieve_scoped_memory(
+                    self.runtime(),
+                    crate::api::runtime_api::ScopedMemoryRequest {
+                        identity: Some(identity.clone()),
+                        spaces: vec![crate::api::runtime_api::MemorySpaceSource {
+                            space_id: parsed_scope_id.to_string(), label: "maintenance source".into(),
+                            weight: 100, memory: true, semantic_graph: true,
+                        }],
+                        observe_space_ids: Vec::new(), query: transcript.clone(), max_tokens: 4096,
+                        vector_space_id: None, query_vector: None, embedding: None,
+                    },
+                ).await.map_err(|error| MomoApiError::internal(format!(
                     "maintenance context retrieval failed; refusing transcript-only write: {error}"
-                ))
-            })?;
+                )))?
+            } else {
+                Vec::new()
+            };
+            let character_contexts = self
+                .maintenance_character_contexts(&provenance.evidence)
+                .await?;
             let maintenance_input = json!({
                 "maintenance_kind": storage_kind,
                 "mo_state_profile": config.mo_state.profile.as_str(),
@@ -311,7 +444,18 @@ impl MomoApiService {
                 "current_unix_timestamp": Utc::now().timestamp(),
                 "existing_context": existing_context,
                 "pending_turns": turns,
+                "trusted_evidence": provenance.evidence,
+                "identity": provenance.identity,
+                "character_contexts": character_contexts,
             });
+            provenance.parent_records = existing_context
+                .iter()
+                .filter_map(|v| {
+                    v.pointer("/provenance/record_ref")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect();
             let maintenance_source = maintenance_input.to_string();
             let (route, prompt_space_id) = match kind {
                 MaintenanceKind::Memory => {
@@ -322,7 +466,15 @@ impl MomoApiService {
                     PromptSpaceId::SemanticGraphGovernance,
                 ),
             };
-            let system = self.runtime.prompt_spaces().get(prompt_space_id).content;
+            let prompt = self.runtime.prompt_spaces().get(prompt_space_id);
+            provenance
+                .configuration
+                .insert("prompt_revision".into(), prompt.revision);
+            provenance.configuration.insert(
+                "runtime_policy".into(),
+                serde_json::to_string(&config).map_err(MomoApiError::internal)?,
+            );
+            let system = prompt.content;
             let maintenance_max_tokens = self
                 .gateway_generation_capability(route)
                 .await
@@ -405,18 +557,26 @@ impl MomoApiService {
                     .and_then(Value::as_str)
                     .ok_or_else(|| MomoApiError::model("maintenance model returned no text"))?
                     .to_owned();
+                let evidence_validation =
+                    momo_memory::provenance::patch_evidence(&generated, &provenance.evidence);
                 let validation = if kind == MaintenanceKind::Memory {
                     validate_generated_opaque_identifiers(&maintenance_source, &generated)
                 } else {
                     Ok(())
                 };
-                let validation = match validation {
+                let validation = match validation.and_then(|_| {
+                    evidence_validation
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(ToString::to_string)
+                }) {
                     Ok(()) => {
                         validate_maintenance_patch(
                             self.runtime(),
                             scope_id,
                             kind,
                             generated.clone(),
+                            provenance.clone(),
                         )
                         .await
                     }
@@ -433,7 +593,11 @@ impl MomoApiService {
                                 .to_owned(),
                         );
                     }
-                    Ok(_) => break generated,
+                    Ok(_) => {
+                        provenance.target_evidence =
+                            evidence_validation.map_err(MomoApiError::model)?;
+                        break generated;
+                    }
                     Err(error) if repair_error.is_none() => {
                         repair_error = Some(error.to_string());
                     }
@@ -447,19 +611,31 @@ impl MomoApiService {
             self.runtime()
                 .core()
                 .store()
-                .stage_maintenance_batch(&momo_storage::MaintenanceBatch {
-                    batch_key: batch_key.clone(),
-                    scope_id: scope_id.to_owned(),
-                    kind: storage_kind.to_owned(),
-                    request_ids: request_ids.clone(),
-                    patch_yaml: generated_patch,
-                })
+                .stage_maintenance_batch_with_provenance(
+                    &momo_storage::MaintenanceBatch {
+                        batch_key: batch_key.clone(),
+                        scope_id: scope_id.to_owned(),
+                        kind: storage_kind.to_owned(),
+                        request_ids: request_ids.clone(),
+                        patch_yaml: generated_patch,
+                    },
+                    Some(&serde_json::to_string(&provenance).map_err(MomoApiError::internal)?),
+                )
                 .await
                 .map_err(MomoApiError::internal)?
         };
         // Once preparation starts, the owned task holds the Space lock through
         // file application and SQL acknowledgement, even if its caller is cancelled.
         let runtime = Arc::clone(&self.runtime);
+        if let Some(saved) = runtime
+            .core()
+            .store()
+            .maintenance_batch_provenance(&batch_key)
+            .await
+            .map_err(MomoApiError::internal)?
+        {
+            provenance = serde_json::from_str(&saved).map_err(MomoApiError::internal)?;
+        }
         let scope_id = scope_id.to_owned();
         let batch = momo_storage::MaintenanceBatch {
             batch_key,
@@ -482,13 +658,15 @@ impl MomoApiService {
                 let core = runtime.core_handle();
                 let plan = tokio::task::spawn_blocking(move || {
                     let memory = core.memory_for_space(parsed_scope_id)?;
-                    match kind {
-                        MaintenanceKind::Memory => memory.prepare_patch_commit(&patch),
+                    let plan = match kind {
+                        MaintenanceKind::Memory => memory
+                            .prepare_identity_patch_commit(&patch, provenance.identity.as_ref()),
                         MaintenanceKind::SemanticGraph => {
                             momo_memory::nsg::NsgWorkspace::initialize(memory.root())?
                                 .prepare_patch_commit(&patch)
                         }
-                    }
+                    }?;
+                    memory.trace_commit(plan, Some(parsed_scope_id), &provenance)
                 })
                 .await
                 .map_err(MomoApiError::internal)?
@@ -549,6 +727,7 @@ async fn validate_maintenance_patch(
     scope_id: &str,
     kind: MaintenanceKind,
     patch: String,
+    provenance: momo_domain::provenance::RevisionContext,
 ) -> Result<(), String> {
     let parsed_scope_id = uuid::Uuid::parse_str(scope_id).map_err(|error| error.to_string())?;
     let _state_guard = runtime
@@ -560,18 +739,83 @@ async fn validate_maintenance_patch(
         let memory = core
             .memory_for_space(parsed_scope_id)
             .map_err(|error| error.to_string())?;
-        match kind {
+        let plan = match kind {
             MaintenanceKind::Memory => memory
-                .validate_patch(&patch)
+                .prepare_identity_patch_commit(&patch, provenance.identity.as_ref())
                 .map_err(|error| error.to_string()),
             MaintenanceKind::SemanticGraph => {
                 momo_memory::nsg::NsgWorkspace::initialize(memory.root())
                     .map_err(|error| error.to_string())?
-                    .validate_patch(&patch)
+                    .prepare_patch_commit(&patch)
                     .map_err(|error| error.to_string())
             }
-        }
+        }?;
+        memory
+            .trace_commit(plan, Some(parsed_scope_id), &provenance)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("maintenance validation task failed: {error}"))?
+}
+
+#[cfg(test)]
+mod recall_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn distiller_receives_captured_personality_per_evidence_not_latest_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(crate::MomoRuntime::initialize(dir.path()).await.unwrap());
+        let who = uuid::Uuid::now_v7();
+        let store = runtime.core().store();
+        for (revision, text) in [
+            ("old", "Keeps a farewell letter."),
+            ("new", "Lets go of old keepsakes."),
+        ] {
+            store
+                .capture_memory_character_profile(who, revision, text)
+                .await
+                .unwrap();
+        }
+        store
+            .capture_memory_character_profile(who, "old", "Do not overwrite history.")
+            .await
+            .unwrap();
+        let evidence = |id: &str, revision: &str| momo_domain::provenance::Evidence {
+            id: id.into(),
+            kind: momo_domain::provenance::EvidenceKind::Conversation,
+            original_space_id: who,
+            personal_space_id: who,
+            conversation_id: None,
+            character_id: Some(who),
+            message_ids: vec![],
+            configuration: [("character_sha256".into(), revision.into())].into(),
+        };
+        let service = MomoApiService::new(
+            runtime,
+            "http://127.0.0.1:9/v1",
+            None,
+            reqwest::Client::new(),
+        );
+        let contexts = service
+            .maintenance_character_contexts(&[
+                evidence("first", "old"),
+                evidence("second", "old"),
+                evidence("third", "new"),
+                evidence("legacy", "missing"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(contexts.len(), 3);
+        let old = contexts.iter().find(|v| v["revision"] == "old").unwrap();
+        assert_eq!(old["profile"], "Keeps a farewell letter.");
+        assert_eq!(old["evidence_ids"], json!(["first", "second"]));
+        let missing = contexts
+            .iter()
+            .find(|v| v["revision"] == "missing")
+            .unwrap();
+        assert!(missing["profile"].is_null());
+        assert_eq!(missing["status"], "historical_profile_unavailable");
+    }
 }

@@ -127,6 +127,8 @@ impl MoStateProfile {
 #[serde(deny_unknown_fields)]
 pub struct MoStateRuntimeConfig {
     #[serde(default)]
+    pub memory_lifecycle: momo_memory::lifecycle::LifecycleSettings,
+    #[serde(default)]
     pub profile: MoStateProfile,
     #[serde(default = "default_true")]
     pub scene_management: bool,
@@ -146,6 +148,7 @@ impl Default for MoStateRuntimeConfig {
     fn default() -> Self {
         Self {
             profile: MoStateProfile::ClosedAutonomous,
+            memory_lifecycle: momo_memory::lifecycle::LifecycleSettings::default(),
             scene_management: true,
             max_reconcile_steps: default_max_reconcile_steps(),
             max_agent_steps: default_max_agent_steps(),
@@ -170,6 +173,8 @@ impl Default for MaintenanceRuntimeSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MomoRuntimeSettings {
+    #[serde(default)]
+    pub history_window: HistoryWindowSettings,
     #[serde(default = "schema_version")]
     pub schema_version: u32,
     #[serde(default)]
@@ -184,10 +189,29 @@ pub struct MomoRuntimeSettings {
     pub vision: VisionDescriptionConfig,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryWindowSettings {
+    pub enabled: bool,
+    pub trigger_turns: usize,
+    pub evict_turns: usize,
+}
+
+impl Default for HistoryWindowSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trigger_turns: 12,
+            evict_turns: 2,
+        }
+    }
+}
+
 impl Default for MomoRuntimeSettings {
     fn default() -> Self {
         Self {
             schema_version: RUNTIME_SETTINGS_SCHEMA_VERSION,
+            history_window: HistoryWindowSettings::default(),
             request_overrides: RequestOverridePolicy::default(),
             runtime: MaintenanceRuntimeSettings::default(),
             mo_state: MoStateRuntimeConfig::default(),
@@ -204,6 +228,16 @@ impl MomoRuntimeSettings {
     }
 
     fn validate_portable_fields(&self) -> Result<(), GovernanceError> {
+        if !(2..=1000).contains(&self.history_window.trigger_turns)
+            || self.history_window.evict_turns == 0
+            || self.history_window.evict_turns >= self.history_window.trigger_turns
+        {
+            return Err(GovernanceError::Invalid("history window requires 2..=1000 trigger turns and 0 < evict_turns < trigger_turns".into()));
+        }
+        self.mo_state
+            .memory_lifecycle
+            .validate()
+            .map_err(|error| GovernanceError::Invalid(error.to_string()))?;
         if self.schema_version != RUNTIME_SETTINGS_SCHEMA_VERSION {
             return Err(GovernanceError::UnsupportedSchema(self.schema_version));
         }

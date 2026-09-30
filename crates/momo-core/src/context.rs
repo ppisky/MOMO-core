@@ -342,6 +342,8 @@ fn fit_system_sections(
             .map(|(text, quota)| {
                 if *quota == 0 {
                     String::new()
+                } else if text.contains("<momo-record>") {
+                    fit_memory_records(text, *quota, counter)
                 } else {
                     truncate_message_content_with(text, quota.saturating_add(6), counter).0
                 }
@@ -354,7 +356,11 @@ fn fit_system_sections(
             let Some(index) = (0..kept.len()).rev().find(|&i| !kept[i].is_empty()) else {
                 break;
             };
-            kept[index].pop();
+            if kept[index].contains("<momo-record>") {
+                kept[index].clear();
+            } else {
+                kept[index].pop();
+            }
         }
     }
     let audit = sections
@@ -369,6 +375,53 @@ fn fit_system_sections(
         })
         .collect();
     (join(&kept), audit)
+}
+
+fn fit_memory_records(text: &str, quota: usize, counter: &dyn Fn(&str) -> usize) -> String {
+    let Some((heading, _)) = text.split_once("<momo-record>") else {
+        return String::new();
+    };
+    let mut result = heading.to_owned();
+    let mut any = false;
+    for rest in text.split("<momo-record>").skip(1) {
+        let Some((record, _)) = rest.split_once("</momo-record>") else {
+            continue;
+        };
+        let candidate = format!("{result}<momo-record>{record}</momo-record>\n\n");
+        if counter(&candidate) <= quota {
+            result = candidate;
+            any = true;
+        }
+    }
+    if any { result } else { String::new() }
+}
+
+#[cfg(test)]
+#[test]
+fn provenance_and_body_are_indivisible_under_budget_pressure() {
+    let record = "<momo-record>\n{\"origin\":\"A\",\"perspective\":\"external\"}\nB never made this promise.\n</momo-record>";
+    let memory = format!(
+        "{record}\n\n<momo-record>\n{{\"origin\":\"C\"}}\n{}\n</momo-record>",
+        "huge fact ".repeat(3000)
+    );
+    let context = prepare_context(ContextRequest {
+        sections: ContextSections {
+            memory: &memory,
+            ..Default::default()
+        },
+        messages: &[],
+        budget: ContextBudget {
+            context_window: 400,
+            reserve_output_tokens: 20,
+        },
+    });
+    let output = &context.messages[0].content;
+    assert!(output.contains(record));
+    assert!(!output.contains("huge fact"));
+    assert_eq!(
+        output.matches("<momo-record>").count(),
+        output.matches("</momo-record>").count()
+    );
 }
 
 #[cfg(test)]

@@ -337,13 +337,13 @@ impl LocalStore {
             sqlx::query(
                 "INSERT INTO ddm_projection_states \
                  (managed_space_id, conversation_id, character_id, profile_revision, \
-                  profile_fingerprint, source_fingerprint, bands_json, updated_at) \
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                  profile_fingerprint, source_fingerprint, bands_json, updated_at, eligibility_key) \
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(managed_space_id, conversation_id, character_id) DO UPDATE SET \
                   profile_revision=excluded.profile_revision, \
                   profile_fingerprint=excluded.profile_fingerprint, \
                   source_fingerprint=excluded.source_fingerprint, \
-                  bands_json=excluded.bands_json, updated_at=excluded.updated_at",
+                  bands_json=excluded.bands_json, updated_at=excluded.updated_at, eligibility_key=excluded.eligibility_key",
             )
             .bind(&update.managed_space_id)
             .bind(&update.conversation_id)
@@ -357,6 +357,7 @@ impl LocalStore {
             .bind(&update.source_fingerprint)
             .bind(&bands_json)
             .bind(&now)
+            .bind(&update.eligibility_key)
             .execute(&mut *transaction)
             .await?;
         }
@@ -372,7 +373,7 @@ impl LocalStore {
     ) -> Result<Option<DdmProjectionState>, StorageError> {
         let row = sqlx::query(
             "SELECT managed_space_id, conversation_id, character_id, profile_revision, \
-             profile_fingerprint, source_fingerprint, bands_json, updated_at \
+             profile_fingerprint, source_fingerprint, bands_json, updated_at, eligibility_key \
              FROM ddm_projection_states \
              WHERE managed_space_id=? AND conversation_id=? AND character_id=?",
         )
@@ -383,6 +384,7 @@ impl LocalStore {
         .await?;
         row.map(|row| {
             Ok(DdmProjectionState {
+                eligibility_key: row.try_get("eligibility_key")?,
                 managed_space_id: row.try_get("managed_space_id")?,
                 conversation_id: row.try_get("conversation_id")?,
                 character_id: row.try_get("character_id")?,

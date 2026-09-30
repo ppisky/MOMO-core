@@ -46,10 +46,13 @@ On Linux or macOS, use
 `curl http://127.0.0.1:8765/health`. The server binds only to loopback by
 default. Generation additionally requires a model gateway configured through
 `MOMO_MODEL_GATEWAY_ORIGIN` and, when needed,
-`MOMO_MODEL_GATEWAY_API_KEY`. See [`momo.example.toml`](momo.example.toml) for
-portable product policy, [`contracts/1.0/response_request.json`](contracts/1.0/response_request.json)
+`MOMO_MODEL_GATEWAY_API_KEY`. Configure runtime policy through the
+[typed runtime settings API](docs/runtime_config_0_1.md); Core does not read a
+host configuration file. See [`contracts/1.0/response_request.json`](contracts/1.0/response_request.json)
 for a stable request example, and [`docs/http_api_1_0.md`](docs/http_api_1_0.md)
 for the deployment trust boundary.
+
+`momo-server` provides the API and does not include a graphical interface.
 
 The crates under `crates/` are implementation modules of MOMO Core. They are
 not separate products or independently published crates.io packages. The 1.0

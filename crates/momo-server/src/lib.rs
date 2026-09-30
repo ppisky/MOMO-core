@@ -150,6 +150,14 @@ fn api_routes() -> Router<AppState> {
         )
         .route("/momo/maintenance/drain", post(drain_momo_maintenance))
         .route("/memory/documents", get(list_memory_documents))
+        .route("/memory/provenance", get(get_memory_provenance))
+        .route("/memory/record-policy", put(put_memory_record_policy))
+        .route("/memory/identity-binding", put(put_memory_identity_binding))
+        .route("/memory/evidence/control", post(control_memory_evidence))
+        .route(
+            "/memory/default-assistant",
+            put(put_default_memory_assistant),
+        )
         .route(
             "/memory/documents/:id",
             get(read_memory_document)

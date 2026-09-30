@@ -8,6 +8,20 @@ Updates: MO State v1.0
 Depends on: DMW v2, NSG v2, MOMO native response runtime
 ```
 
+## 身份与来源 Profile 1（2026-09-30）
+
+[来源运行时 Profile 1](docs/memory_provenance_runtime.md)已接入当前工作树。
+原生响应在投影前统一检查身份、适用范围及共享策略。外部经历可作为上下文，但不改变
+当前助手的亲历、关系或承诺状态。场景按个人 Space/角色/连续情境分区；默认情境为会话 ID，
+宿主可以显式映射连续会话。快照观察绑定合格输入与身份，DDM 资格键覆盖策略变动。
+MO State 协调维护不意味着它是原始事实作者；派生投影不能成为独立佐证。
+本节不扩大下文 baseline 之外的工具执行、Saga 或多租户部署承诺。
+
+同日实现更新：活动生命周期已接入自治运行时，成功响应完成时原子记录事件，自动执行并恢复
+轮次驱动衰减/归档/遗忘；提供 `mo_state.memory_lifecycle` 设置和状态查询。
+详见[已实现生命周期 Profile](docs/memory_lifecycle_runtime.md)。该实现沿用 Space 写锁和
+持久恢复，不将 MO State 简化为投影器，也不授予 NSG 自动批准 Canon 修正的权限。
+
 ## 摘要 (Abstract)
 
 MO State v2 将 MO State 从“读取 DMW 与 NSG 后生成 `[STATE_CONTEXT]` 的只读编译器”扩展为一个长期存在的**自治状态运行时**（MO State Runtime）。它位于宿主与 DMW/NSG 之间，接收用户消息、模型结果、工具结果和维护事件，统一管理场景生命周期、动态记忆、语义网治理、状态一致性与面向模型的状态快照。
@@ -628,11 +642,13 @@ MOMO Core 1.0 当前实现了：
 - SQLite Operation Journal，以及与响应完成原子关联的 `projected -> completed` 提交；
 - 持久化、幂等发布和可重放的 MO State Snapshot；
 - 一等结构化 Scene Snapshot，以及旧空白 `scene.md` 的无损模板迁移；
-- 每轮场景蒸馏、下一轮前的待办恢复，以及原有可恢复 DMW/NSG 维护批次；
+- 每次合格响应完成后调度维护检查，场景蒸馏随 DMW 批次达到配置阈值后执行（默认 12 个
+  完整维护轮次），以及下一请求的到期/未完成批次恢复；并非每轮都调用提炼模型；
 - `user_message` 与 `tool_result` 状态事件分类；
 - 可选的实验性 DDM 投影，包括角色所有 profile、封闭类型信号、确定性选择、按
   Space/会话/角色持久化的迟滞，以及与 Snapshot 原子发布的下一轮区间；
 - 本机管理状态查询 `GET /v1/mo-state/runtime?space_id=...`；
+- 按 Space/对话/助手计数的活动生命周期、原子事件入队、预备文件提交恢复和可配置保护性遗忘；
 - 投影失败、维护失败和快照写入失败的显式 degraded 状态与警告。
 
 本实现将“Manager”落实为按请求唤醒、持久状态驱动的逻辑管理者，而不是每个 Space 常驻一个永不退出的线程。没有事件时它不会推进叙事；下次请求会先恢复待维护工作，再观察并发布新快照。

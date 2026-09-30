@@ -9,6 +9,7 @@ mod lsb;
 mod memory;
 mod nsg;
 mod portable;
+mod provenance;
 mod state_runtime;
 
 pub use capabilities::*;
@@ -22,6 +23,7 @@ pub use lsb::*;
 pub use memory::*;
 pub use nsg::*;
 pub use portable::*;
+pub use provenance::*;
 pub use state_runtime::*;
 
 use std::sync::Arc;
@@ -190,10 +192,18 @@ async fn approve_memory_patch_review_inner(
                 let patch = existing.patch_yaml.clone();
                 let prepare_core = Arc::clone(&core);
                 let plan = run_blocking("prepare reviewed patch", move || {
-                    prepare_core
+                    let workspace = prepare_core
                         .memory_for_space(scope_id)
-                        .map_err(|error| RuntimeApiError::internal(error.to_string()))?
+                        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+                    let mut context =
+                        momo_domain::provenance::RevisionContext::manual("approve_review");
+                    context.operation_id = review_id.to_string();
+                    context.proposer = "submitted_patch".into();
+                    let plan = workspace
                         .prepare_patch_commit(&patch)
+                        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+                    workspace
+                        .trace_commit(plan, Some(scope_id), &context)
                         .map_err(|error| RuntimeApiError::internal(error.to_string()))
                 })
                 .await;

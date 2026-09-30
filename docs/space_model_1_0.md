@@ -2,7 +2,7 @@
 
 **Status:** normative pre-release contract  
 **Compatibility:** replaces the unpublished Scope-shaped 1.0 request contract  
-**Updated:** 2026-09-05
+**Updated:** 2026-09-30
 
 ## 1. Instance root is not a Space
 
@@ -21,8 +21,13 @@ Typical host mappings are:
 
 - one personal Space per person;
 - one shared Space per group, channel, project, or deliberately shared session;
-- additional Spaces only when a product has a real ownership boundary for
-  them.
+- stable function Spaces when a product has a distinct data-management or
+  access boundary for a feature; Core does not prescribe a feature catalogue.
+
+A user need not change personal Spaces when selecting an assistant, editing
+its prompt, or opening another conversation. A function Space may contain
+records from several assistants and conversations. Space identity alone does
+not establish who produced a fact, who experienced it, or where it applies.
 
 There is no character-catalogue Space in the response contract. A character is
 a resource, not an access namespace.
@@ -63,6 +68,17 @@ second identity for one character.
 A conversation stores its current optional `character_id`. A host changes it
 through an explicit control operation. Supplying a different card accidentally
 on an ordinary response MUST NOT silently mutate the conversation.
+
+Editing the same character's prompt/card changes its configuration, not its
+`character_id`. A host's default-assistant selection is distinct from that
+assistant's stable identity. Selecting B as the new default does not transfer
+A's experiences to B. The process-wide `assistant` Prompt Space is a prompt
+resource, not an assistant identity or a memory Space.
+
+The working tree implements [provenance Profile 1](memory_provenance_runtime.md):
+default record isolation, explicit grants, historical identity and applicability.
+It adds no fields to this response request contract. Character associations remain
+separate from trusted evidence.
 
 ## 4. Weighted memory reads and one write target
 
@@ -113,8 +129,10 @@ The initial control actions are:
 - `detach_session`: host-only operation that removes a session-to-conversation
   mapping. It starts a new conversation next time but preserves the old
   conversation in Core.
-- `delete_conversation`: permanently targets one `conversation_id` inside one
-  `conversation_space_id`. It never clears memory.
+- `delete_conversation`: removes one active conversation and its messages
+  inside its `conversation_space_id`, using local tombstones/deleted snapshots.
+  It never clears DMW/NSG or the independent pending maintenance queue and
+  must not be described as erasing all content copies.
 - `clear_memory`: clears explicitly selected `memory` and/or
   `semantic_graph` modules in one target Space. It also clears derived vector
   state and pending maintenance for those modules. It never deletes a
@@ -183,3 +201,7 @@ preserves that Space ID or applies an explicit source-to-target Space map.
 Configuration and host extension modules are selected independently from Space
 data. A whole-instance backup is an explicit multi-Space selection; it is never
 the default for a personal export.
+
+## 2026-09-30 provenance profile update
+
+The working tree implements [memory provenance Profile 1](memory_provenance_runtime.md). This profile supersedes earlier planned-extension notes for identity, record eligibility, scoped scenes, source controls and the 12/2 context window. MOC preserves origin evidence while dropping imported local grants; source Space IDs are not rewritten by `space_map`.

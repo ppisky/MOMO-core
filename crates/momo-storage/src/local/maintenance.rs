@@ -128,18 +128,16 @@ impl LocalStore {
     ) -> Result<Vec<MaintenanceTurn>, StorageError> {
         let query = match kind {
             MaintenanceKind::Memory => {
-                "SELECT request_id, scope_id, user_content, assistant_content \
-                 FROM maintenance_turns WHERE scope_id=? AND memory_done=0 \
-                 ORDER BY created_at, request_id LIMIT ?"
+                "SELECT t.request_id,t.scope_id,t.user_content,t.assistant_content FROM maintenance_turns t LEFT JOIN response_evidence e ON e.request_id=t.request_id WHERE t.scope_id=? AND t.memory_done=0 AND COALESCE(e.maintenance_stopped,0)=0 AND COALESCE(e.revoked,0)=0 AND COALESCE(e.identity_json,'') = (SELECT COALESCE(e2.identity_json,'') FROM maintenance_turns t2 LEFT JOIN response_evidence e2 ON e2.request_id=t2.request_id WHERE t2.scope_id=? AND t2.memory_done=0 AND COALESCE(e2.maintenance_stopped,0)=0 AND COALESCE(e2.revoked,0)=0 GROUP BY COALESCE(e2.identity_json,'') ORDER BY (COUNT(*)>=?) DESC, MIN(t2.created_at), MIN(t2.request_id) LIMIT 1) ORDER BY t.created_at,t.request_id LIMIT ?"
             }
             MaintenanceKind::SemanticGraph => {
-                "SELECT request_id, scope_id, user_content, assistant_content \
-                 FROM maintenance_turns WHERE scope_id=? AND nsg_done=0 \
-                 ORDER BY created_at, request_id LIMIT ?"
+                "SELECT t.request_id,t.scope_id,t.user_content,t.assistant_content FROM maintenance_turns t LEFT JOIN response_evidence e ON e.request_id=t.request_id WHERE t.scope_id=? AND t.nsg_done=0 AND COALESCE(e.maintenance_stopped,0)=0 AND COALESCE(e.revoked,0)=0 AND COALESCE(e.identity_json,'') = (SELECT COALESCE(e2.identity_json,'') FROM maintenance_turns t2 LEFT JOIN response_evidence e2 ON e2.request_id=t2.request_id WHERE t2.scope_id=? AND t2.nsg_done=0 AND COALESCE(e2.maintenance_stopped,0)=0 AND COALESCE(e2.revoked,0)=0 GROUP BY COALESCE(e2.identity_json,'') ORDER BY (COUNT(*)>=?) DESC, MIN(t2.created_at), MIN(t2.request_id) LIMIT 1) ORDER BY t.created_at,t.request_id LIMIT ?"
             }
         };
         let rows = sqlx::query(query)
             .bind(scope_id)
+            .bind(scope_id)
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
             .bind(i64::try_from(limit).unwrap_or(i64::MAX))
             .fetch_all(&self.pool)
             .await?;
@@ -212,13 +210,43 @@ impl LocalStore {
         &self,
         batch: &MaintenanceBatch,
     ) -> Result<String, StorageError> {
+        self.stage_maintenance_batch_with_provenance(batch, None)
+            .await
+    }
+
+    pub async fn maintenance_batch_provenance(
+        &self,
+        batch_key: &str,
+    ) -> Result<Option<String>, StorageError> {
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT provenance_json FROM maintenance_batches WHERE batch_key=?",
+        )
+        .bind(batch_key)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
+    }
+
+    pub async fn stage_maintenance_batch_with_provenance(
+        &self,
+        batch: &MaintenanceBatch,
+        provenance: Option<&str>,
+    ) -> Result<String, StorageError> {
         let request_ids_json = serde_json::to_string(&batch.request_ids)
             .map_err(|error| StorageError::Database(sqlx::Error::Protocol(error.to_string())))?;
         let now = Utc::now().to_rfc3339();
+        let mut transaction = self.pool.begin().await?;
+        let blocked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM response_evidence e JOIN json_each(?) j ON e.request_id=j.value WHERE e.revoked=1 OR e.maintenance_stopped=1")
+            .bind(&request_ids_json).fetch_one(&mut *transaction).await?;
+        if blocked > 0 {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "maintenance evidence stopped or revoked".into(),
+            )));
+        }
         sqlx::query(
             "INSERT INTO maintenance_batches \
-             (batch_key, scope_id, kind, request_ids_json, patch_yaml, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_key) DO NOTHING",
+             (batch_key, scope_id, kind, request_ids_json, patch_yaml, created_at, updated_at, provenance_json) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_key) DO NOTHING",
         )
         .bind(&batch.batch_key)
         .bind(&batch.scope_id)
@@ -227,14 +255,15 @@ impl LocalStore {
         .bind(&batch.patch_yaml)
         .bind(&now)
         .bind(&now)
-        .execute(&self.pool)
+        .bind(provenance)
+        .execute(&mut *transaction)
         .await?;
         let row = sqlx::query(
             "SELECT scope_id, kind, request_ids_json, patch_yaml \
              FROM maintenance_batches WHERE batch_key=?",
         )
         .bind(&batch.batch_key)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await?;
         let stored_scope: String = row.try_get("scope_id")?;
         let stored_kind: String = row.try_get("kind")?;
@@ -247,7 +276,9 @@ impl LocalStore {
                 "maintenance batch key was reused with different inputs".to_owned(),
             )));
         }
-        row.try_get("patch_yaml").map_err(Into::into)
+        let patch = row.try_get("patch_yaml")?;
+        transaction.commit().await?;
+        Ok(patch)
     }
 
     /// Atomically acknowledges the source turns and removes the durable patch.
@@ -312,6 +343,10 @@ impl LocalStore {
         let mut transaction = self.pool.begin().await?;
         let space_id = space_id.to_string();
         if memory {
+            sqlx::query("DELETE FROM memory_lifecycle_events WHERE space_id=?")
+                .bind(&space_id)
+                .execute(&mut *transaction)
+                .await?;
             sqlx::query("DELETE FROM memory_patch_reviews WHERE scope_id=?")
                 .bind(&space_id)
                 .execute(&mut *transaction)

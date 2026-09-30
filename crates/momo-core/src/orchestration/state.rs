@@ -51,6 +51,40 @@ impl MomoApiService {
             context_window,
             resolved_input,
         } = input;
+        use sha2::{Digest, Sha256};
+        let identity = self
+            .runtime()
+            .core()
+            .store()
+            .memory_identity(
+                uuid::Uuid::parse_str(
+                    request
+                        .momo
+                        .personal_space_id
+                        .as_deref()
+                        .expect("validated personal Space"),
+                )
+                .map_err(MomoApiError::internal)?,
+                uuid::Uuid::parse_str(conversation_id).map_err(MomoApiError::internal)?,
+                uuid::Uuid::parse_str(character_id).map_err(MomoApiError::internal)?,
+            )
+            .await
+            .map_err(MomoApiError::internal)?;
+        let policy_signature: Vec<_> = memory
+            .iter()
+            .chain(nsg)
+            .map(|item| (&item["id"], &item["provenance"]["policy_revision"]))
+            .collect();
+        let projection_partition = hex::encode(Sha256::digest(
+            serde_json::to_vec(&(&identity, policy_signature)).map_err(MomoApiError::internal)?,
+        ));
+        let state_key = format!(
+            "{operation_key}:{}",
+            hex::encode(Sha256::digest(
+                serde_json::to_vec(&(&identity, &state_input_audit))
+                    .map_err(MomoApiError::internal)?
+            ))
+        );
         let mut warnings = Vec::new();
         let autonomous =
             request.momo.mo_state && config.mo_state.profile == MoStateProfile::ClosedAutonomous;
@@ -81,7 +115,7 @@ impl MomoApiService {
                         .core()
                         .store()
                         .observe_mo_state_operation(&momo_storage::MoStateObservation {
-                            operation_id: operation_key.to_owned(),
+                            operation_id: state_key,
                             space_id: managed_space_id.to_owned(),
                             event_type: if request.input.has_function_outputs() {
                                 "tool_result".to_owned()
@@ -152,8 +186,12 @@ impl MomoApiService {
                 let profile_identity = ddm_profile
                     .as_ref()
                     .map(|profile| (profile.revision, profile.profile_fingerprint()));
-                let previous_bands =
-                    compatible_ddm_bands(previous_ddm_state.as_ref(), profile_identity.as_ref());
+                let previous_bands = compatible_ddm_bands(
+                    previous_ddm_state
+                        .as_ref()
+                        .filter(|s| s["eligibility_key"].as_str() == Some(&projection_partition)),
+                    profile_identity.as_ref(),
+                );
                 let observed_scene = operation
                     .as_ref()
                     .map(|operation| operation.observed_scene.clone())
@@ -183,15 +221,24 @@ impl MomoApiService {
                     .map_err(MomoApiError::internal)?;
                 let parsed_scope_id =
                     uuid::Uuid::parse_str(managed_space_id).map_err(MomoApiError::internal)?;
-                let retrieved_memory = serde_json::from_value::<Vec<momo_memory::RetrievedMemory>>(
-                    Value::Array(memory.to_vec()),
-                )
-                .map_err(MomoApiError::internal)?;
+                let retrieved_memory =
+                    serde_json::from_value::<Vec<momo_memory::RetrievedMemory>>(Value::Array(
+                        memory
+                            .iter()
+                            .filter(|item| {
+                                item.pointer("/provenance/state_eligible")
+                                    .and_then(Value::as_bool)
+                                    != Some(false)
+                            })
+                            .cloned()
+                            .collect(),
+                    ))
+                    .map_err(MomoApiError::internal)?;
                 let retrieved_nsg = serde_json::from_value::<Vec<momo_memory::nsg::RetrievedNsg>>(
                     Value::Array(nsg.to_vec()),
                 )
                 .map_err(MomoApiError::internal)?;
-                let (compiled, degraded, compile_error) =
+                let (mut compiled, degraded, compile_error) =
                     match crate::api::runtime_api::compile_mo_state_with_ddm(
                         self.runtime(),
                         parsed_scope_id,
@@ -225,6 +272,7 @@ impl MomoApiService {
                             serde_json::from_value::<momo_storage::DdmProjectionUpdate>(json!({
                                 "managed_space_id": managed_space_id,
                                 "conversation_id": conversation_id,
+                                "eligibility_key": projection_partition,
                                 "character_id": character_id,
                                 "profile_revision": ddm["profile_revision"],
                                 "profile_fingerprint": ddm["profile_fingerprint"],
@@ -234,6 +282,9 @@ impl MomoApiService {
                         })
                         .transpose()
                         .map_err(MomoApiError::internal)?;
+                    compiled["audit"]["input"] = state_input_audit.clone();
+                    compiled["audit"]["memory_identity"] = json!(identity);
+                    compiled["audit"]["projection_partition"] = json!(projection_partition);
                     let compiled_json =
                         serde_json::to_string(&compiled).map_err(MomoApiError::internal)?;
                     match self

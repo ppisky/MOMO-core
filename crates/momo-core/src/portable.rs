@@ -962,6 +962,20 @@ fn preflight_workspace_tree(directory: &Path) -> Result<(), PortableError> {
         }
         if item.file_type().is_file() {
             fs::read(item.path())?;
+            let relative = item
+                .path()
+                .strip_prefix(directory)
+                .map_err(|e| PortableError::InvalidData(e.to_string()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if matches!(
+                relative.as_str(),
+                "config/provenance.json" | "rules/provenance.json"
+            ) {
+                momo_memory::provenance::ProvenanceLedger::parse(&fs::read_to_string(
+                    item.path(),
+                )?)?;
+            }
         }
     }
     Ok(())
@@ -1478,7 +1492,16 @@ fn import_memory(
             report.skipped_conflicts += 1;
             continue;
         }
-        atomic_write(&target, &fs::read(item.path())?)?;
+        let relative_name = relative.to_string_lossy().replace('\\', "/");
+        let bytes = if matches!(
+            relative_name.as_str(),
+            "config/provenance.json" | "rules/provenance.json"
+        ) {
+            momo_memory::provenance::imported_ledger(&fs::read_to_string(item.path())?, scope_id)?
+        } else {
+            fs::read(item.path())?
+        };
+        atomic_write(&target, &bytes)?;
         report.memory_files_imported += 1;
     }
     Ok(())
@@ -1518,7 +1541,16 @@ fn import_workspace_tree(
             report.skipped_conflicts += 1;
             continue;
         }
-        atomic_write(&target, &fs::read(item.path())?)?;
+        let relative_name = relative.to_string_lossy().replace('\\', "/");
+        let bytes = if matches!(
+            relative_name.as_str(),
+            "config/provenance.json" | "rules/provenance.json"
+        ) {
+            momo_memory::provenance::imported_ledger(&fs::read_to_string(item.path())?, scope_id)?
+        } else {
+            fs::read(item.path())?
+        };
+        atomic_write(&target, &bytes)?;
         report.semantic_graph_files_imported += 1;
     }
     Ok(())

@@ -106,6 +106,8 @@ pub(super) fn escape_unknown_double_quoted_yaml_escapes(value: &str) -> String {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FilePatch {
+    #[serde(default, rename = "evidence_refs")]
+    pub(super) _evidence_refs: Vec<String>,
     pub(super) target_file: String,
     pub(super) operations: Vec<PatchOperation>,
 }

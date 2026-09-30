@@ -137,5 +137,18 @@ maintenance, including partial batches. This invokes configured model routes;
 it is not a read-only status check and is not part of the stable 1.0 wire.
 Run against an isolated evaluation instance with no concurrent writers. Errors
 and timeouts do not report completion; pending work can be retried. Processing
-is bounded by the server response timeout and at most 64 batches of up to 32
-turns per kind. See [MORP paired experiments](../benchmarks/morp/SCENARIOS.md).
+is bounded by the server response timeout and at most 64 batches per kind.
+Each batch uses that kind's configured maintenance interval as its maximum
+size (default 12, configurable 1–200); the final partial batch is also drained.
+It processes queued completed turns, not an arbitrary selected range of stored
+conversation messages. This differs from `POST /v1/memory/maintenance`, which
+runs lifecycle decay/archive/forgetting for persisted completed-interaction
+events without invoking a summary model. Calling it with no pending activity
+does not advance memory age. See the [implemented lifecycle profile](memory_lifecycle_runtime.md)
+for settings, protection rules and recovery behavior.
+See the [maintenance guide](memory_maintenance_current_behavior.zh-CN.md) and
+[MORP paired experiments](../benchmarks/morp/SCENARIOS.md).
+
+## 2026-09-30 provenance profile update
+
+The working tree implements [memory provenance Profile 1](memory_provenance_runtime.md). This profile supersedes earlier planned-extension notes for identity, record eligibility, scoped scenes, source controls and the 12/2 context window. MOC preserves origin evidence while dropping imported local grants; source Space IDs are not rewritten by `space_map`.

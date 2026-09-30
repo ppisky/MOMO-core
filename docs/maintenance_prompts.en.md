@@ -22,6 +22,26 @@ These identifiers are a closed contract. Arbitrary prompt names are rejected,
 so a typo cannot create unused state. Prompt Spaces are not Spaces, have no
 per-user ownership, and are not included in MOC import or export.
 
+## Default-assistant identity and prompt configuration
+
+This is configuration of the generic default system prompt, not a requirement
+to edit a character card mid-conversation. Card edits are a separate resource
+operation. Maintenance prompt overrides also do not change code-enforced
+retention periods, archive thresholds, or Canon authority.
+
+`assistant` names a process-wide prompt slot, not an assistant identity.
+Replacing or resetting its content changes configuration; it does not create
+an assistant, switch a character, or reset memory. The returned `revision`
+must not serve as an assistant ID. Changing the host's default selection from
+A to B selects another stable identity. This API provides no per-user or
+per-assistant prompt slots: overrides affect all requests using that fallback.
+
+The planned [memory identity and provenance extension](memory_identity_and_provenance.md)
+defines historical evidence identity and cross-assistant use; its complete
+provenance/applicability pipeline is not implemented. Current native response
+creation still requires a valid `character_id`; the prompt slot is not an
+identity-free conversation entry point.
+
 ## HTTP API
 
 ```http

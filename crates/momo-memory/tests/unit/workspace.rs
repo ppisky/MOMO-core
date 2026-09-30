@@ -308,6 +308,12 @@ fn archived_relations_do_not_turn_an_active_source_into_a_hub() {
 fn retrieval_returns_to_unconsumed_direct_candidates_after_expansion() {
     let root = tempfile::tempdir().expect("root");
     let workspace = MemoryWorkspace::initialize(root.path()).expect("workspace");
+    // This test isolates the long-term pool ordering from hot-memory limits.
+    for path in ["current/scene.md", "current/active_threads.md"] {
+        let mut doc = workspace.read(path).unwrap();
+        doc.body.clear();
+        atomic_write(&root.path().join(path), &doc.encode().unwrap()).unwrap();
+    }
     for index in 0..3 {
         let id = format!("direct_{index}");
         let path = format!("events/{id}.md");
@@ -1371,7 +1377,7 @@ patches:
 }
 
 #[test]
-fn hot_memory_is_loaded_first_and_cropped_at_paragraph_boundaries() {
+fn hot_memory_is_cropped_at_paragraph_boundaries_and_reserves_long_term_budget() {
     let root = tempfile::tempdir().expect("memory root");
     let workspace = MemoryWorkspace::initialize(root.path()).expect("initialize");
     let mut scene = workspace.read("current/scene.md").expect("scene");
@@ -1407,10 +1413,10 @@ fn hot_memory_is_loaded_first_and_cropped_at_paragraph_boundaries() {
             .iter()
             .map(|memory| memory.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["current_scene", "current_active_threads"]
+        vec!["current_scene", "event_long_term"]
     );
-    assert_eq!(retrieved[0].body, scene.body);
-    assert_eq!(retrieved[1].body, active_prefix);
+    assert_eq!(retrieved[0].body, "# Scene\n\nalpha\n\n");
+    assert!(retrieved[0].estimated_tokens <= max_tokens * 45 / 100);
     assert!(
         retrieved
             .iter()

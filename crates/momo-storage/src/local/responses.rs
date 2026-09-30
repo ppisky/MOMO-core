@@ -177,8 +177,9 @@ impl LocalStore {
                 .await?;
         }
         sqlx::query(
-            "UPDATE response_operations SET user_written=1, updated_at=? WHERE request_id=?",
+            "UPDATE response_operations SET user_written=1, user_message_id=?, updated_at=? WHERE request_id=?",
         )
+        .bind(message.id.to_string())
         .bind(Utc::now().to_rfc3339())
         .bind(request_id)
         .execute(&mut *transaction)
@@ -213,6 +214,7 @@ impl LocalStore {
         completion: ResponseCompletion<'_>,
     ) -> Result<bool, StorageError> {
         let ResponseCompletion {
+            lifecycle_activity_json,
             request_id,
             conversation_scope_id,
             assistant_message,
@@ -281,6 +283,68 @@ impl LocalStore {
             .bind(Utc::now().to_rfc3339())
             .execute(&mut *transaction)
             .await?;
+        }
+        if let Some(activity) = lifecycle_activity_json {
+            let turn = maintenance_turn.filter(|_| memory_enabled).ok_or_else(|| {
+                StorageError::Database(sqlx::Error::Protocol(
+                    "lifecycle requires an authorized memory write turn".into(),
+                ))
+            })?;
+            sqlx::query("INSERT INTO memory_lifecycle_events(request_id, space_id, activity_json) VALUES (?,?,?)")
+                .bind(request_id).bind(&turn.scope_id).bind(activity)
+            .execute(&mut *transaction).await?;
+        }
+        let response: serde_json::Value = serde_json::from_str(response_json)?;
+        if let Some(identity) = response.pointer("/momo/request_audit/memory_identity") {
+            let identity: momo_domain::provenance::MemoryIdentity =
+                serde_json::from_value(identity.clone())?;
+            if identity.conversation_id.to_string() != conversation_id {
+                return Err(StorageError::Database(sqlx::Error::Protocol(
+                    "captured evidence identity differs from response conversation".into(),
+                )));
+            }
+            let mut message_ids = Vec::new();
+            let user_id: Option<String> = sqlx::query_scalar(
+                "SELECT user_message_id FROM response_operations WHERE request_id=?",
+            )
+            .bind(request_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if let Some(id) = user_id {
+                message_ids.push(Uuid::parse_str(&id)?);
+            }
+            if let Some(message) = assistant_message {
+                message_ids.push(message.id);
+            }
+            let evidence = momo_domain::provenance::Evidence {
+                id: request_id.to_owned(),
+                kind: if response
+                    .pointer("/momo/request_audit/evidence_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("tool")
+                {
+                    momo_domain::provenance::EvidenceKind::Tool
+                } else {
+                    momo_domain::provenance::EvidenceKind::Conversation
+                },
+                original_space_id: conversation_scope_id,
+                personal_space_id: identity.personal_space_id,
+                conversation_id: Some(identity.conversation_id),
+                character_id: Some(identity.character_id),
+                message_ids,
+                configuration: response
+                    .pointer("/momo/request_audit/evidence_configuration")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_default(),
+            };
+            sqlx::query("INSERT INTO response_evidence(request_id,conversation_id,character_id,evidence_json,identity_json) VALUES(?,?,?,?,?)")
+                .bind(request_id).bind(identity.conversation_id.to_string()).bind(identity.character_id.to_string())
+                .bind(serde_json::to_string(&evidence)?).bind(serde_json::to_string(&identity)?)
+                .execute(&mut *transaction).await?;
+            sqlx::query("UPDATE response_evidence SET revoked=COALESCE((SELECT revoked FROM memory_evidence_controls WHERE conversation_id=?),0), maintenance_stopped=COALESCE((SELECT stopped FROM memory_evidence_controls WHERE conversation_id=?),0) WHERE request_id=?")
+                .bind(identity.conversation_id.to_string()).bind(identity.conversation_id.to_string()).bind(request_id).execute(&mut *transaction).await?;
         }
         let changed = sqlx::query(
             "UPDATE response_operations SET response_json=?, updated_at=? \

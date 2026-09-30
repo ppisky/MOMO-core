@@ -18,6 +18,19 @@ exports a card; runtime lookup uses only `character_id`.
 
 ## Personal and conversation Spaces
 
+A person normally keeps a stable personal Space. Hosts may also configure
+stable function Spaces; selecting an assistant, editing its prompt, or starting
+a conversation need not change Spaces. Function Spaces describe management and
+access boundaries, not the originating assistant, participants, or applicability
+of every record. Core does not prescribe the host's feature layout.
+
+The [memory identity and provenance extension](memory_identity_and_provenance.md)
+uses default isolation and explicit sharing with stable assistant identity and
+mutable prompts. User preferences may be shared; A's experiences and promises
+do not transfer to B. Shared reads of an authoritative record are preferred to
+automatic per-function copies. The working tree implements the record checks
+in [Profile 1](memory_provenance_runtime.md); hosts still authorize Space access.
+
 A group host may retrieve personal and shared memory together with independent
 weights. Weights allocate retrieval budget and do not grant access. The host
 authorizes every readable Space. One maintenance run writes to exactly one
@@ -44,6 +57,13 @@ The following operations are deliberately distinct:
 - `delete_conversation` deletes one conversation and its messages;
 - `clear_memory` clears DMW, NSG, or both in one target Space without deleting chat history;
 - `switch_character` updates the character referenced by an existing conversation.
+
+Deleting a conversation preserves extracted DMW/NSG. Current deletion keeps
+local tombstones/deleted snapshots and does not remove that conversation's
+text from the independent pending maintenance queue; queued turns may still
+produce memories later. Deleting chat, stopping further extraction, and
+revoking derived memories are different operations, not one current guarantee.
+See the [maintenance behavior guide](memory_maintenance_current_behavior.zh-CN.md).
 
 Controls use `POST /v1/momo/control` and never pass through a model. The
 `actor_space_id` is audit context, not an automatic authorization grant; an
@@ -129,3 +149,7 @@ reviewed Markdown defaults under `crates/momo-core/src/product_prompts/`,
 compiled into `momo_core` with `include_str!`. MOMO does not read `momo.toml`;
 the prompts are not part of MOC or any Space. Process-wide replacements use the
 Prompt Spaces HTTP API. See [the Prompt Spaces guide](maintenance_prompts.en.md).
+
+## 2026-09-30 provenance profile update
+
+The working tree implements [memory provenance Profile 1](memory_provenance_runtime.md). This profile supersedes earlier planned-extension notes for identity, record eligibility, scoped scenes, source controls and the 12/2 context window. MOC preserves origin evidence while dropping imported local grants; source Space IDs are not rewritten by `space_map`.

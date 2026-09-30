@@ -59,6 +59,7 @@ pub struct ResponseOperation {
 
 #[derive(Debug)]
 pub struct ResponseCompletion<'a> {
+    pub lifecycle_activity_json: Option<&'a str>,
     pub request_id: &'a str,
     pub conversation_scope_id: Uuid,
     pub assistant_message: Option<&'a Message>,
@@ -67,6 +68,15 @@ pub struct ResponseCompletion<'a> {
     pub nsg_enabled: bool,
     pub mo_state_operation_id: Option<&'a str>,
     pub response_json: &'a str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LifecycleEvent {
+    pub request_id: String,
+    pub space_id: String,
+    pub activity_json: String,
+    pub prepared_commit_json: Option<String>,
+    pub report_json: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -127,6 +137,8 @@ pub struct MoStateOperation {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DdmProjectionState {
+    #[serde(default)]
+    pub eligibility_key: String,
     pub managed_space_id: String,
     pub conversation_id: String,
     pub character_id: String,
@@ -140,6 +152,8 @@ pub struct DdmProjectionState {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DdmProjectionUpdate {
+    #[serde(default)]
+    pub eligibility_key: String,
     pub managed_space_id: String,
     pub conversation_id: String,
     pub character_id: String,

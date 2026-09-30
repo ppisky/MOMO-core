@@ -107,7 +107,7 @@ fn digest_text(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-fn parse_scene(scene: &str, active_threads: &str, source_hash: &str) -> SceneSnapshot {
+pub fn parse_scene(scene: &str, active_threads: &str, source_hash: &str) -> SceneSnapshot {
     let sections = markdown_sections(scene);
     let scene_id = first_value(&sections, &["scene id", "scene_id"])
         .unwrap_or_else(|| "scene_current".to_owned());

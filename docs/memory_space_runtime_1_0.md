@@ -43,7 +43,10 @@ A response request supplies zero or more independent sources:
 
 Weights are relative token-budget weights from 1 through 100. They do not
 grant access. The host authorizes each source before calling Core. Retrieval
-results carry the source Space as provenance.
+results carry the source Space as storage provenance. This does not establish
+the original evidence, author, proposal component, or approver; those distinct
+dimensions are defined in the planned
+[provenance extension](memory_identity_and_provenance.md).
 
 ## Writes
 
@@ -54,6 +57,13 @@ one `memory_write_space_id`. The write Space must also occur in
 DMW and NSG remain independently selectable. Structured `clear_memory` may
 clear either component or both in one explicit target Space. Natural-language
 instructions cannot trigger deletion.
+
+Pending extraction is partitioned by write Space and maintenance kind, not by
+conversation. Default automatic batches consume 12 completed user/assistant
+pairs with independent DMW/NSG acknowledgements; explicit drains can process
+a partial tail. Deleting a conversation preserves extracted memory and does
+not remove independent pending turns. See the
+[code-verified maintenance guide](memory_maintenance_current_behavior.zh-CN.md).
 
 ## Conversation and character boundaries
 

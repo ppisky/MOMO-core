@@ -41,6 +41,7 @@ zip.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+sqlx.workspace = true
 tokio.workspace = true
 
 [lints]

@@ -59,10 +59,10 @@ pub use gateway::{
     GatewayMessageRole, OpenAiGateway, ProviderEndpoint, SseDecoder,
 };
 pub use governance::{
-    DdmRuntimeConfig, GovernanceError, GovernedOverrides, MaintenanceRuntimeSettings,
-    MoStateInjectionMode, MoStateProfile, MoStateRuntimeConfig, MomoRuntimeSettings, OverrideMode,
-    RUNTIME_SETTINGS_SCHEMA_VERSION, RequestOverridePolicy, RequestedOverrides,
-    RoleplayRuntimeConfig, VisionDescriptionConfig,
+    DdmRuntimeConfig, GovernanceError, GovernedOverrides, HistoryWindowSettings,
+    MaintenanceRuntimeSettings, MoStateInjectionMode, MoStateProfile, MoStateRuntimeConfig,
+    MomoRuntimeSettings, OverrideMode, RUNTIME_SETTINGS_SCHEMA_VERSION, RequestOverridePolicy,
+    RequestedOverrides, RoleplayRuntimeConfig, VisionDescriptionConfig,
 };
 pub use lsb::{
     LSB_CARRIER_MAGIC, LSB_CARRIER_VERSION, LSB_HEADER_BYTES, LsbCarrierError, LsbCarrierInfo,

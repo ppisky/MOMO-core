@@ -144,6 +144,12 @@ MOC import conflict mode is applied per resource inside the mapped target
 Space. Space mapping never grants authorization and never changes globally
 unique character, conversation or message IDs.
 
+The implemented working-tree [provenance profile](docs/memory_provenance_runtime.md)
+preserves original evidence in DMW/NSG provenance files, records the destination
+of imports, and drops imported local grants. `space_map` does not rewrite origin
+identities. Evidence that cannot match trusted local records remains unresolved.
+No new top-level MOC module or format generation is introduced.
+
 Import is validated completely before known business data is committed. A
 container with an undeclared Space path, invalid UUID directory, cross-Space
 path, duplicate resource, unsafe reference or inconsistent index is rejected.
@@ -179,3 +185,7 @@ Unknown extension modules are verified but never executed by Core. A host may
 explicitly export a module directory or claim an imported unknown module into a
 host-selected directory. WASM, gRPC or another host runtime owns recognition,
 execution and version negotiation.
+
+## 2026-09-30 provenance profile update
+
+The working tree implements [memory provenance Profile 1](docs/memory_provenance_runtime.md). This profile supersedes earlier planned-extension notes for identity, record eligibility, scoped scenes, source controls and the 12/6 context window. MOC preserves origin evidence while dropping imported local grants; source Space IDs are not rewritten by `space_map`.

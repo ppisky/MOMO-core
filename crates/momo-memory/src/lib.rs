@@ -1,7 +1,9 @@
 //! Dual-Mem Wiki workspace, deterministic retrieval, and YAML patch execution.
 
 pub mod ddm;
+pub mod lifecycle;
 pub mod nsg;
+pub mod provenance;
 pub mod scene;
 pub mod state;
 
@@ -357,6 +359,13 @@ struct ForgottenTombstone {
 
 pub trait TokenCounter {
     fn count(&self, text: &str) -> usize;
+}
+
+/// Host-qualified context, applied before candidate selection and budgeting.
+#[derive(Debug, Clone)]
+pub struct MemoryRetrievalScope {
+    pub current: Vec<RetrievedMemory>,
+    pub eligible_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

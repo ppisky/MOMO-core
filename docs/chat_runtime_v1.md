@@ -1,7 +1,7 @@
 # MOMO native response runtime
 
 **Status:** 1.0 release-candidate contract
-**Updated:** 2026-09-05
+**Updated:** 2026-09-30
 
 The production conversation entry point is the native `MomoApi` operation,
 exposed by `momo-server` as `POST /v1/momo/responses`. The older low-level
@@ -55,9 +55,11 @@ instructions, current character Markdown, character-relative user Markdown,
 retrieved DMW, MO State, active NSG lore, then the product-owned Roleplay
 Director. Putting the execution policy after the evidence keeps long memory
 from diluting its final response constraints; it does not change the authority
-of the character or author-owned material. Multi-Space DMW and NSG entries
-retain their source label and Space ID in the rendered context so personal and
-shared facts are not silently presented as one owner. The complete system
+of the character or author-owned material. Multi-Space DMW and NSG retrieval
+objects retain `memory_space.id` and `memory_space.label`; current rendered
+record headers include the record ID and source label, not the Space ID or a
+complete original-conversation provenance chain. Labels alone do not prove
+assistant identity or participation. The complete system
 message and newest conversation messages share one hard input budget;
 `truncated_messages` reports when either a system message or retained history
 message had to be shortened.
@@ -71,11 +73,27 @@ that wants an opening message must expand any template variables and present
 it itself; merely creating a conversation does not add the asset to history,
 DMW, or MO State.
 
+Prompt/card edits preserve the selected identity; changing the host's default
+assistant to another identity does not transfer past experiences. The working-tree
+[provenance profile](memory_provenance_runtime.md) captures historical evidence,
+qualifies both state and prompt inputs, and distinguishes own/external context.
+The native response request shape remains unchanged.
+
 When a maintenance threshold is reached, Core retrieves relevant existing DMW
 and NSG material from the explicit memory Spaces and sends that read-only context,
 the pending turns, and the current timestamp to the selected maintenance route.
 Context retrieval must succeed before a model may propose a patch; Core never
 falls back to transcript-only blind writes.
+The default threshold is 12 queued user/assistant pairs. Each write Space and
+maintenance kind consumes its oldest
+unprocessed batch and acknowledges it after commit. Successful batches do not
+overlap; source memory may still be retrieved as reference. Queues are not
+partitioned by conversation, and a manual drain can consume a partial batch.
+This is independent of foreground context-window eviction and per-response
+MO State projection. Current history selection uses token budgets; removing
+six old turns is a separate proposed eviction policy, not a six-turn extraction
+limit or an implemented Core policy. See the
+[code-verified maintenance guide](memory_maintenance_current_behavior.zh-CN.md).
 The structured input preserves source text verbatim and does not infer a
 language or script as a control signal. Language preservation is covered by
 multilingual regression tests rather than a production CJK/Latin heuristic.
@@ -168,3 +186,7 @@ identity boundary.
 Only the frozen 1.0 fixtures, including multimodal input, live under
 `contracts/1.0`; publishing still waits for the credentialed provider smoke test. See
 [`roadmap_1_0_0.md`](roadmap_1_0_0.md).
+
+## 2026-09-30 provenance profile update
+
+The working tree implements [memory provenance Profile 1](memory_provenance_runtime.md). This profile supersedes earlier planned-extension notes for identity, record eligibility, scoped scenes, source controls and the 12/2 context window. MOC preserves origin evidence while dropping imported local grants; source Space IDs are not rewritten by `space_map`.

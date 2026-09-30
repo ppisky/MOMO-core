@@ -26,6 +26,21 @@ patches:
 "#;
 
 #[test]
+fn automatic_draft_promotion_requires_explicit_candidate_approval() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = NsgWorkspace::initialize(root.path()).unwrap();
+    graph.apply_patch(CREATE_DRAFT).unwrap();
+    graph.apply_patch("patches:\n  - target_file: lore/black_flame.nsg\n    operations:\n      - type: update_frontmatter\n        fields:\n          mode: canon\n").unwrap();
+    let text = std::fs::read_to_string(root.path().join("lore/black_flame.nsg")).unwrap();
+    assert_eq!(NsgNode::parse(&text).unwrap().mode, NsgMode::Draft);
+    let pending = graph.list_pending_candidates().unwrap();
+    assert_eq!(pending.len(), 1);
+    graph.approve_pending_candidate(&pending[0].path).unwrap();
+    let text = std::fs::read_to_string(root.path().join("lore/black_flame.nsg")).unwrap();
+    assert_eq!(NsgNode::parse(&text).unwrap().mode, NsgMode::Canon);
+}
+
+#[test]
 fn node_round_trip_preserves_semantics_and_edges() {
     let text = r#"# ID: lore_black_flame
 # TYPE: lore

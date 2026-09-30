@@ -54,6 +54,7 @@ async fn retrieval_waits_for_writer_using_a_different_uuid_spelling() {
     let mut retrieval = Box::pin(retrieve_scoped_memory_snapshot(
         &runtime,
         ScopedMemoryRequest {
+            identity: None,
             spaces: vec![source(&id.to_uppercase(), "memory", 1)],
             observe_space_ids: Vec::new(),
             query: "scene".to_owned(),
@@ -87,6 +88,7 @@ async fn retrieval_deduplicates_uuid_locks_but_preserves_observation_names() {
         retrieve_scoped_memory_snapshot(
             &runtime,
             ScopedMemoryRequest {
+                identity: None,
                 spaces: vec![source(&id.to_string(), "memory", 1)],
                 observe_space_ids: vec![id.to_string().to_uppercase(), id.simple().to_string()],
                 query: "scene".to_owned(),

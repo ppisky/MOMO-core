@@ -1,13 +1,28 @@
 # Dual-Mem Wiki and NSG v2 Implementation
 
-**Updated:** 2026-09-05
+**Updated:** 2026-09-30
 
 This document describes the implemented runtime profile. The normative product
 specifications are [`Dual-Mem_Wiki_v2.md`](../Dual-Mem_Wiki_v2.md) and
 [`Narrative_Semantic_Graph_v2.md`](../Narrative_Semantic_Graph_v2.md).
 
+## Identity and provenance boundary
+
+The working tree implements [provenance Profile 1](memory_provenance_runtime.md).
+Legacy association fields retain their original meaning. Historical evidence,
+record grants, qualified state/prompt inputs, scoped scenes and portable revision
+history are stored separately. Native results include Space/module/record references
+and perspective metadata. Prompt revision is not assistant identity.
+
 ## Distillation
 
+- Automatic DMW and NSG maintenance independently consume non-overlapping
+  batches of pending completed user/assistant pairs per write Space, default
+  12 pairs. This queue is independent of context eviction; removing six old
+  turns would be a context policy, not a six-turn summary limit. Current Core
+  selects history by token budget rather than a fixed six-turn eviction rule.
+  Manual management drains can flush a partial batch. See the
+  [code-verified maintenance guide](memory_maintenance_current_behavior.zh-CN.md).
 - Every request prepends an immutable YAML Patch contract before optional user
   guidance.
 - The current Unix timestamp is injected at runtime. Prompts contain no fixed
@@ -25,17 +40,28 @@ specifications are [`Dual-Mem_Wiki_v2.md`](../Dual-Mem_Wiki_v2.md) and
 - Active documents can decay into the archive and can only be restored through
   an explicit user-authorized operation.
 - Archived weights continue to decay.
-- Only low-value event memories that have remained unreferenced for 180 days
-  can be forgotten. Forgetting keeps a minimal tombstone in
+- Native MO State now ages non-core events by completed interaction clocks
+  per Space/conversation/character: default decay after 48 unhit turns and
+  forgetting after 240 archived/unhit turns in every enrolled context.
+  Importance below 0.2, weight below 0.05 and no protected references/tags are
+  required for forgetting. Idle time does not count. Forgetting keeps a minimal tombstone in
   `tombstones/forgotten.yaml` and records an audit event.
 - Runtime fields such as `touch_at` and `archived_at` are controlled by MOMO,
   not by model patches.
+- `mo_state.memory_lifecycle` configures turn intervals, decay factor and
+  enable/physical-forgetting switches. Completion stores durable activity;
+  prepared file plans recover without double aging. See the
+  [implemented lifecycle profile](memory_lifecycle_runtime.md).
+- Explicit low-level calendar maintenance remains available for compatibility;
+  native automatic/HTTP maintenance no longer uses calendar age. Manual archive
+  no longer sweeps unrelated documents.
 
 ## NSG semantic web
 
 - `.nsg` files use strict node metadata, semantic tags, and four edge
   categories with a relation whitelist.
 - Automatically created nodes start as `draft`.
+- Automatic Draft-to-Canon metadata changes become candidates requiring approval.
 - Canon mutations become pending revision candidates unless an authorized
   manual operation explicitly changes them.
 - Retrieval tokenizes multiword anchors for normalized deterministic matching with optional
@@ -71,8 +97,10 @@ specifications are [`Dual-Mem_Wiki_v2.md`](../Dual-Mem_Wiki_v2.md) and
   event in SQLite, idempotently publishes its snapshot, and atomically marks
   the projected state operation complete with the response replay record.
 - In `closed_autonomous`, due DMW/NSG maintenance is recovered before the next
-  observation and scene-aware DMW distillation is scheduled after each text
-  turn. The external tool executor remains owned by the host harness.
+  observation. Completion of an eligible text response schedules a maintenance
+  check; scene-aware DMW distillation still waits for its configured batch
+  threshold. It is not necessarily a model call on every turn. The external
+  tool executor remains owned by the host harness.
 
 ## Verification Fixture
 

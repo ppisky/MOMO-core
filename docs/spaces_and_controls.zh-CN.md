@@ -19,6 +19,15 @@ Space 的记忆；角色卡本身不会因此复制到这些 Space。
 
 ## 为什么既有个人 Space 又有会话 Space
 
+用户通常长期使用同一个个人 Space。宿主也可按功能配置稳定 Space；切换助手、编辑提示词
+或新建对话不要求用户切换空间。功能 Space 表示数据管理与访问边界，并不能证明其中每条
+记忆的来源助手、经历参与者或适用情境。功能划分属于宿主策略，不是 Core 固定的目录。
+
+[记忆身份、来源与共享设计](memory_identity_and_provenance.md)采用“默认隔离、显式共享”：
+助手身份稳定，提示词可修改；来源、主体与适用范围由记录和证据表达。可以共享用户偏好，
+不能把 A 的经历或承诺自动转移给 B。优先共享读取权威记录，避免按功能默认复制多份。
+工作树已通过 [Profile 1](memory_provenance_runtime.md) 接入记录策略与资格检查；宿主仍负责 Space 授权。
+
 两者解决不同的问题。个人 Space 让同一用户跨频道保持自己的长期记忆；会话 Space
 保证群 A 的消息不会被群 B 当成历史。对于 Discord 群聊，mobot 默认提交两个记忆源：
 
@@ -41,6 +50,10 @@ Space 的记忆；角色卡本身不会因此复制到这些 Space。
 - 删除会话：`delete_conversation` 删除指定会话及消息，然后宿主移除映射。
 - 清记忆：`clear_memory` 清一个目标 Space 的 DMW、NSG 或两者；不删除聊天记录。
 - 换角色：`switch_character` 改变已有会话引用的 `character_id`；普通回复请求不能偷偷换。
+
+删除会话后，已提炼的 DMW/NSG 仍然保留。当前删除还会留下本地墓碑/删除快照，且不会按
+会话清理独立的待提炼队列；队列里的旧问答之后仍可能生成记忆。“删聊天”“停止后续提炼”
+和“撤销派生记忆”不能混成同一个保证。详见[当前维护行为](memory_maintenance_current_behavior.zh-CN.md)。
 
 控制请求发送到 `POST /v1/momo/control`，不会经过模型：
 
@@ -124,3 +137,7 @@ Space、DMW Space 与 NSG Space。导入默认保留来源 UUID；只有显式 `
 `include_str!` 编译进 `momo_core`。MOMO 不读取 `momo.toml`；这些提示词也不属于
 MOC 或任何 Space。进程级覆盖值只能通过 Prompt Spaces HTTP API 管理。
 详见[Prompt Spaces 说明](maintenance_prompts.zh-CN.md)。
+
+## 2026-09-30 provenance profile update
+
+The working tree implements [memory provenance Profile 1](memory_provenance_runtime.md). This profile supersedes earlier planned-extension notes for identity, record eligibility, scoped scenes, source controls and the 12/2 context window. MOC preserves origin evidence while dropping imported local grants; source Space IDs are not rewritten by `space_map`.

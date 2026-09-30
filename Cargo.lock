@@ -2102,6 +2102,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "unicode-normalization",
+ "uuid",
  "yaml_serde",
 ]
 
@@ -2184,6 +2185,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx",
  "tempfile",
  "thiserror",
  "tiktoken-rs",

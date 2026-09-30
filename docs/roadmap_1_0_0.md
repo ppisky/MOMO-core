@@ -119,9 +119,10 @@ and cross-protocol tests are green.
 
 ## Gate 4: release candidate reproducibility
 
-- [x] Provide an English `momo.example.toml`, complete tracked DMW/NSG/Roleplay
+- [x] Provide typed runtime-policy examples, complete tracked DMW/NSG/Roleplay
   Director Markdown assets, and Simplified Chinese and English configuration
-  and Space/control guides.
+  and Space/control guides. The former host TOML example is available in Git
+  history; Core does not read it.
 - [x] Re-run formatting, all-target/all-feature tests, strict Clippy, rustdoc,
   cross-repository fixture comparison, and Release builds from the final
   revisions.

@@ -1,5 +1,121 @@
 use super::super::*;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProvenanceQuery {
+    space_id: uuid::Uuid,
+    #[serde(default)]
+    semantic_graph: bool,
+}
+
+pub(crate) async fn get_memory_provenance(
+    State(state): State<AppState>,
+    Query(request): Query<ProvenanceQuery>,
+) -> Result<Json<Value>, ApiError> {
+    json_result(
+        runtime_api::memory_provenance_status(
+            &state.runtime,
+            request.space_id,
+            request.semantic_graph,
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecordPolicyRequest {
+    space_id: uuid::Uuid,
+    semantic_graph: bool,
+    record_id: String,
+    policy: momo_core::momo_domain::provenance::RecordPolicy,
+}
+
+pub(crate) async fn put_memory_record_policy(
+    State(state): State<AppState>,
+    Json(request): Json<RecordPolicyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    ok_json(
+        runtime_api::set_memory_record_policy(
+            &state.runtime,
+            request.space_id,
+            request.semantic_graph,
+            request.record_id,
+            request.policy,
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IdentityBindingRequest {
+    conversation_space_id: uuid::Uuid,
+    conversation_id: uuid::Uuid,
+    continuity_id: uuid::Uuid,
+    function_id: Option<String>,
+}
+
+pub(crate) async fn put_memory_identity_binding(
+    State(state): State<AppState>,
+    Json(request): Json<IdentityBindingRequest>,
+) -> Result<Json<Value>, ApiError> {
+    ok_json(
+        runtime_api::set_memory_identity_binding(
+            &state.runtime,
+            request.conversation_space_id,
+            request.conversation_id,
+            request.continuity_id,
+            request.function_id,
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EvidenceControlRequest {
+    conversation_id: uuid::Uuid,
+    stop_maintenance: bool,
+    revoke: bool,
+}
+
+pub(crate) async fn control_memory_evidence(
+    State(state): State<AppState>,
+    Json(request): Json<EvidenceControlRequest>,
+) -> Result<Json<Value>, ApiError> {
+    ok_json(
+        runtime_api::control_memory_evidence(
+            &state.runtime,
+            request.conversation_id,
+            request.stop_maintenance,
+            request.revoke,
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DefaultAssistantRequest {
+    personal_space_id: uuid::Uuid,
+    character_id: uuid::Uuid,
+}
+
+pub(crate) async fn put_default_memory_assistant(
+    State(state): State<AppState>,
+    Json(request): Json<DefaultAssistantRequest>,
+) -> Result<Json<Value>, ApiError> {
+    ok_json(
+        runtime_api::set_default_memory_assistant(
+            &state.runtime,
+            request.personal_space_id,
+            request.character_id,
+        )
+        .await,
+    )
+}
+
 pub(crate) async fn memory_recovery_status(State(state): State<AppState>) -> Json<Value> {
     Json(json!(runtime_api::memory_recovery_status(
         state.runtime.as_ref()
@@ -93,6 +209,7 @@ pub(crate) async fn retrieve_scoped_memory(
         runtime_api::retrieve_scoped_memory(
             state.runtime.as_ref(),
             runtime_api::ScopedMemoryRequest {
+                identity: request.identity,
                 spaces: request.spaces,
                 query: request.query,
                 max_tokens: request.max_tokens,
@@ -220,7 +337,7 @@ pub(crate) async fn drain_momo_kind(
         }
         state
             .momo_api
-            .maintain(space_id, kind, pending.len())
+            .maintain_manually(space_id, kind, pending.len())
             .await
             .map_err(response_api::momo_api_error)?;
     }

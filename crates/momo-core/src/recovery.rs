@@ -22,6 +22,12 @@ impl MomoCore {
         for pending in self.store().pending_memory_patch_commits().await? {
             spaces.insert(pending.review.scope_id);
         }
+        for space in self.store().prepared_lifecycle_spaces().await? {
+            spaces.insert(
+                uuid::Uuid::parse_str(&space)
+                    .map_err(|error| momo_memory::MemoryError::InvalidPatch(error.to_string()))?,
+            );
+        }
         for space in spaces {
             // A damaged Space must not prevent unrelated Spaces or diagnostics starting.
             if let Err(error) = self.recover_space_commits(space).await {
@@ -134,6 +140,18 @@ impl MomoCore {
         let result = async {
             for pending in self
                 .store()
+                .pending_lifecycle_events(Some(&space.to_string()))
+                .await?
+            {
+                if let Some(plan) = pending.prepared_commit_json.as_deref() {
+                    self.apply_journaled_memory_commit(space, plan).await?;
+                    self.store()
+                        .complete_lifecycle_event(&pending.request_id)
+                        .await?;
+                }
+            }
+            for pending in self
+                .store()
                 .pending_space_maintenance_commits(space)
                 .await?
             {
@@ -210,6 +228,53 @@ impl MomoCore {
         .await
         .map_err(|error| invalid(format!("memory commit task failed: {error}")))??;
         Ok(())
+    }
+
+    /// Run a bounded set of accepted completed-turn events under the same
+    /// durable file-plan recovery protocol used by DMW/NSG maintenance.
+    pub async fn process_memory_lifecycle(
+        &self,
+        space: uuid::Uuid,
+    ) -> Result<momo_memory::MaintenanceReport, CoreError> {
+        let core = self.clone();
+        self.finish_commit(async move {
+            let _guards = core.lock_spaces([space]).await?;
+            let mut result = momo_memory::MaintenanceReport::default();
+            for pending in core
+                .store()
+                .pending_lifecycle_events(Some(&space.to_string()))
+                .await?
+            {
+                let invalid = |error: String| momo_memory::MemoryError::InvalidPatch(error);
+                let activity: momo_memory::lifecycle::LifecycleActivity =
+                    serde_json::from_str(&pending.activity_json)
+                        .map_err(|e| invalid(e.to_string()))?;
+                let workspace = core.memory_for_space(space)?;
+                let (plan, report) = tokio::task::spawn_blocking(move || {
+                    workspace.prepare_lifecycle_activity(&activity, chrono::Utc::now().timestamp())
+                })
+                .await
+                .map_err(|e| invalid(e.to_string()))??;
+                let encoded = serde_json::to_string(&plan).map_err(|e| invalid(e.to_string()))?;
+                let report_json =
+                    serde_json::to_string(&report).map_err(|e| invalid(e.to_string()))?;
+                core.store()
+                    .prepare_lifecycle_event(&pending.request_id, &encoded, &report_json)
+                    .await?;
+                core.mark_memory_commit_pending(space);
+                core.apply_journaled_memory_commit(space, &encoded).await?;
+                core.store()
+                    .complete_lifecycle_event(&pending.request_id)
+                    .await?;
+                core.clear_memory_commit_pending(space);
+                result.decayed_ids.extend(report.decayed_ids);
+                result.archived_ids.extend(report.archived_ids);
+                result.forgotten_ids.extend(report.forgotten_ids);
+            }
+            Ok::<_, CoreError>(result)
+        })
+        .await
+        .map_err(|e| momo_memory::MemoryError::InvalidPatch(e.to_string()))?
     }
 
     /// Requires the caller to hold the Space write lock, or exclusive startup ownership.

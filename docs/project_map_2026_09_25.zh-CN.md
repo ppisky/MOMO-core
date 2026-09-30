@@ -49,7 +49,7 @@ SQLite 和记忆文件需要共同完成操作，因此代码有 prepared commit
 
 ## 配置怎么生效
 
-当前 `MomoRuntime` 以 `MomoRuntimeSettings::default()` 初始化，通过本地管理 API 替换运行策略；服务不自动读取 `momo.example.toml`。运行策略由 Runtime 在内存中统一持有，重新启动会重新采用启动默认值，宿主需要按自己的生命周期重新应用策略。Prompt Spaces 同样由 Runtime 持有，但持久化到 `prompt-spaces.json`；新建服务门面不会重置两者。
+当前 `MomoRuntime` 以 `MomoRuntimeSettings::default()` 初始化，通过本地管理 API 替换运行策略；服务不读取宿主配置文件；旧 TOML 示例可从 Git 历史恢复。运行策略由 Runtime 在内存中统一持有，重新启动会重新采用启动默认值，宿主需要按自己的生命周期重新应用策略。Prompt Spaces 同样由 Runtime 持有，但持久化到 `prompt-spaces.json`；新建服务门面不会重置两者。
 
 服务地址、数据目录和模型网关等由 `MOMO_SERVER_BIND`、`MOMO_DATA_DIR`、`MOMO_MODEL_GATEWAY_ORIGIN` 等环境变量配置。Prompt Spaces 单独加载并保存覆盖值。排查配置问题时应先辨认属于哪一条路径。
 

@@ -18,6 +18,118 @@ const PATCH: &str = r#"patches:
         content: Recovered exactly once.
 "#;
 
+async fn lifecycle_event(core: &MomoCore, space: uuid::Uuid, request: &str) {
+    let activity = momo_memory::lifecycle::LifecycleActivity {
+        identity: None,
+        conversation_id: "00000000-0000-4000-8000-000000000001".into(),
+        character_id: "00000000-0000-4000-8000-000000000002".into(),
+        query: "hello".into(),
+        settings: Default::default(),
+    };
+    sqlx::query(
+        "INSERT INTO memory_lifecycle_events(request_id, space_id, activity_json) VALUES (?,?,?)",
+    )
+    .bind(request)
+    .bind(space.to_string())
+    .bind(serde_json::to_string(&activity).unwrap())
+    .execute(core.store().pool())
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_prepared_commit_recovers_once_after_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = MomoCore::initialize(directory.path()).await.unwrap();
+    let space = momo_domain::new_id();
+    lifecycle_event(&core, space, "lifecycle-recovery").await;
+    let pending = core
+        .store()
+        .pending_lifecycle_events(Some(&space.to_string()))
+        .await
+        .unwrap();
+    let activity = serde_json::from_str(&pending[0].activity_json).unwrap();
+    let memory = core.memory_for_space(space).unwrap();
+    let (plan, report) = memory.prepare_lifecycle_activity(&activity, 1).unwrap();
+    core.store()
+        .prepare_lifecycle_event(
+            "lifecycle-recovery",
+            &serde_json::to_string(&plan).unwrap(),
+            &serde_json::to_string(&report).unwrap(),
+        )
+        .await
+        .unwrap();
+    memory.apply_prepared_commit(&plan).unwrap();
+    drop(memory);
+    drop(core);
+    let core = MomoCore::initialize(directory.path()).await.unwrap();
+    assert!(
+        core.store()
+            .pending_lifecycle_events(Some(&space.to_string()))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let path = directory
+        .path()
+        .join("spaces")
+        .join(space.to_string())
+        .join("memory/indexes/lifecycle_activity.json");
+    let before = std::fs::read(&path).unwrap();
+    core.process_memory_lifecycle(space).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let ledger: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(
+        ledger["contexts"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap(),
+        1
+    );
+    lifecycle_event(&core, space, "next-completed-turn").await;
+    core.process_memory_lifecycle(space).await.unwrap();
+    let ledger: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        ledger["contexts"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_clear_removes_pending_events_without_advancing_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = MomoCore::initialize(directory.path()).await.unwrap();
+    let space = momo_domain::new_id();
+    lifecycle_event(&core, space, "clear-pending-lifecycle").await;
+    core.store()
+        .clear_space_memory_state(space, true, false)
+        .await
+        .unwrap();
+    assert!(
+        core.store()
+            .pending_lifecycle_events(Some(&space.to_string()))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    core.process_memory_lifecycle(space).await.unwrap();
+    assert!(
+        !directory
+            .path()
+            .join("spaces")
+            .join(space.to_string())
+            .join("memory/indexes/lifecycle_activity.json")
+            .exists()
+    );
+}
+
 #[tokio::test]
 async fn approved_review_recovers_files_and_audit_after_restart() {
     let directory = tempfile::tempdir().expect("directory");

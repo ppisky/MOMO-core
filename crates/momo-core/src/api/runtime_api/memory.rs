@@ -38,6 +38,8 @@ pub struct MemorySpaceSource {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScopedMemoryRequest {
+    #[serde(default)]
+    pub identity: Option<momo_domain::provenance::MemoryIdentity>,
     pub spaces: Vec<MemorySpaceSource>,
     #[serde(default)]
     pub observe_space_ids: Vec<String>,
@@ -67,6 +69,57 @@ struct RetrievalPlan {
     include_memory: bool,
     include_semantic_graph: bool,
     vector: Option<VectorQuery>,
+    dmw_scope: Option<momo_memory::MemoryRetrievalScope>,
+}
+
+/// Qualify before ranking so inaccessible records cannot consume the budget
+/// or supply another story's hot references.
+async fn prepare_dmw_scope(
+    core: &MomoCore,
+    space: uuid::Uuid,
+    identity: &momo_domain::provenance::MemoryIdentity,
+) -> RuntimeApiResult<momo_memory::MemoryRetrievalScope> {
+    let workspace = core
+        .memory_for_space(space)
+        .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+    let identity_copy = identity.clone();
+    let (mut current, mut items) = run_blocking("prepare scoped recall", move || {
+        let current = workspace
+            .scoped_current(&identity_copy)
+            .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+        let items = workspace
+            .list_documents()
+            .map_err(|e| RuntimeApiError::internal(e.to_string()))?
+            .into_iter()
+            .filter(|d| d.status == "active" && d.kind != "current")
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+        Ok((current, items))
+    })
+    .await?;
+    for document in &current {
+        items.push(
+            serde_json::to_value(document).map_err(|e| RuntimeApiError::internal(e.to_string()))?,
+        );
+    }
+    for item in &mut items {
+        item["memory_space"] = serde_json::json!({"id":space});
+    }
+    let eligible_ids: std::collections::HashSet<_> = qualify_memory_items(core, items, identity)
+        .await?
+        .iter()
+        .filter_map(|v| {
+            v.pointer("/provenance/local_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    current.retain(|d| eligible_ids.contains(&d.id));
+    Ok(momo_memory::MemoryRetrievalScope {
+        current,
+        eligible_ids,
+    })
 }
 
 /// Retrieve from several isolated memory workspaces while preserving the
@@ -161,6 +214,7 @@ pub(crate) async fn retrieve_scoped_memory_snapshot(
             let _state_guards = state_guards;
             let budgets = weighted_space_budgets(&request.spaces, request.max_tokens);
             let mut combined = Vec::new();
+            let mut full_current = Vec::new();
             for (source, budget) in request.spaces.into_iter().zip(budgets) {
                 if budget == 0 {
                     continue;
@@ -173,6 +227,24 @@ pub(crate) async fn retrieve_scoped_memory_snapshot(
                         vector: vector.clone(),
                     },
                 );
+                let dmw_scope = if source.memory {
+                    if let Some(identity) = &request.identity {
+                        Some(prepare_dmw_scope(&core, scope_id, identity).await?)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(scope) = &dmw_scope {
+                    for current in &scope.current {
+                        let mut value = serde_json::to_value(current)
+                            .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+                        value["memory_space"] =
+                            json!({"id": source.space_id, "label": source.label});
+                        full_current.push(value);
+                    }
+                }
                 let values = retrieve_memory(
                     &core,
                     RetrievalPlan {
@@ -182,6 +254,7 @@ pub(crate) async fn retrieve_scoped_memory_snapshot(
                         include_memory: source.memory,
                         include_semantic_graph: source.semantic_graph,
                         vector,
+                        dmw_scope,
                     },
                 )
                 .await?;
@@ -199,6 +272,10 @@ pub(crate) async fn retrieve_scoped_memory_snapshot(
                     combined.push(value);
                 }
             }
+            if let Some(identity) = &request.identity {
+                combined = qualify_memory_items(&core, combined, identity).await?;
+                full_current = qualify_memory_items(&core, full_current, identity).await?;
+            }
             let observed_spaces = std::mem::take(&mut observed_space_ids)
                 .into_iter()
                 .map(|space_id| {
@@ -208,15 +285,54 @@ pub(crate) async fn retrieve_scoped_memory_snapshot(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let core = core.clone();
+            let mut qualified_sources = combined.clone();
+            if request.identity.is_some() {
+                qualified_sources.retain(|v| {
+                    !v["path"]
+                        .as_str()
+                        .is_some_and(|p| p.starts_with("current/"))
+                });
+                qualified_sources.extend(full_current);
+            }
+            let observation_identity = request.identity.clone();
             let source_observations = tokio::task::spawn_blocking(move || {
                 observed_spaces
                     .into_iter()
                     .map(|(space_id, parsed_space_id)| {
-                        let source = core
+                        let mut source = core
                             .memory_for_space(parsed_space_id)
                             .map_err(|error| RuntimeApiError::internal(error.to_string()))?
                             .mo_state_source_fingerprint()
                             .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+                        if let Some(identity) = &observation_identity {
+                            use sha2::{Digest, Sha256};
+                            let records: Vec<_> = qualified_sources
+                                .iter()
+                                .filter(|item| {
+                                    item.pointer("/memory_space/id")
+                                        .and_then(serde_json::Value::as_str)
+                                        == Some(&space_id)
+                                })
+                                .collect();
+                            let encoded = serde_json::to_vec(&(identity, &records))
+                                .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+                            let hash = hex::encode(Sha256::digest(encoded));
+                            source.dmw = hash.clone();
+                            source.nsg = hash.clone();
+                            source.scene = hash.clone();
+                            let body = |path: &str| {
+                                records
+                                    .iter()
+                                    .find(|item| item["path"].as_str() == Some(path))
+                                    .and_then(|item| item["body"].as_str())
+                                    .unwrap_or_default()
+                            };
+                            source.scene_snapshot = momo_memory::scene::parse_scene(
+                                body("current/scene.md"),
+                                body("current/active_threads.md"),
+                                &hash,
+                            );
+                        }
                         Ok(momo_storage::MoStateSourceObservation {
                             space_id,
                             dmw_fingerprint: source.dmw,
@@ -351,6 +467,7 @@ pub async fn retrieve_memory_items(
                     include_memory: true,
                     include_semantic_graph: true,
                     vector: None,
+                    dmw_scope: None,
                 },
             )
             .await
@@ -429,10 +546,11 @@ async fn retrieve_memory(
         );
         let memories = if plan.include_memory {
             workspace
-                .retrieve(
+                .retrieve_in_scope(
                     &plan.query,
                     memory_budget,
                     &momo_memory::ConservativeTokenCounter,
+                    plan.dmw_scope.as_ref(),
                 )
                 .map_err(|error| RuntimeApiError::internal(error.to_string()))?
         } else {
@@ -767,7 +885,7 @@ pub async fn archive_memory_document(
             .apply_patch(&yaml_patch)
             .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
         workspace
-            .run_maintenance()
+            .move_archived_document(&entry_path)
             .map_err(|error| RuntimeApiError::internal(error.to_string()))
     })
     .await?;

@@ -3,6 +3,15 @@
 Standard: NSG-STD-0013                                 August 04, 2026
 Category: Specification                                Status: Implemented Normative Contract
 
+## 身份与来源 Profile 1（2026-09-30）
+
+[来源运行时 Profile 1](docs/memory_provenance_runtime.md)已接入当前工作树，等待审查。
+`rules/provenance.json` 保存独立于节点正文的来源、修订与宿主策略；Patch item 可提供
+`evidence_refs`，必须引用当前可信批次的证据。`source_evidence` 仍是候选说明，不能签发审批。
+相同 `graph_id` 不表示同一世界，规则需要显式连续情境映射；读取不授予 Canon 权威。
+Draft 新增/整理可自动执行；自动 Patch 提升 Draft 为 Canon 必须转为 Revision Candidate，
+作者批准追加审计并保留原始提案，而不改写成用户原创。
+
 ## 摘要 (Abstract)
 
 本文档独立定义 Narrative Semantic Graph v2（NSG v2）的数据结构、检索、排序、Auto-Zone、1-Hop Expansion、Canon/Draft 治理、Revision Candidate 与向量召回规则。实现方不需要读取其他版本的 NSG 文档即可实现本规范。

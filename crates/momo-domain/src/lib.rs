@@ -1,5 +1,7 @@
 //! Shared MOMO domain types without storage, network, or UI dependencies.
 
+pub mod provenance;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

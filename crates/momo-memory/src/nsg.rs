@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
-use super::{FileMutation, MemoryError, TokenCounter, commit_mutations};
+use super::{FileMutation, MemoryError, TokenCounter};
 
 const NSG_DIRECTORIES: &[&str] = &[
     "lore",
@@ -422,7 +422,11 @@ impl NsgWorkspace {
 
     pub fn apply_patch(&self, yaml: &str) -> Result<(), MemoryError> {
         let mutations = self.prepare_patch(yaml, false)?;
-        commit_mutations(&mutations)
+        let mut context =
+            momo_domain::provenance::RevisionContext::manual("submitted_nsg_proposal");
+        context.proposer = "external_proposer".into();
+        context.authorization = "automatic_draft_policy/1".into();
+        crate::provenance::commit_traced(&self.root, &mutations, &context)
     }
 
     /// Freezes the exact validated automatic patch for a durable maintenance journal.
@@ -435,7 +439,11 @@ impl NsgWorkspace {
 
     pub fn apply_patch_authorized(&self, yaml: &str) -> Result<(), MemoryError> {
         let mutations = self.prepare_patch(yaml, true)?;
-        commit_mutations(&mutations)
+        crate::provenance::commit_traced(
+            &self.root,
+            &mutations,
+            &momo_domain::provenance::RevisionContext::manual("nsg_patch"),
+        )
     }
 
     /// Checks an automatic patch against the current graph without writing it.
@@ -523,7 +531,9 @@ impl NsgWorkspace {
                     mutations.push(pending);
                     continue;
                 }
-                if node.mode == NsgMode::Canon && !authorized {
+                let promotes_canon = matches!(&operation, NsgOperation::UpdateFrontmatter { fields }
+                    if fields.mode == Some(NsgMode::Canon));
+                if !authorized && (node.mode == NsgMode::Canon || promotes_canon) {
                     let candidate = NsgOperation::RevisionCandidate {
                         reason: "Automatic change was blocked by Canon protection.".to_owned(),
                         suggested_changes: vec![SuggestedChange::try_from(operation)?],
@@ -833,13 +843,20 @@ impl NsgWorkspace {
         for change in suggested_changes {
             apply_suggested_change(&mut node, change)?;
         }
-        commit_mutations(&[
-            FileMutation::Write {
-                path: self.resolve(&target)?,
-                content: node.encode()?.into_bytes(),
+        crate::provenance::commit_traced(
+            &self.root,
+            &[
+                FileMutation::Write {
+                    path: self.resolve(&target)?,
+                    content: node.encode()?.into_bytes(),
+                },
+                FileMutation::Delete { path: pending_path },
+            ],
+            &momo_domain::provenance::RevisionContext {
+                parent_records: vec![relative.to_string_lossy().replace('\\', "/")],
+                ..momo_domain::provenance::RevisionContext::manual("approve_candidate")
             },
-            FileMutation::Delete { path: pending_path },
-        ])
+        )
     }
 
     pub fn reject_pending_candidate(&self, pending_path: &str) -> Result<(), MemoryError> {
@@ -849,7 +866,11 @@ impl NsgWorkspace {
         if !matches!(candidate, NsgOperation::RevisionCandidate { .. }) {
             return Err(invalid("pending file is not an NSG revision candidate"));
         }
-        commit_mutations(&[FileMutation::Delete { path }])
+        crate::provenance::commit_traced(
+            &self.root,
+            &[FileMutation::Delete { path }],
+            &momo_domain::provenance::RevisionContext::manual("nsg_edit"),
+        )
     }
 
     pub fn write_node(&self, target_file: &str, node: NsgNode) -> Result<(), MemoryError> {
@@ -861,10 +882,14 @@ impl NsgWorkspace {
                 return Err(invalid("NSG node ID already exists"));
             }
         }
-        commit_mutations(&[FileMutation::Write {
-            path,
-            content: node.encode()?.into_bytes(),
-        }])
+        crate::provenance::commit_traced(
+            &self.root,
+            &[FileMutation::Write {
+                path,
+                content: node.encode()?.into_bytes(),
+            }],
+            &momo_domain::provenance::RevisionContext::manual("nsg_edit"),
+        )
     }
 
     pub fn archive_node(&self, target_file: &str) -> Result<(), MemoryError> {
@@ -872,10 +897,14 @@ impl NsgWorkspace {
         let path = self.resolve(&relative)?;
         let mut node = NsgNode::parse(&fs::read_to_string(&path)?)?;
         node.status = NsgStatus::Archived;
-        commit_mutations(&[FileMutation::Write {
-            path,
-            content: node.encode()?.into_bytes(),
-        }])
+        crate::provenance::commit_traced(
+            &self.root,
+            &[FileMutation::Write {
+                path,
+                content: node.encode()?.into_bytes(),
+            }],
+            &momo_domain::provenance::RevisionContext::manual("nsg_edit"),
+        )
     }
 
     /// Permanently removes a user-managed semantic node after confirmation.
@@ -883,7 +912,11 @@ impl NsgWorkspace {
         let relative = validate_nsg_target(target_file)?;
         let path = self.resolve(&relative)?;
         NsgNode::parse(&fs::read_to_string(&path)?)?;
-        commit_mutations(&[FileMutation::Delete { path }])
+        crate::provenance::commit_traced(
+            &self.root,
+            &[FileMutation::Delete { path }],
+            &momo_domain::provenance::RevisionContext::manual("nsg_edit"),
+        )
     }
 
     fn active_nodes(&self) -> Result<Vec<(PathBuf, NsgNode)>, MemoryError> {
@@ -928,6 +961,8 @@ struct NsgPatchDocument {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NsgFilePatch {
+    #[serde(default, rename = "evidence_refs")]
+    _evidence_refs: Vec<String>,
     target_file: String,
     operations: Vec<NsgOperation>,
 }

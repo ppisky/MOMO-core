@@ -49,7 +49,7 @@ pub async fn mo_state_runtime_status(
         .mo_state_runtime_status(&space_id)
         .await
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    match status {
+    let mut value = match status {
         Some(status) => serde_json::to_value(&status)
             .map_err(|error| RuntimeApiError::internal(error.to_string())),
         None => serde_json::to_value(json!({
@@ -57,5 +57,16 @@ pub async fn mo_state_runtime_status(
             "status": "not_initialized"
         }))
         .map_err(|error| RuntimeApiError::internal(error.to_string())),
-    }
+    }?;
+    let mut lifecycle = runtime
+        .core()
+        .store()
+        .lifecycle_status(&space_id)
+        .await
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+    lifecycle["settings"] =
+        serde_json::to_value(runtime.runtime_settings().mo_state.memory_lifecycle)
+            .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+    value["memory_lifecycle"] = lifecycle;
+    Ok(value)
 }

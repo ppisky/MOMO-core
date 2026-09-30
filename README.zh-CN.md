@@ -43,10 +43,12 @@ Linux/macOS 可使用
 `MOMO_DATA_DIR=.momo-data/dev cargo run -p momo-server` 和
 `curl http://127.0.0.1:8765/health`。服务默认只监听 loopback。实际生成还需要通过
 `MOMO_MODEL_GATEWAY_ORIGIN` 配置模型网关，并按需设置
-`MOMO_MODEL_GATEWAY_API_KEY`。可移植产品策略示例见
-[`momo.example.toml`](momo.example.toml)，稳定请求样例见
+`MOMO_MODEL_GATEWAY_API_KEY`。运行策略通过
+[类型化管理接口](docs/runtime_config_0_1.md)设置，Core 不读取宿主配置文件。稳定请求样例见
 [`contracts/1.0/response_request.json`](contracts/1.0/response_request.json)，部署信任边界见
 [`docs/http_api_1_0.md`](docs/http_api_1_0.md)。
+
+`momo-server` 提供 API，不内置图形界面。
 
 `crates/` 下的 crate 是 MOMO Core 的内部实现模块，不是彼此独立的产品，也不会作为
 独立 crates.io 包发布。1.0 的产品稳定面是版本化的原生 HTTP wire（`momo.responses/1.0`

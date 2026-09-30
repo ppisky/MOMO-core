@@ -9,15 +9,15 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub struct PreparedMemoryCommit {
     version: u32,
-    files: Vec<PreparedFile>,
+    pub(crate) files: Vec<PreparedFile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PreparedFile {
-    path: String,
-    before: Option<Vec<u8>>,
-    after: Option<Vec<u8>>,
+pub(crate) struct PreparedFile {
+    pub(crate) path: String,
+    pub(crate) before: Option<Vec<u8>>,
+    pub(crate) after: Option<Vec<u8>>,
 }
 
 impl PreparedMemoryCommit {
@@ -49,6 +49,16 @@ impl PreparedMemoryCommit {
 }
 
 impl MemoryWorkspace {
+    pub fn prepare_identity_patch_commit(
+        &self,
+        yaml: &str,
+        identity: Option<&momo_domain::provenance::MemoryIdentity>,
+    ) -> Result<PreparedMemoryCommit, MemoryError> {
+        PreparedMemoryCommit::prepare(
+            &self.root,
+            &self.prepare_patch_for_identity(yaml, identity)?,
+        )
+    }
     /// Validates a patch and freezes its file contents without applying it.
     /// The caller must serialize writers while preparing, journaling and applying.
     pub fn prepare_patch_commit(&self, yaml: &str) -> Result<PreparedMemoryCommit, MemoryError> {

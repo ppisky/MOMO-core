@@ -9,6 +9,8 @@ __pycache__/
 /.codex-index-check/
 /.momo-data/
 /.claude/
+/.pytest_cache/
+/.codex-wireguard-deploy/
 
 # Local runtime data and secrets
 .env

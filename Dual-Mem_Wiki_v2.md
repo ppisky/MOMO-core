@@ -4,6 +4,13 @@
 Standard: DMW-STD-0010                                 August 04, 2026
 Category: Specification                                Status: Implemented Normative Contract
 
+## 身份与来源 Profile 1（2026-09-30）
+
+[来源运行时 Profile 1](docs/memory_provenance_runtime.md)已接入原生运行时并完成本机回归。
+来源与共享策略保存在 `config/provenance.json`，不把 `relations.characters` 当作作者证明。
+自动提炼绑定发生时身份与证据，原生检索在状态和正文使用之前检查记录资格。
+Patch item 新增可选 `evidence_refs`；Frontmatter 不接受运行时来源或授权字段。
+原始证据、提案组件、触发方式、执行和批准在逐修订记录中区分，读取不转移经历与承诺。
 
 ## 摘要 (Abstract)
 
@@ -843,6 +850,9 @@ MFM MUST NOT 更新 touch_at。
 
 # 8. Maintenance Flow（后台维护）
 
+2026-09-30 原生 Core 已采用第 8.5 节的 MO State 活动生命周期；第 8.1–8.4 节日历时间
+算法保留为显式低层兼容 Profile，不能再当作原生聊天或 HTTP 管理维护的默认行为。
+
 ## 8.1 权重衰减
 
 权重衰减公式保持：
@@ -906,6 +916,11 @@ memory_activity.yaml 不得参与归档判断。
 
 ## 8.4 遗忘规则
 
+遗忘针对已归档的 `event`，需同时满足 `importance < 0.2`、`weight < 0.05`、
+`current_timestamp - archived_at >= 180 days`，且不存在长期记忆关系引用及 Hot Memory 引用。
+180 天从归档时间计算，不从创建时间、删除对话时间或最后一次注入计算；不是所有记忆的统一 TTL。
+删除对话不删除已提炼记忆，也不改变归档计时。遗忘执行后保留最小墓碑并更新索引和审计。
+
 遗忘条件如下；Hot Memory 引用检查仅识别：
 
 ```text
@@ -913,6 +928,20 @@ memory_activity.yaml 不得参与归档判断。
 ```
 
 自然语言提及不应阻止遗忘，除非 Distiller 已将其提炼为长期记忆或显式引用。
+
+**低层兼容 Profile：** `run_maintenance[_at]` 的 Hot Memory 检查仍使用 ID 子串；
+该路径保留 7 天/180 天固定值，原生自动与 HTTP 路径已改用以下活动 Profile。
+
+## 8.5 MO State 活动生命周期（原生默认）
+
+在自治档中，合格的成功响应以 Space/对话/助手为键记录活动事件，按已完成交互推进计数。
+默认每 48 个后续未命中轮次乘 0.9；归档事件还需 240 个后续未命中轮次、低重要度、低权重
+及无保护引用/标签，才可遗忘。可配置开关、轮数、倍率和是否允许物理遗忘。
+仅非核心 event 自动淡化；关系、角色、世界与 current 记录受保护。闲置、重放、单纯注入
+和其他独立情境活动不消耗这里的轮次。未知旧记忆不按日历补算轮数。
+
+轮次和内容变更共同纳入持久提交与恢复；手工维护处理待办但不制造交互。完整字段、保护、
+共享记录计数及兼容边界见[已实现生命周期 Profile](docs/memory_lifecycle_runtime.md)。
 
 ---
 

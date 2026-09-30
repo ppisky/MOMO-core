@@ -242,6 +242,7 @@ async fn ddm_hysteresis_state_is_scoped_and_published_atomically() {
         .await
         .expect("observe");
     let update = DdmProjectionUpdate {
+        eligibility_key: String::new(),
         managed_space_id: observation.space_id.clone(),
         conversation_id: "01900000-0000-7000-8000-000000000301".to_owned(),
         character_id: "01900000-0000-7000-8000-000000000401".to_owned(),
@@ -338,6 +339,7 @@ async fn ddm_projection_update_must_match_the_published_audit() {
         .await
         .expect("observe");
     let update = DdmProjectionUpdate {
+        eligibility_key: String::new(),
         managed_space_id: observation.space_id.clone(),
         conversation_id: "01900000-0000-7000-8000-000000000311".to_owned(),
         character_id: "01900000-0000-7000-8000-000000000411".to_owned(),
@@ -671,6 +673,7 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
     assert!(
         store
             .commit_response_completion(ResponseCompletion {
+                lifecycle_activity_json: Some(r#"{"accepted_activity":"frozen"}"#),
                 request_id: "request-completion",
                 conversation_scope_id: scope_id,
                 assistant_message: Some(&assistant),
@@ -726,6 +729,7 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
     assert!(
         !store
             .commit_response_completion(ResponseCompletion {
+                lifecycle_activity_json: None,
                 request_id: "request-completion",
                 conversation_scope_id: scope_id,
                 assistant_message: Some(&retry),
@@ -737,6 +741,16 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
             })
             .await
             .expect("idempotent completion replay")
+    );
+    let lifecycle = store
+        .pending_lifecycle_events(Some(&scope_id.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(lifecycle.len(), 1);
+    assert_eq!(lifecycle[0].request_id, "request-completion");
+    assert_eq!(
+        lifecycle[0].activity_json,
+        r#"{"accepted_activity":"frozen"}"#
     );
     assert_eq!(
         store
