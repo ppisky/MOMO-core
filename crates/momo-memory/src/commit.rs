@@ -49,6 +49,59 @@ impl PreparedMemoryCommit {
 }
 
 impl MemoryWorkspace {
+    /// Open a materialization without bootstrapping or modifying file contents.
+    /// The owner must replay its durable journal before serving commands.
+    pub fn open_existing(root: impl AsRef<Path>) -> Result<Self, MemoryError> {
+        std::fs::create_dir_all(root.as_ref())?;
+        Ok(Self {
+            root: std::fs::canonicalize(root.as_ref())?,
+            index_cache: std::cell::RefCell::new(None),
+        })
+    }
+
+    /// Prepare a complete snapshot replacement, creating safe parent directories
+    /// but leaving file contents unchanged. Owners journal the snapshot first.
+    pub fn prepare_snapshot_commit(
+        &self,
+        snapshot: &MemorySnapshot,
+    ) -> Result<PreparedMemoryCommit, MemoryError> {
+        if snapshot.version != 1 {
+            return Err(MemoryError::InvalidPatch(
+                "unsupported snapshot version".into(),
+            ));
+        }
+        provenance::validate_snapshot_provenance(snapshot)?;
+        let current = self.export_snapshot()?;
+        let mut mutations = Vec::new();
+        for (path, content) in &snapshot.files {
+            let relative = Path::new(path);
+            validate_relative(relative)?;
+            if let Some(parent) = relative
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                create_managed_directory(&self.root, parent)?;
+            }
+            let target = self.resolve(relative)?;
+            if current.files.get(path) != Some(content) {
+                mutations.push(FileMutation::Write {
+                    path: target,
+                    content: content.as_bytes().to_vec(),
+                });
+            }
+        }
+        for path in current
+            .files
+            .keys()
+            .filter(|path| !snapshot.files.contains_key(*path))
+        {
+            mutations.push(FileMutation::Delete {
+                path: self.resolve(Path::new(path))?,
+            });
+        }
+        PreparedMemoryCommit::prepare(&self.root, &mutations)
+    }
+
     pub fn prepare_identity_patch_commit(
         &self,
         yaml: &str,
@@ -105,10 +158,7 @@ impl MemoryWorkspace {
             });
         }
         commit_mutations(&mutations)?;
-        *self
-            .index_cache
-            .write()
-            .map_err(|_| MemoryError::InvalidIndex("index lock poisoned".to_owned()))? = None;
+        *self.index_cache.borrow_mut() = None;
         Ok(())
     }
 }

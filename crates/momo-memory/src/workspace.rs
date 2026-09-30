@@ -12,8 +12,19 @@ fn retrieved_state_signal(document: &MemoryDocument) -> RetrievedStateSignal {
 
 impl MemoryWorkspace {
     pub fn initialize(root: impl AsRef<Path>) -> Result<Self, MemoryError> {
-        fs::create_dir_all(root.as_ref())?;
-        let root = fs::canonicalize(root.as_ref())?;
+        Self::initialize_layout_inner(root.as_ref(), true)
+    }
+
+    /// Bootstrap missing files without parsing or migrating existing documents.
+    /// An owning service must still admit repair/clear commands for malformed
+    /// documents; normal readers and writers validate their inputs themselves.
+    pub fn initialize_layout(root: impl AsRef<Path>) -> Result<Self, MemoryError> {
+        Self::initialize_layout_inner(root.as_ref(), false)
+    }
+
+    fn initialize_layout_inner(root: &Path, upgrade_legacy: bool) -> Result<Self, MemoryError> {
+        fs::create_dir_all(root)?;
+        let root = fs::canonicalize(root)?;
         for directory in MEMORY_DIRECTORIES {
             create_managed_directory(&root, Path::new(directory))?;
         }
@@ -42,7 +53,7 @@ impl MemoryWorkspace {
         ] {
             let path = root.join("current").join(name);
             if regular_file_exists(&path)? {
-                if name == "scene.md" {
+                if upgrade_legacy && name == "scene.md" {
                     upgrade_empty_legacy_scene(&path)?;
                 }
                 continue;
@@ -75,7 +86,7 @@ impl MemoryWorkspace {
         }
         Ok(Self {
             root,
-            index_cache: Arc::new(RwLock::new(None)),
+            index_cache: RefCell::new(None),
         })
     }
 
@@ -1287,8 +1298,7 @@ impl MemoryWorkspace {
         let source_signature = self.index_source_signature()?;
         if let Some(cached) = self
             .index_cache
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .borrow()
             .as_ref()
             .filter(|cached| cached.source_signature == source_signature)
         {
@@ -1315,10 +1325,7 @@ impl MemoryWorkspace {
             )?;
         }
         let index = Arc::new(rebuilt);
-        *self
-            .index_cache
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedMemoryIndex {
+        *self.index_cache.borrow_mut() = Some(CachedMemoryIndex {
             source_signature: self.index_source_signature()?,
             index: Arc::clone(&index),
         });
@@ -1326,10 +1333,7 @@ impl MemoryWorkspace {
     }
 
     fn store_cached_index(&self, index: MemoryIndex) -> Result<(), MemoryError> {
-        *self
-            .index_cache
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedMemoryIndex {
+        *self.index_cache.borrow_mut() = Some(CachedMemoryIndex {
             source_signature: self.index_source_signature()?,
             index: Arc::new(index),
         });
@@ -1337,10 +1341,7 @@ impl MemoryWorkspace {
     }
 
     fn refresh_cached_index_stamps(&self, mutations: &[FileMutation]) -> Result<(), MemoryError> {
-        let mut cache = self
-            .index_cache
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cache = self.index_cache.borrow_mut();
         let Some(cached) = cache.as_mut() else {
             return Ok(());
         };

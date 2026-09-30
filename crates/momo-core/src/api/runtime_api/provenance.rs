@@ -275,7 +275,7 @@ pub async fn control_memory_evidence(
         .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
     let guards = runtime
         .core()
-        .lock_spaces(spaces)
+        .reserve_spaces(spaces)
         .await
         .map_err(RuntimeApiError::recovery)?;
     let core = runtime.core_handle();
@@ -307,7 +307,8 @@ pub async fn set_memory_record_policy(
             .memory_for_space(space_id)
             .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
         if graph {
-            let nsg = momo_memory::nsg::NsgWorkspace::initialize(workspace.root())
+            let nsg = workspace
+                .nsg()
                 .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
             if !nsg
                 .list_nodes(true)

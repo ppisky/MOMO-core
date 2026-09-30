@@ -5,11 +5,12 @@ use super::*;
 fn nsg_workspace(
     core: &MomoCore,
     scope_id: uuid::Uuid,
-) -> Result<momo_memory::nsg::NsgWorkspace, RuntimeApiError> {
+) -> Result<crate::space_worker::address::NsgHandle, RuntimeApiError> {
     let memory = core
         .memory_for_space(scope_id)
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    momo_memory::nsg::NsgWorkspace::initialize(memory.root())
+    memory
+        .nsg()
         .map_err(|error| RuntimeApiError::internal(error.to_string()))
 }
 

@@ -18,6 +18,87 @@ const PATCH: &str = r#"patches:
         content: Recovered exactly once.
 "#;
 
+#[tokio::test]
+async fn pending_clear_supersedes_prepared_plans_and_retries_cleanup_after_restart() {
+    for cleaned_sql in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let space = momo_domain::new_id();
+        {
+            let core = MomoCore::initialize(directory.path()).await.unwrap();
+            let batch = stage(&core, space, PATCH).await;
+            let worker = core.memory_for_space(space).unwrap();
+            let plan = worker.prepare_patch_commit(PATCH).unwrap();
+            core.store()
+                .prepare_maintenance_commit(
+                    &batch.batch_key,
+                    &serde_json::to_string(&plan).unwrap(),
+                )
+                .await
+                .unwrap();
+            worker.apply_prepared_commit(&plan).unwrap();
+            worker.clear_memory(true, false).unwrap();
+            assert!(
+                worker.export_snapshot().is_err(),
+                "no admission before cleanup"
+            );
+            if cleaned_sql {
+                core.store()
+                    .clear_space_memory_state(space, true, false)
+                    .await
+                    .unwrap();
+            }
+            // Drop before acknowledging the clear in the Space journal.
+        }
+        let core = MomoCore::initialize(directory.path()).await.unwrap();
+        assert!(core.memory_recovery_status().is_empty());
+        assert!(
+            core.store()
+                .pending_maintenance_batches()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let worker = core.memory_for_space(space).unwrap();
+        assert!(worker.pending_clear().unwrap().is_none());
+        assert!(
+            worker.read_document_by_id("recovered_event").is_err(),
+            "old prepared plan must never resurrect cleared data"
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_clear_cleanup_blocks_space_until_durable_intent_finishes() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = MomoCore::initialize(directory.path()).await.unwrap();
+    let space = momo_domain::new_id();
+    stage(&core, space, PATCH).await;
+    let worker = core.memory_for_space(space).unwrap();
+    worker.apply_patch(PATCH).unwrap();
+    sqlx::query("CREATE TRIGGER fail_clear BEFORE DELETE ON maintenance_turns BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END")
+        .execute(core.store().pool()).await.unwrap();
+    {
+        let _reservation = core.reserve_spaces([space]).await.unwrap();
+        assert!(core.clear_space_memory(space, true, true).await.is_err());
+    }
+    assert!(worker.pending_clear().unwrap().is_some());
+    assert!(worker.apply_patch(PATCH).is_err());
+    assert!(core.reserve_spaces([space]).await.is_err());
+    core.memory_for_space(momo_domain::new_id())
+        .unwrap()
+        .apply_patch(PATCH)
+        .unwrap();
+    sqlx::query("DROP TRIGGER fail_clear")
+        .execute(core.store().pool())
+        .await
+        .unwrap();
+    let _reservation = core.reserve_spaces([space]).await.unwrap();
+    assert!(core.memory_recovery_status().is_empty());
+    assert!(worker.pending_clear().unwrap().is_none());
+    assert!(worker.read_document_by_id("recovered_event").is_err());
+    worker.apply_patch(PATCH).unwrap();
+}
+
 async fn lifecycle_event(core: &MomoCore, space: uuid::Uuid, request: &str) {
     let activity = momo_memory::lifecycle::LifecycleActivity {
         identity: None,
@@ -333,7 +414,7 @@ async fn startup_recovers_before_first_write_mid_write_and_before_acknowledgemen
 }
 
 #[tokio::test]
-async fn recovery_conflict_preserves_operator_edit_and_durable_plan() {
+async fn recovery_conflict_preserves_journaled_edit_and_durable_plan() {
     let directory = tempfile::tempdir().expect("directory");
     let core = MomoCore::initialize(directory.path()).await.expect("core");
     let space = momo_domain::new_id();
@@ -348,18 +429,26 @@ async fn recovery_conflict_preserves_operator_edit_and_durable_plan() {
         .await
         .expect("journal");
     let path = memory.root().join("events/recovered.md");
-    std::fs::write(&path, "operator edit").expect("edit");
+    memory
+        .call(|workspace| {
+            std::fs::write(
+                workspace.root().join("events/recovered.md"),
+                "operator edit",
+            )?;
+            Ok(())
+        })
+        .expect("journaled edit");
     drop(memory);
     drop(core);
     let reopened = MomoCore::initialize(directory.path())
         .await
         .expect("other Spaces must start");
     assert!(reopened.memory_recovery_status().contains_key(&space));
-    assert!(reopened.lock_spaces([space]).await.is_err());
+    assert!(reopened.reserve_spaces([space]).await.is_err());
     assert!(reopened.memory_for_space(space).is_err());
     let healthy = momo_domain::new_id();
     let _healthy_guard = reopened
-        .lock_spaces([healthy])
+        .reserve_spaces([healthy])
         .await
         .expect("healthy Space available");
     reopened
@@ -380,9 +469,16 @@ async fn recovery_conflict_preserves_operator_edit_and_durable_plan() {
             .len(),
         1
     );
-    std::fs::remove_file(&path).expect("operator restores the missing before-image");
+    reopened
+        .memory_for_space_unchecked(space)
+        .unwrap()
+        .call(|workspace| {
+            std::fs::remove_file(workspace.root().join("events/recovered.md"))?;
+            Ok(())
+        })
+        .expect("restore the missing before-image through the owner");
     let _guard = reopened
-        .lock_spaces([space])
+        .reserve_spaces([space])
         .await
         .expect("retry recovery without restart");
     assert!(reopened.memory_recovery_status().is_empty());
@@ -416,7 +512,15 @@ async fn live_pending_commit_must_recover_before_a_subsequent_write() {
         .await
         .expect("persist");
     let target = memory.root().join("events/recovered.md");
-    std::fs::write(&target, "conflicting edit").expect("conflict");
+    memory
+        .call(|workspace| {
+            std::fs::write(
+                workspace.root().join("events/recovered.md"),
+                "conflicting edit",
+            )?;
+            Ok(())
+        })
+        .expect("journaled conflict");
     let error = apply_memory_patch(&runtime, space.to_string(), "patches: []".to_owned())
         .await
         .expect_err("must not write past pending commit");
@@ -432,7 +536,12 @@ async fn live_pending_commit_must_recover_before_a_subsequent_write() {
     )
     .await
     .expect("unrelated writer");
-    std::fs::remove_file(&target).expect("restore before-image");
+    memory
+        .call(|workspace| {
+            std::fs::remove_file(workspace.root().join("events/recovered.md"))?;
+            Ok(())
+        })
+        .expect("restore before-image");
     apply_memory_patch(&runtime, space.to_string(), "patches: []".to_owned())
         .await
         .expect("recover before next write");
@@ -472,7 +581,7 @@ async fn moc_import_keeps_space_ownership_after_its_caller_is_cancelled() {
     let target = MomoCore::initialize(directory.path().join("target"))
         .await
         .expect("target");
-    let guard = target.lock_spaces([space]).await.expect("block import");
+    let guard = target.reserve_spaces([space]).await.expect("block import");
     let owned = target.clone();
     let caller = tokio::spawn(async move {
         crate::import_moc(
@@ -490,10 +599,7 @@ async fn moc_import_keeps_space_ownership_after_its_caller_is_cancelled() {
         loop {
             if target
                 .commit_tasks
-                .lock()
-                .expect("tasks")
-                .iter()
-                .any(|task| !task.is_finished())
+                .call(|tasks| tasks.iter().any(|task| !task.is_finished()))
             {
                 break;
             }
@@ -526,7 +632,7 @@ async fn moc_export_waits_for_the_same_space_writer() {
         .await
         .expect("core");
     let space = momo_domain::new_id();
-    let guard = core.lock_spaces([space]).await.expect("writer");
+    let guard = core.reserve_spaces([space]).await.expect("writer");
     let plan = crate::MocExportPlan {
         memory: vec![space],
         characters: Vec::new(),

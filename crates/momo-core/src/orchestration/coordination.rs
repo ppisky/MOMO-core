@@ -3,19 +3,19 @@
 use super::MomoApiError;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex as SyncMutex, Weak},
+    sync::{Arc, Weak},
 };
 use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Debug, Default)]
 pub(crate) struct ResponseCoordination {
-    pub(super) response_attempts: Arc<Mutex<HashMap<String, String>>>,
+    pub(super) response_attempts: Arc<crate::OwnedState<HashMap<String, String>>>,
     pub(super) operation_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     pub(super) conversation_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
-    operation_states: Arc<SyncMutex<HashMap<String, OperationState>>>,
+    operation_states: Arc<crate::OwnedState<HashMap<String, OperationState>>>,
     pub(super) maintenance_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     pub(super) generation_gates: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
-    pub(super) maintenance_tasks: Arc<SyncMutex<Vec<tokio::task::JoinHandle<()>>>>,
+    pub(super) maintenance_tasks: Arc<crate::OwnedState<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -27,70 +27,64 @@ struct OperationState {
 
 pub(super) struct OperationGuard {
     request_id: String,
-    states: Arc<SyncMutex<HashMap<String, OperationState>>>,
+    states: Arc<crate::OwnedState<HashMap<String, OperationState>>>,
 }
 
 impl Drop for OperationGuard {
     fn drop(&mut self) {
-        let mut states = self
-            .states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(state) = states.get_mut(&self.request_id) else {
-            return;
-        };
-        state.active -= 1;
-        if state.active == 0 {
-            states.remove(&self.request_id);
-        }
+        let request_id = self.request_id.clone();
+        let _ = self.states.try_call(move |states| {
+            let Some(state) = states.get_mut(&request_id) else {
+                return;
+            };
+            state.active -= 1;
+            if state.active == 0 {
+                states.remove(&request_id);
+            }
+        });
     }
 }
 
 impl ResponseCoordination {
     pub(super) fn cancel_operation(&self, request_id: &str) -> bool {
-        self.operation_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(request_id)
-            .is_some_and(|state| {
+        let request_id = request_id.to_owned();
+        self.operation_states.call(move |states| {
+            states.get_mut(&request_id).is_some_and(|state| {
                 state.cancelled = true;
                 state.active > 0
             })
+        })
     }
     pub(super) fn enter_operation(&self, request_id: &str, scope_id: &str) -> OperationGuard {
-        let mut states = self
-            .operation_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let state = states.entry(request_id.to_owned()).or_default();
-        state.active += 1;
-        state.scope_id = scope_id.to_owned();
+        let id = request_id.to_owned();
+        let scope_id = scope_id.to_owned();
+        self.operation_states.call(move |states| {
+            let state = states.entry(id).or_default();
+            state.active += 1;
+            state.scope_id = scope_id;
+        });
         OperationGuard {
             request_id: request_id.to_owned(),
             states: Arc::clone(&self.operation_states),
         }
     }
-
     pub(crate) fn ensure_active(&self, request_id: &str) -> Result<(), MomoApiError> {
-        if self
-            .operation_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(request_id)
-            .is_some_and(|state| state.cancelled)
-        {
-            Err(MomoApiError::cancelled())
-        } else {
-            Ok(())
-        }
+        let request_id = request_id.to_owned();
+        self.operation_states.call(move |states| {
+            if states.get(&request_id).is_some_and(|state| state.cancelled) {
+                Err(MomoApiError::cancelled())
+            } else {
+                Ok(())
+            }
+        })
     }
-
     pub(super) fn has_active_responses(&self, scope_id: &str) -> bool {
-        self.operation_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .any(|state| state.active > 0 && state.scope_id == scope_id)
+        let scope_id = scope_id.to_owned();
+        self.operation_states.call(move |states| {
+            states
+                .values()
+                .any(|state| state.active > 0 && state.scope_id == scope_id)
+        })
     }
 
     pub(super) async fn generation_gate(&self, scope_id: &str, lane: &str) -> Arc<Semaphore> {

@@ -109,7 +109,7 @@ where
     })?
 }
 
-/// Keep the Space lock with the file task through caller cancellation, and
+/// Keep Space admission with the command workflow through caller cancellation, and
 /// include the write in the runtime's graceful-shutdown drain.
 async fn run_space_write<T, F>(
     runtime: &MomoRuntime,
@@ -122,7 +122,7 @@ where
     F: FnOnce() -> RuntimeApiResult<T> + Send + 'static,
 {
     let guard = runtime
-        .lock_space(space_id)
+        .reserve_space(space_id)
         .await
         .map_err(RuntimeApiError::recovery)?;
     runtime
@@ -162,7 +162,7 @@ async fn approve_memory_patch_review_inner(
         .lock_memory_patch_reviews(&scope_id.to_string())
         .await;
     let _state_guard = runtime
-        .lock_space(scope_id)
+        .reserve_space(scope_id)
         .await
         .map_err(RuntimeApiError::recovery)?;
     let existing = runtime

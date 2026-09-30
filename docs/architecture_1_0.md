@@ -38,7 +38,8 @@ replay record or a protocol message actually needs bytes.
 
 | Owner | Resources and responsibilities |
 | --- | --- |
-| `MomoCore` | Data-directory lock, SQLite/Turso handles, workspace cache, typed Space exclusion, tracked file operations and per-Space recovery |
+| `MomoCore` | Data-directory lock, SQLite/Turso handles, Space supervisor, mailbox admission, tracked operations and per-Space recovery |
+| `SpaceWorker` | Privately owned DMW/NSG workspace, disposable working copy, durable journal and file materialization |
 | `MomoRuntime` | Instance settings, persistent Prompt Spaces, capabilities, cancellation registrations, control/review locks and shared response coordination |
 | `ResponseCoordination` | Request and conversation exclusion, generation lanes, active operation state, tracked background work |
 | `MomoApiService` | Response/maintenance orchestration and model gateway wiring; reads policy and prompts from its runtime |
@@ -50,24 +51,43 @@ Creating an unrelated runtime does not share it. Runtime owns resource lifetime;
 business decisions stay in application operations. No process-global
 service registry or replaceable repository hierarchy is needed.
 
-Per-resource locks serialize operations on the same resource. DMW and NSG
-maintenance have separate batch lanes, then share the Space write lock while
-preparing/applying their file plans. Reviewed patches take the review lock
-before the Space lock. Multi-Space retrieval and MOC operations acquire typed
-UUID Space locks in sorted order, deduplicated by identity. Code acquiring
-several locks must preserve these orders.
+Each UUID Space has one `SpaceWorker`. Core's private `SpaceHandle` contains a
+bounded mailbox, not an `Arc<MemoryWorkspace>` or a state guard. DMW, NSG,
+retrieval, provenance, export, import and clearing all send owned commands.
+`MemoryWorkspace` is no longer cloneable or `Sync`; its index is a private
+`RefCell` cache. Transport/application callers cannot obtain the workspace.
+
+The supervisor owns the address registry, with at most 128 live workers and
+64 queued commands per worker. Idle addresses can be evicted; addresses held
+by callers or running commands cannot. Registry and worker shutdown are joined
+before releasing their ownership of the data-directory lock.
+
+DMW and NSG maintenance retain separate batch lanes. Operations spanning Space
+commands and SQLite work request a mailbox reservation. A multi-Space request
+reserves its deduplicated UUID set together, without holding a partial set.
+Conflicting requests retain arrival order; unrelated Spaces can proceed.
+Dropping a reservation sends a release message. Review/control/conversation
+exclusion and generation semaphores coordinate workflows; they do not expose
+memory state. Reviewed patches reserve their review lane before Space admission.
+
+Runtime settings, Prompt Spaces, capabilities, response-attempt metadata,
+cancellation registrations, recovery diagnostics and task tracking use private
+state owners. There is no poisoned-lock `into_inner` recovery. A failed volatile
+owner closes its mailbox and fails closed until the runtime is recreated.
+Persistent Prompt Spaces publish their file snapshot before replacing the
+cached overrides. Worker failure recovery is described below.
 
 Cancellation registrations have a drop guard. Cancelling or dropping an
 upstream request cannot leave a stale registration behind. Foreground streaming
 and non-streaming generation both listen for cancellation. A journaled file
 commit that has started is instead owned through completion: cancelling its
-caller does not release its locks while files are still being written.
-Ordinary DMW/NSG writes also keep their Space lock in the file task after caller
-cancellation. Memory clearing retains the lock through file and database cleanup.
+caller does not release its reservation while files are still being written.
+Ordinary DMW/NSG writes also retain their reservation after caller cancellation.
+Memory clearing retains it through file and database cleanup.
 `wait_for_maintenance` drains these writes, journaled commits, retrieval and
 portable operations through the shared Core task tracker during shutdown.
-This does not add crash-recovery journals to ordinary writes or MOC imports.
-Retrieval updates activity and therefore also retains its locks through caller
+Ordinary writes and each imported Space module now use the worker journal too.
+Retrieval updates activity and therefore also retains its reservation through caller
 cancellation. Native response UUIDs are canonicalized before request identity,
 fingerprinting and conversation coordination.
 
@@ -76,7 +96,7 @@ fingerprinting and conversation coordination.
 | Data | Authority | Recovery |
 | --- | --- | --- |
 | Characters, conversations, messages, replay records, reviews, state audit | SQLite | SQL transactions and persisted operation identity |
-| DMW/NSG content | Markdown/YAML files | Validated mutations; journaled maintenance/review plans |
+| DMW/NSG content | Per-Space SQLite after-image journal; Markdown/YAML files are a materialized copy | Restore the latest snapshot on every worker start; prepared maintenance/review plans retain their SQL acknowledgement |
 | NSG vectors | Disposable Turso index | Source hashes and vector-space identity reject stale entries; rebuild from source |
 | Portable snapshots | Explicit MOC modules | Preflight validation and documented import conflict policy |
 
@@ -87,6 +107,59 @@ and replay response in one transaction. Splitting source files must never split
 that transaction into independent repository calls.
 
 ## Cross-store memory commits
+
+Every worker mutation follows this sequence, including index repairs and
+retrieval activity that happen inside apparent reads:
+
+```text
+owned command -> private working copy -> validated complete after-image
+             -> SQLite journal COMMIT (WAL, synchronous=FULL)
+             -> materialize changed files -> mark applied -> reply
+```
+
+The journal is `spaces/<space_id>/memory-journal.sqlite3`; the working copy is
+the reserved sibling `.memory-worker-cache`. Neither is a portable MOC module.
+The working copy is never a recovery source and is discarded when rebuilding.
+Existing file workspaces receive an initial journal checkpoint on first use.
+The journal retains the latest two complete after-images, compacting older
+applied entries in the same transaction that admits the next image. This is
+bounded recovery history, not a permanent event/audit history.
+
+A command error rolls back its private working copy before serving another
+command. A panic discards the whole incarnation, including all cached index
+state. The worker supervisor reconstructs from the latest journal snapshot
+before handling another queued command. Cold startup and idle-worker reload use
+the same latest-snapshot recovery, even when the snapshot is marked applied.
+An applied marker never makes materialized files authoritative. Initialization
+and recovery panics are also contained at the worker boundary.
+Corrupt journals and unsafe paths isolate their Space and remain visible in
+`memory_recovery_status`; a later admission can retry after operator repair.
+No failed command closure is automatically executed a second time. A caller
+whose worker panicked receives an uncertain-outcome error and must reconcile
+against recovered state. Other workers continue independently.
+
+The release profile uses `panic = "unwind"` so command panics reach this
+supervision boundary. Abrupt process termination is handled on next startup.
+Tests terminate child processes before journal commit, after commit, during
+materialization and before acknowledgement, as well as injecting caught panics.
+
+Memory clearing commits its file after-image and a `pending_clear` record in
+the same Space journal transaction. Until SQL memory-state cleanup and any NSG
+vector cleanup finish and the record is acknowledged, ordinary worker commands
+are rejected. Startup/admission recovery finishes this idempotent cleanup before
+replaying prepared maintenance, lifecycle or review plans; cleared plans cannot
+resurrect content. Cleanup failure isolates the Space and preserves the intent
+for retry. Tests cover process exits during clearing and SQL cleanup failure.
+
+This first implementation stores complete after-images and scans snapshots at
+command boundaries; it trades additional I/O and disk space for one recovery
+path covering existing low-level mutations. Incremental logging and scheduling
+optimizations must preserve this commit point and the fault-injection tests.
+An MOC operation covering multiple modules/Spaces and SQL repositories still
+is not one distributed transaction; each worker command is independently durable.
+After the initial migration checkpoint, direct filesystem edits are never
+ingested into the worker cache and are overwritten by journal reconstruction.
+Use the import APIs to change managed content durably.
 
 SQLite migration `0024_prepared_maintenance_commit.sql` extends the existing
 maintenance and review records with a private prepared-file plan. It is runtime
@@ -103,7 +176,7 @@ The staged batch binds the original Space, maintenance kind and ordered request
 IDs. Changes to the configured batch size cannot change that evidence window.
 The prepared plan freezes every target's relative path, before-image and
 after-image. It is persisted before the first file mutation. Preparation and
-application run under the Space lock. Successful acknowledgement marks the exact
+application run under a Space reservation and execute through its worker. Successful acknowledgement marks the exact
 source turns and removes the batch in the same SQL transaction. Other maintenance
 lanes remain independently pending.
 
@@ -125,14 +198,16 @@ skipped, including when all files were written before the process exited.
 Live prepared commits are marked pending before their first file mutation.
 The next operation must recover that Space before accessing memory, so a
 failed acknowledgement cannot be silently superseded by a later write.
-`GET /v1/memory/recovery` reports affected Spaces; after repairing the conflicting
-file, `POST /v1/memory/recovery/:space_id/retry` retries without restarting.
+`GET /v1/memory/recovery` reports affected Spaces; after repairing the underlying
+storage fault, `POST /v1/memory/recovery/:space_id/retry` retries without restarting.
+Logical conflicts concern journaled content and prepared plans; editing the
+materialized copy cannot repair those durable records.
 There is no force-overwrite or discard-journal operation.
 
 This provides process-interruption recovery for background DMW/NSG maintenance
 and reviewed DMW patches. It is not a distributed transaction or a universal
-power-loss guarantee. Direct low-level file edits, ordinary administrative
-mutations retain their existing validation/rollback boundaries. MOC operations
+power-loss guarantee. Administrative memory commands use the same worker
+journal and validation boundary. MOC operations
 share Space exclusion and own admitted work through caller cancellation, but
 complete multi-module imports are not crash-atomic. Offline tools must not
 mutate files concurrently with a live Core.

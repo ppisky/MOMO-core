@@ -19,16 +19,18 @@ mod runtime;
 mod vision;
 
 use std::{
-    collections::HashMap,
     fs::{File, OpenOptions},
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::Arc,
 };
 
 use fs2::FileExt;
-use momo_memory::MemoryWorkspace;
+mod owned_state;
+mod space_worker;
 use momo_storage::{LocalStore, StorageError, TursoVectorStore};
+use owned_state::OwnedState;
+use space_worker::{SpaceHandle, SpaceSupervisor};
 use thiserror::Error;
 
 pub use capability::{
@@ -136,113 +138,31 @@ pub struct MomoCore {
     _instance_lock: Arc<File>,
     store: LocalStore,
     vector_store: TursoVectorStore,
-    memory_workspaces: Arc<Mutex<MemoryWorkspaceRegistry>>,
-    space_locks:
-        Arc<tokio::sync::Mutex<HashMap<uuid::Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
-    recovery_failures: Arc<Mutex<std::collections::BTreeMap<uuid::Uuid, String>>>,
-    commit_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-}
-
-const MAX_CACHED_MEMORY_WORKSPACES: usize = 1_024;
-
-#[derive(Debug, Default)]
-struct MemoryWorkspaceRegistry {
-    generation: u64,
-    entries: HashMap<uuid::Uuid, MemoryWorkspaceEntry>,
-    initializing: HashMap<uuid::Uuid, Arc<WorkspaceInitialization>>,
-}
-
-#[derive(Debug)]
-struct MemoryWorkspaceEntry {
-    workspace: Arc<MemoryWorkspace>,
-    last_used: u64,
-}
-
-#[derive(Debug, Default)]
-struct WorkspaceInitialization {
-    complete: Mutex<bool>,
-    changed: Condvar,
-}
-
-impl WorkspaceInitialization {
-    fn wait(&self) {
-        let mut complete = self
-            .complete
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while !*complete {
-            complete = self
-                .changed
-                .wait(complete)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-    }
-
-    fn finish(&self) {
-        let mut complete = self
-            .complete
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *complete = true;
-        self.changed.notify_all();
-    }
-}
-
-impl MemoryWorkspaceRegistry {
-    fn next_generation(&mut self) -> u64 {
-        self.generation = self.generation.wrapping_add(1);
-        self.generation
-    }
-
-    fn evict_oldest_idle_workspace(&mut self) -> bool {
-        let oldest = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| Arc::strong_count(&entry.workspace) == 1)
-            .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(space_id, _)| *space_id);
-        if let Some(space_id) = oldest {
-            self.entries.remove(&space_id);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn reserve_initialization(
-        &mut self,
-        space_id: uuid::Uuid,
-    ) -> Result<Arc<WorkspaceInitialization>, momo_memory::MemoryError> {
-        if self.entries.len() + self.initializing.len() >= MAX_CACHED_MEMORY_WORKSPACES
-            && !self.evict_oldest_idle_workspace()
-        {
-            return Err(momo_memory::MemoryError::WorkspaceCapacity {
-                limit: MAX_CACHED_MEMORY_WORKSPACES,
-            });
-        }
-        let initialization = Arc::new(WorkspaceInitialization::default());
-        self.initializing
-            .insert(space_id, Arc::clone(&initialization));
-        Ok(initialization)
-    }
+    space_workers: SpaceSupervisor,
+    space_reservations: space_worker::reservations::SpaceReservations,
+    recovery_failures: Arc<OwnedState<std::collections::BTreeMap<uuid::Uuid, String>>>,
+    commit_tasks: Arc<OwnedState<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl MomoCore {
     pub async fn initialize(data_dir: impl AsRef<Path>) -> Result<Self, CoreError> {
         let data_dir = data_dir.as_ref();
         std::fs::create_dir_all(data_dir).map_err(momo_memory::MemoryError::from)?;
-        let instance_lock = acquire_instance_lock(data_dir)?;
+        let instance_lock = Arc::new(acquire_instance_lock(data_dir)?);
         let store = LocalStore::open(data_dir.join("momo.sqlite3")).await?;
         let vector_store = TursoVectorStore::open(data_dir.join("nsg-vectors.db")).await?;
         migrate_space_directories(data_dir)?;
         std::fs::create_dir_all(data_dir.join("spaces")).map_err(momo_memory::MemoryError::from)?;
         let core = Self {
             data_dir: data_dir.to_path_buf(),
-            _instance_lock: Arc::new(instance_lock),
+            _instance_lock: Arc::clone(&instance_lock),
             store,
             vector_store,
-            memory_workspaces: Arc::new(Mutex::new(MemoryWorkspaceRegistry::default())),
-            space_locks: Arc::default(),
+            space_workers: SpaceSupervisor::start(
+                data_dir.join("spaces"),
+                Arc::clone(&instance_lock),
+            )?,
+            space_reservations: space_worker::reservations::SpaceReservations::start(),
             recovery_failures: Arc::default(),
             commit_tasks: Arc::default(),
         };
@@ -265,10 +185,10 @@ impl MomoCore {
         &self.vector_store
     }
 
-    pub fn memory_for_space(
+    pub(crate) fn memory_for_space(
         &self,
         space_id: uuid::Uuid,
-    ) -> Result<Arc<MemoryWorkspace>, momo_memory::MemoryError> {
+    ) -> Result<Arc<SpaceHandle>, momo_memory::MemoryError> {
         if let Some(message) = self.memory_recovery_status().get(&space_id) {
             return Err(momo_memory::MemoryError::InvalidPatch(format!(
                 "Space {space_id} requires recovery: {message}"
@@ -280,57 +200,8 @@ impl MomoCore {
     fn memory_for_space_unchecked(
         &self,
         space_id: uuid::Uuid,
-    ) -> Result<Arc<MemoryWorkspace>, momo_memory::MemoryError> {
-        loop {
-            let (initialization, initialize) = {
-                let mut registry = self
-                    .memory_workspaces
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let generation = registry.next_generation();
-                if let Some(entry) = registry.entries.get_mut(&space_id) {
-                    entry.last_used = generation;
-                    return Ok(Arc::clone(&entry.workspace));
-                }
-                if let Some(initialization) = registry.initializing.get(&space_id) {
-                    (Arc::clone(initialization), false)
-                } else {
-                    (registry.reserve_initialization(space_id)?, true)
-                }
-            };
-
-            if !initialize {
-                initialization.wait();
-                continue;
-            }
-
-            let result = MemoryWorkspace::initialize(
-                self.data_dir
-                    .join("spaces")
-                    .join(space_id.to_string())
-                    .join("memory"),
-            )
-            .map(Arc::new);
-            {
-                let mut registry = self
-                    .memory_workspaces
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                registry.initializing.remove(&space_id);
-                if let Ok(workspace) = &result {
-                    let generation = registry.next_generation();
-                    registry.entries.insert(
-                        space_id,
-                        MemoryWorkspaceEntry {
-                            workspace: Arc::clone(workspace),
-                            last_used: generation,
-                        },
-                    );
-                }
-            }
-            initialization.finish();
-            return result;
-        }
+    ) -> Result<Arc<SpaceHandle>, momo_memory::MemoryError> {
+        self.space_workers.space(space_id)
     }
 }
 

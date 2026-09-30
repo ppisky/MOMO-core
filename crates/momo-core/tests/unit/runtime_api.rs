@@ -31,12 +31,12 @@ async fn space_write_keeps_lock_and_shutdown_pending_after_caller_cancellation()
     assert!(caller.await.expect_err("caller aborted").is_cancelled());
 
     let same_space_blocked =
-        tokio::time::timeout(Duration::from_millis(25), runtime.lock_space(space))
+        tokio::time::timeout(Duration::from_millis(25), runtime.reserve_space(space))
             .await
             .is_err();
     let other_space = tokio::time::timeout(
         Duration::from_secs(1),
-        runtime.lock_space(uuid::Uuid::now_v7()),
+        runtime.reserve_space(uuid::Uuid::now_v7()),
     )
     .await
     .expect("unrelated Space remains available");
@@ -62,7 +62,7 @@ async fn space_write_keeps_lock_and_shutdown_pending_after_caller_cancellation()
     tokio::time::timeout(Duration::from_secs(3), drain)
         .await
         .expect("shutdown drains completed write");
-    let _guard = tokio::time::timeout(Duration::from_secs(1), runtime.lock_space(space))
+    let _guard = tokio::time::timeout(Duration::from_secs(1), runtime.reserve_space(space))
         .await
         .expect("completed write releases lock");
     assert!(
@@ -104,7 +104,7 @@ async fn space_locks_share_uuid_identity_across_spellings() {
         .await
         .expect("runtime");
     let id = uuid::Uuid::parse_str("abcdefab-1234-4567-89ab-abcdefabcdef").expect("id");
-    let _guard = runtime.lock_space(id).await.expect("Space available");
+    let _guard = runtime.reserve_space(id).await.expect("Space available");
     for spelling in [
         id.to_string().to_uppercase(),
         id.simple().to_string(),
@@ -113,7 +113,7 @@ async fn space_locks_share_uuid_identity_across_spellings() {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(25),
-                runtime.lock_space(uuid::Uuid::parse_str(&spelling).expect("UUID")),
+                runtime.reserve_space(uuid::Uuid::parse_str(&spelling).expect("UUID")),
             )
             .await
             .is_err(),

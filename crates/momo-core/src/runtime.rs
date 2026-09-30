@@ -4,14 +4,14 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
 
 use tokio::sync::{Notify, OwnedMutexGuard};
 
-use crate::{CapabilityRegistry, CoreError, MomoCore};
+use crate::{CapabilityRegistry, CoreError, MomoCore, OwnedState};
 
 #[derive(Debug)]
 pub(crate) struct CancellationSignal {
@@ -34,17 +34,16 @@ impl CancellationRegistration<'_> {
 
 impl Drop for CancellationRegistration<'_> {
     fn drop(&mut self) {
-        let mut registrations = self
-            .runtime
-            .cancellations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if registrations
-            .get(&self.request_id)
-            .is_some_and(|signal| Arc::ptr_eq(signal, &self.signal))
-        {
-            registrations.remove(&self.request_id);
-        }
+        let request_id = self.request_id.clone();
+        let signal = Arc::clone(&self.signal);
+        let _ = self.runtime.cancellations.try_call(move |registrations| {
+            if registrations
+                .get(&request_id)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &signal))
+            {
+                registrations.remove(&request_id);
+            }
+        });
     }
 }
 
@@ -79,11 +78,11 @@ impl CancellationSignal {
 #[derive(Debug)]
 pub struct MomoRuntime {
     core: Arc<MomoCore>,
-    settings: Mutex<crate::MomoRuntimeSettings>,
+    settings: OwnedState<crate::MomoRuntimeSettings>,
     prompt_spaces: crate::PromptSpaces,
     response_coordination: Arc<crate::orchestration::coordination::ResponseCoordination>,
-    cancellations: Mutex<HashMap<String, Arc<CancellationSignal>>>,
-    capabilities: tokio::sync::RwLock<CapabilityRegistry>,
+    cancellations: OwnedState<HashMap<String, Arc<CancellationSignal>>>,
+    capabilities: OwnedState<CapabilityRegistry>,
     memory_patch_review_locks: tokio::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     control_locks: tokio::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
@@ -109,11 +108,11 @@ impl MomoRuntime {
             crate::PromptSpaces::load_or_default(core.data_dir().join("prompt-spaces.json"))?;
         Ok(Self {
             core,
-            settings: Mutex::new(crate::MomoRuntimeSettings::default()),
+            settings: OwnedState::new(crate::MomoRuntimeSettings::default()),
             prompt_spaces,
-            cancellations: Mutex::new(HashMap::new()),
+            cancellations: OwnedState::new(HashMap::new()),
             response_coordination: Arc::default(),
-            capabilities: tokio::sync::RwLock::new(CapabilityRegistry::default()),
+            capabilities: OwnedState::new(CapabilityRegistry::default()),
             memory_patch_review_locks: tokio::sync::Mutex::new(HashMap::new()),
             control_locks: tokio::sync::Mutex::new(HashMap::new()),
         })
@@ -129,18 +128,12 @@ impl MomoRuntime {
         settings: crate::MomoRuntimeSettings,
     ) -> Result<(), crate::GovernanceError> {
         settings.validate()?;
-        *self
-            .settings
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+        self.settings.call(move |current| *current = settings);
         Ok(())
     }
 
     pub fn runtime_settings(&self) -> crate::MomoRuntimeSettings {
-        self.settings
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.settings.call(|settings| settings.clone())
     }
 
     pub const fn prompt_spaces(&self) -> &crate::PromptSpaces {
@@ -158,10 +151,11 @@ impl MomoRuntime {
 
     pub(crate) fn register_cancellation(&self, request_id: String) -> CancellationRegistration<'_> {
         let signal = Arc::new(CancellationSignal::new());
-        self.cancellations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(request_id.clone(), Arc::clone(&signal));
+        let id = request_id.clone();
+        let registration = Arc::clone(&signal);
+        self.cancellations.call(move |cancellations| {
+            cancellations.insert(id, registration);
+        });
         CancellationRegistration {
             runtime: self,
             request_id,
@@ -170,18 +164,17 @@ impl MomoRuntime {
     }
 
     pub(crate) fn cancel_chat(&self, request_id: &str) -> bool {
-        let cancellations = self
-            .cancellations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(signal) = cancellations.get(request_id) else {
-            return false;
-        };
-        signal.cancel();
-        true
+        let request_id = request_id.to_owned();
+        self.cancellations.call(move |cancellations| {
+            let Some(signal) = cancellations.get(&request_id) else {
+                return false;
+            };
+            signal.cancel();
+            true
+        })
     }
 
-    pub(crate) const fn capabilities(&self) -> &tokio::sync::RwLock<CapabilityRegistry> {
+    pub(crate) const fn capabilities(&self) -> &OwnedState<CapabilityRegistry> {
         &self.capabilities
     }
 
@@ -193,13 +186,13 @@ impl MomoRuntime {
         lock_keyed(&self.control_locks, resource_key).await
     }
 
-    pub(crate) async fn lock_space(
+    pub(crate) async fn reserve_space(
         &self,
         space_id: uuid::Uuid,
-    ) -> Result<OwnedMutexGuard<()>, CoreError> {
+    ) -> Result<crate::space_worker::reservations::SpaceReservation, CoreError> {
         Ok(self
             .core
-            .lock_spaces([space_id])
+            .reserve_spaces([space_id])
             .await?
             .pop()
             .expect("one Space guard"))

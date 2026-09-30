@@ -64,7 +64,11 @@ async fn scoped_scene_recalls_unmentioned_fact_before_budgeting_without_global_l
     // nor consume the actual story's long-term memory budget.
     let mut global = ws.read("current/scene.md").unwrap();
     global.body = format!("# Global\n{}\n[[secret]]", "unrelated ".repeat(100));
-    std::fs::write(ws.root().join("current/scene.md"), global.encode().unwrap()).unwrap();
+    ws.call(move |workspace| {
+        std::fs::write(workspace.root().join("current/scene.md"), global.encode()?)?;
+        Ok(())
+    })
+    .unwrap();
     let patch = format!(
         "patches:\n  - target_file: current/scene.md\n    operations:\n      - type: replace\n        section: Location\n        content: '{}'\n      - type: replace\n        section: Source References\n        content: '[[seaside]]'\n",
         "coast ".repeat(100)
@@ -245,7 +249,12 @@ async fn imported_history_cannot_reuse_legacy_injection_binding_as_authorization
         space,
     )
     .unwrap();
-    std::fs::write(workspace.root().join("config/provenance.json"), imported).unwrap();
+    workspace
+        .call(move |workspace| {
+            std::fs::write(workspace.root().join("config/provenance.json"), imported)?;
+            Ok(())
+        })
+        .unwrap();
     let mut item = record(space);
     item["injection_character_id"] = json!(a.character_id);
     item["injection_conversation_id"] = json!(a.conversation_id);
@@ -283,7 +292,12 @@ async fn scoped_scene_can_receive_a_new_local_policy_after_import() {
         space,
     )
     .unwrap();
-    std::fs::write(workspace.root().join("config/provenance.json"), imported).unwrap();
+    workspace
+        .call(move |workspace| {
+            std::fs::write(workspace.root().join("config/provenance.json"), imported)?;
+            Ok(())
+        })
+        .unwrap();
     set_memory_record_policy(
         &runtime,
         space,

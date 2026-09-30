@@ -489,7 +489,7 @@ pub(crate) fn commit_traced(
 ) -> Result<(), MemoryError> {
     let workspace = MemoryWorkspace {
         root: root.to_path_buf(),
-        index_cache: Arc::new(RwLock::new(None)),
+        index_cache: RefCell::new(None),
     };
     let plan = PreparedMemoryCommit::prepare(root, mutations)?;
     let plan = workspace.trace_commit(plan, None, context)?;

@@ -14,7 +14,7 @@ async fn caller_cancellation_does_not_release_an_owned_commit_lock() {
     let task_runtime = runtime.clone();
     let caller = tokio::spawn(async move {
         let guard = task_runtime
-            .lock_space(uuid::Uuid::nil())
+            .reserve_space(uuid::Uuid::nil())
             .await
             .expect("Space available");
         task_runtime
@@ -32,7 +32,7 @@ async fn caller_cancellation_does_not_release_an_owned_commit_lock() {
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_millis(25),
-            runtime.lock_space(uuid::Uuid::nil())
+            runtime.reserve_space(uuid::Uuid::nil())
         )
         .await
         .is_err()
@@ -41,7 +41,7 @@ async fn caller_cancellation_does_not_release_an_owned_commit_lock() {
     completed.await.expect("commit completed after caller left");
     let _guard = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        runtime.lock_space(uuid::Uuid::nil()),
+        runtime.reserve_space(uuid::Uuid::nil()),
     )
     .await
     .expect("lock released");

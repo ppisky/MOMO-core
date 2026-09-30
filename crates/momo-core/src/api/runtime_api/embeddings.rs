@@ -117,7 +117,8 @@ pub async fn rebuild_nsg_vector_index(
         .core()
         .memory_for_space(scope_id)
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    let documents = momo_memory::nsg::NsgWorkspace::initialize(memory.root())
+    let documents = memory
+        .nsg()
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?
         .embedding_documents()
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;

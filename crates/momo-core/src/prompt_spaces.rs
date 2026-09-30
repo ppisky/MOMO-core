@@ -5,7 +5,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,7 @@ struct StoredPromptSpacesRef<'a> {
 #[derive(Debug)]
 struct PromptSpacesInner {
     path: Option<PathBuf>,
-    overrides: Mutex<BTreeMap<PromptSpaceId, String>>,
+    overrides: crate::OwnedState<BTreeMap<PromptSpaceId, String>>,
 }
 
 /// Process-wide prompt registry. Clones share one atomically updated set of overrides.
@@ -123,7 +123,7 @@ impl PromptSpaces {
         Self {
             inner: Arc::new(PromptSpacesInner {
                 path: None,
-                overrides: Mutex::new(BTreeMap::new()),
+                overrides: crate::OwnedState::new(BTreeMap::new()),
             }),
         }
     }
@@ -145,32 +145,26 @@ impl PromptSpaces {
         Ok(Self {
             inner: Arc::new(PromptSpacesInner {
                 path: Some(path),
-                overrides: Mutex::new(overrides),
+                overrides: crate::OwnedState::new(overrides),
             }),
         })
     }
 
     #[must_use]
     pub fn get(&self, id: PromptSpaceId) -> PromptSpace {
-        let overrides = self
-            .inner
+        self.inner
             .overrides
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        prompt_space(id, overrides.get(&id))
+            .call(move |overrides| prompt_space(id, overrides.get(&id)))
     }
 
     #[must_use]
     pub fn list(&self) -> Vec<PromptSpace> {
-        let overrides = self
-            .inner
-            .overrides
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        PromptSpaceId::ALL
-            .into_iter()
-            .map(|id| prompt_space(id, overrides.get(&id)))
-            .collect()
+        self.inner.overrides.call(|overrides| {
+            PromptSpaceId::ALL
+                .into_iter()
+                .map(|id| prompt_space(id, overrides.get(&id)))
+                .collect()
+        })
     }
 
     pub fn replace(
@@ -179,33 +173,22 @@ impl PromptSpaces {
         content: String,
     ) -> Result<PromptSpace, PromptSpacesError> {
         validate_content(id, &content)?;
-        let mut overrides = self
-            .inner
-            .overrides
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = overrides.clone();
-        if content == id.default_content() {
-            next.remove(&id);
-        } else {
-            next.insert(id, content);
-        }
-        self.persist(&next)?;
-        *overrides = next;
-        Ok(prompt_space(id, overrides.get(&id)))
+        let owner = self.clone();
+        self.inner.overrides.call(move |overrides| {
+            let mut next = overrides.clone();
+            if content == id.default_content() {
+                next.remove(&id);
+            } else {
+                next.insert(id, content);
+            }
+            owner.persist(&next)?;
+            *overrides = next;
+            Ok(prompt_space(id, overrides.get(&id)))
+        })
     }
 
     pub fn reset(&self, id: PromptSpaceId) -> Result<PromptSpace, PromptSpacesError> {
-        let mut overrides = self
-            .inner
-            .overrides
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = overrides.clone();
-        next.remove(&id);
-        self.persist(&next)?;
-        *overrides = next;
-        Ok(prompt_space(id, None))
+        self.replace(id, id.default_content().to_owned())
     }
 
     fn persist(

@@ -1,8 +1,5 @@
-use std::{fs, path::Component};
-
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use walkdir::WalkDir;
 
 use super::*;
 
@@ -119,7 +116,7 @@ async fn execute_control_action(
             semantic_graph,
         } => {
             let state_guard = runtime
-                .lock_space(*target_space_id)
+                .reserve_space(*target_space_id)
                 .await
                 .map_err(RuntimeApiError::recovery)?;
             let core = runtime.core_handle();
@@ -129,26 +126,10 @@ async fn execute_control_action(
             let removed_files = runtime
                 .finish_commit(async move {
                     let _state_guard = state_guard;
-                    let file_core = Arc::clone(&core);
-                    let removed_files = run_blocking("clear memory", move || {
-                        clear_memory_components(
-                            file_core.as_ref(),
-                            target_space_id,
-                            memory,
-                            semantic_graph,
-                        )
-                    })
-                    .await?;
-                    core.store()
-                        .clear_space_memory_state(target_space_id, memory, semantic_graph)
+                    let removed_files = core
+                        .clear_space_memory(target_space_id, memory, semantic_graph)
                         .await
                         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-                    if semantic_graph {
-                        core.vector_store()
-                            .remove_nsg_vectors(target_space_id, None)
-                            .await
-                            .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-                    }
                     Ok::<_, RuntimeApiError>(removed_files)
                 })
                 .await
@@ -229,84 +210,4 @@ fn control_request_fingerprint(
     let encoded = serde_json::to_vec(request)
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     Ok(hex::encode(Sha256::digest(encoded)))
-}
-
-fn clear_memory_components(
-    core: &MomoCore,
-    space_id: uuid::Uuid,
-    clear_memory: bool,
-    clear_semantic_graph: bool,
-) -> Result<usize, RuntimeApiError> {
-    let root = core
-        .data_dir()
-        .join("spaces")
-        .join(space_id.to_string())
-        .join("memory");
-    if !root.exists() {
-        return Ok(0);
-    }
-    let canonical_spaces = fs::canonicalize(core.data_dir().join("spaces"))
-        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    let canonical_root =
-        fs::canonicalize(&root).map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    if !canonical_root.starts_with(&canonical_spaces) {
-        return Err(RuntimeApiError::invalid(
-            "memory Space resolves outside the instance root",
-        ));
-    }
-    let mut files = Vec::new();
-    let mut directories = Vec::new();
-    for entry in WalkDir::new(&canonical_root).follow_links(false) {
-        let entry = entry.map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-        if entry.file_type().is_symlink() {
-            return Err(RuntimeApiError::invalid(
-                "memory Space contains a symbolic link",
-            ));
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(&canonical_root)
-            .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-        if relative.as_os_str().is_empty() {
-            continue;
-        }
-        if entry.file_type().is_dir() {
-            directories.push(entry.path().to_path_buf());
-            continue;
-        }
-        if !entry.file_type().is_file() {
-            return Err(RuntimeApiError::invalid(
-                "memory Space contains an unsupported entry",
-            ));
-        }
-        let nsg = is_semantic_graph_path(relative);
-        if (nsg && clear_semantic_graph) || (!nsg && clear_memory) {
-            files.push(entry.path().to_path_buf());
-        }
-    }
-    for path in &files {
-        fs::remove_file(path).map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    }
-    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    for path in directories {
-        let _ = fs::remove_dir(path);
-    }
-    core.memory_for_space(space_id)
-        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    Ok(files.len())
-}
-
-fn is_semantic_graph_path(path: &std::path::Path) -> bool {
-    let parts = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => value.to_str(),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    matches!(parts.as_slice(), ["lore", ..] | ["rules", ..])
-        || matches!(
-            parts.as_slice(),
-            ["archive", "lore", ..] | ["archive", "rules", ..]
-        )
 }

@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 use std::time::Duration;
 
 #[tokio::test]
@@ -12,7 +13,15 @@ async fn cancelled_clear_finishes_database_cleanup_before_releasing_space() {
     let space = uuid::Uuid::now_v7();
     let workspace = runtime.core().memory_for_space(space).expect("workspace");
     let path = workspace.root().join("events/to-clear.md");
-    fs::write(&path, "pending memory").expect("fixture");
+    workspace
+        .call(|workspace| {
+            fs::write(
+                workspace.root().join("events/to-clear.md"),
+                "pending memory",
+            )?;
+            Ok(())
+        })
+        .expect("fixture");
     runtime
         .core()
         .store()
@@ -57,11 +66,11 @@ async fn cancelled_clear_finishes_database_cleanup_before_releasing_space() {
     .expect("file deletion started");
     caller.abort();
     assert!(caller.await.expect_err("caller aborted").is_cancelled());
-    let blocked = tokio::time::timeout(Duration::from_millis(25), runtime.lock_space(space))
+    let blocked = tokio::time::timeout(Duration::from_millis(25), runtime.reserve_space(space))
         .await
         .is_err();
     drop(connection);
-    let _guard = tokio::time::timeout(Duration::from_secs(3), runtime.lock_space(space))
+    let _guard = tokio::time::timeout(Duration::from_secs(3), runtime.reserve_space(space))
         .await
         .expect("cleanup completed");
     assert!(blocked, "Space must stay locked through SQLite cleanup");

@@ -27,7 +27,7 @@ pub(super) struct CompiledResponseState {
     pub(super) operation_id: Option<String>,
     pub(super) context_for_prompt: String,
     pub(super) injection_status: &'static str,
-    pub(super) guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    pub(super) guard: Option<crate::space_worker::reservations::SpaceReservation>,
     pub(super) warnings: Vec<String>,
 }
 
@@ -91,7 +91,7 @@ impl MomoApiService {
         let guard = if autonomous {
             Some(
                 self.runtime()
-                    .lock_space(
+                    .reserve_space(
                         uuid::Uuid::parse_str(managed_space_id)
                             .map_err(MomoApiError::bad_request)?,
                     )

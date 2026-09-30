@@ -677,15 +677,14 @@ impl MomoApiService {
             .character_id
             .as_deref()
             .or(default_character.as_deref());
+        let attempt_key = operation_key.to_owned();
         let attempted_conversation = persisted
             .map(|operation| operation.conversation_id.clone())
-            .or(self
-                .coordination
-                .response_attempts
-                .lock()
-                .await
-                .get(operation_key)
-                .cloned());
+            .or_else(|| {
+                self.coordination
+                    .response_attempts
+                    .call(move |attempts| attempts.get(&attempt_key).cloned())
+            });
         let existing_conversation_id = request
             .momo
             .conversation_id
@@ -758,11 +757,11 @@ impl MomoApiService {
                 .await
                 .map_err(MomoApiError::internal)?;
             let id = conversation.id.to_string();
-            self.coordination
-                .response_attempts
-                .lock()
-                .await
-                .insert(operation_key.to_owned(), id.clone());
+            let attempt_key = operation_key.to_owned();
+            let attempt_id = id.clone();
+            self.coordination.response_attempts.call(move |attempts| {
+                attempts.insert(attempt_key, attempt_id);
+            });
             (id, character_id.to_owned())
         };
         let character_uuid =
@@ -775,12 +774,11 @@ impl MomoApiService {
             .await
             .map_err(MomoApiError::internal)?
             .ok_or_else(|| MomoApiError::bad_request("character_id does not exist"))?;
-        self.coordination
-            .response_attempts
-            .lock()
-            .await
-            .entry(operation_key.to_owned())
-            .or_insert_with(|| conversation_id.clone());
+        let attempt_key = operation_key.to_owned();
+        let attempt_id = conversation_id.clone();
+        self.coordination.response_attempts.call(move |attempts| {
+            attempts.entry(attempt_key).or_insert(attempt_id);
+        });
         let resolved_input_json =
             serde_json::to_string(resolved_input).map_err(MomoApiError::internal)?;
         self.runtime()
@@ -794,11 +792,10 @@ impl MomoApiService {
             )
             .await
             .map_err(MomoApiError::internal)?;
-        self.coordination
-            .response_attempts
-            .lock()
-            .await
-            .remove(operation_key);
+        let attempt_key = operation_key.to_owned();
+        self.coordination.response_attempts.call(move |attempts| {
+            attempts.remove(&attempt_key);
+        });
 
         let user_already_written = persisted
             .map(|operation| operation.user_written)

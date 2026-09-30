@@ -301,7 +301,7 @@ async fn export_moc_locked(
     host_modules: &[HostMocModule],
 ) -> Result<Manifest, PortableError> {
     let _guards = core
-        .lock_spaces(plan.memory.iter().chain(&plan.semantic_graph).copied())
+        .reserve_spaces(plan.memory.iter().chain(&plan.semantic_graph).copied())
         .await?;
     let selected = plan.validate(!host_modules.is_empty())?;
     let staging = TempDir::new()?;
@@ -339,8 +339,8 @@ async fn export_moc_locked(
     if selected.contains(&MocModule::Memory) {
         for space_id in &plan.memory {
             let memory = core.memory_for_space(*space_id)?;
-            copy_tree_filtered(
-                memory.root(),
+            write_workspace_snapshot(
+                &memory.export_snapshot()?,
                 &staging
                     .path()
                     .join("memory/spaces")
@@ -354,8 +354,8 @@ async fn export_moc_locked(
     if selected.contains(&MocModule::SemanticGraph) {
         for space_id in &plan.semantic_graph {
             let memory = core.memory_for_space(*space_id)?;
-            copy_tree_filtered(
-                memory.root(),
+            write_workspace_snapshot(
+                &memory.export_snapshot()?,
                 &staging
                     .path()
                     .join("semantic_graph/spaces")
@@ -593,7 +593,7 @@ async fn import_moc_locked(
         ));
     }
     let _guards = core
-        .lock_spaces(
+        .reserve_spaces(
             source_spaces
                 .iter()
                 .map(|space| plan.space_map.get(space).copied().unwrap_or(*space)),
@@ -1478,32 +1478,9 @@ fn import_memory(
     if !source.exists() {
         return Ok(());
     }
-    for item in WalkDir::new(source).follow_links(false) {
-        let item = item?;
-        if !item.file_type().is_file() {
-            continue;
-        }
-        let relative = item
-            .path()
-            .strip_prefix(source)
-            .map_err(|_| PortableError::InvalidData("invalid memory path".to_owned()))?;
-        let target = core.memory_for_space(scope_id)?.root().join(relative);
-        if target.exists() && mode == ConflictMode::KeepExisting {
-            report.skipped_conflicts += 1;
-            continue;
-        }
-        let relative_name = relative.to_string_lossy().replace('\\', "/");
-        let bytes = if matches!(
-            relative_name.as_str(),
-            "config/provenance.json" | "rules/provenance.json"
-        ) {
-            momo_memory::provenance::imported_ledger(&fs::read_to_string(item.path())?, scope_id)?
-        } else {
-            fs::read(item.path())?
-        };
-        atomic_write(&target, &bytes)?;
-        report.memory_files_imported += 1;
-    }
+    let (imported, skipped) = import_workspace_files(core, source, scope_id, mode)?;
+    report.memory_files_imported += imported;
+    report.skipped_conflicts += skipped;
     Ok(())
 }
 
@@ -1527,59 +1504,79 @@ fn import_workspace_tree(
     mode: ConflictMode,
     report: &mut ImportReport,
 ) -> Result<(), PortableError> {
+    let (imported, skipped) = import_workspace_files(core, source, scope_id, mode)?;
+    report.semantic_graph_files_imported += imported;
+    report.skipped_conflicts += skipped;
+    Ok(())
+}
+
+fn import_workspace_files(
+    core: &MomoCore,
+    source: &Path,
+    scope_id: Uuid,
+    mode: ConflictMode,
+) -> Result<(usize, usize), PortableError> {
+    let mut files = std::collections::BTreeMap::new();
     for item in WalkDir::new(source).follow_links(false) {
         let item = item?;
+        if item.file_type().is_symlink() {
+            return Err(PortableError::InvalidData(
+                "workspace import contains a symlink".into(),
+            ));
+        }
         if !item.file_type().is_file() {
             continue;
         }
         let relative = item
             .path()
             .strip_prefix(source)
-            .map_err(|_| PortableError::InvalidData("invalid workspace path".to_owned()))?;
-        let target = core.memory_for_space(scope_id)?.root().join(relative);
-        if target.exists() && mode == ConflictMode::KeepExisting {
-            report.skipped_conflicts += 1;
-            continue;
-        }
-        let relative_name = relative.to_string_lossy().replace('\\', "/");
-        let bytes = if matches!(
-            relative_name.as_str(),
+            .map_err(|_| PortableError::InvalidData("invalid workspace path".into()))?;
+        let name = relative.to_string_lossy().replace('\\', "/");
+        let content = fs::read_to_string(item.path())?;
+        let content = if matches!(
+            name.as_str(),
             "config/provenance.json" | "rules/provenance.json"
         ) {
-            momo_memory::provenance::imported_ledger(&fs::read_to_string(item.path())?, scope_id)?
+            String::from_utf8(momo_memory::provenance::imported_ledger(
+                &content, scope_id,
+            )?)
+            .map_err(|e| PortableError::InvalidData(e.to_string()))?
         } else {
-            fs::read(item.path())?
+            content
         };
-        atomic_write(&target, &bytes)?;
-        report.semantic_graph_files_imported += 1;
+        files.insert(name, content);
     }
-    Ok(())
+    Ok(core.memory_for_space(scope_id)?.call(move |workspace| {
+        let mut snapshot = workspace.export_snapshot()?;
+        let mut imported = 0;
+        let mut skipped = 0;
+        for (path, content) in files {
+            if mode == ConflictMode::KeepExisting && snapshot.files.contains_key(&path) {
+                skipped += 1;
+            } else {
+                snapshot.files.insert(path, content);
+                imported += 1;
+            }
+        }
+        workspace.import_snapshot(&snapshot)?;
+        Ok((imported, skipped))
+    })?)
 }
 
-fn copy_tree_filtered(
-    source: &Path,
+fn write_workspace_snapshot(
+    snapshot: &momo_memory::MemorySnapshot,
     destination: &Path,
     semantic_graph_only: bool,
 ) -> Result<(), PortableError> {
     fs::create_dir_all(destination)?;
-    for item in WalkDir::new(source).follow_links(false) {
-        let item = item?;
-        if !item.file_type().is_file() {
-            continue;
+    for (relative, content) in &snapshot.files {
+        let is_semantic_graph = relative.starts_with("lore/")
+            || relative.starts_with("rules/")
+            || relative.starts_with("archive/lore/")
+            || relative.starts_with("archive/rules/");
+        if is_semantic_graph == semantic_graph_only {
+            atomic_write(&destination.join(relative), content.as_bytes())?;
         }
-        let relative = item
-            .path()
-            .strip_prefix(source)
-            .map_err(|_| PortableError::InvalidData("invalid source path".to_owned()))?;
-        let normalized = relative.to_string_lossy().replace('\\', "/");
-        let is_semantic_graph = normalized.starts_with("lore/")
-            || normalized.starts_with("rules/")
-            || normalized.starts_with("archive/lore/")
-            || normalized.starts_with("archive/rules/");
-        if is_semantic_graph != semantic_graph_only {
-            continue;
-        }
-        atomic_write(&destination.join(relative), &fs::read(item.path())?)?;
     }
     Ok(())
 }

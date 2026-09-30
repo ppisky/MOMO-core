@@ -48,7 +48,7 @@ async fn retrieval_waits_for_writer_using_a_different_uuid_spelling() {
         .expect("runtime");
     let id = "abcdefab-1234-4567-89ab-abcdefabcdef";
     let guard = runtime
-        .lock_space(uuid::Uuid::parse_str(id).expect("UUID"))
+        .reserve_space(uuid::Uuid::parse_str(id).expect("UUID"))
         .await
         .expect("Space available");
     let mut retrieval = Box::pin(retrieve_scoped_memory_snapshot(

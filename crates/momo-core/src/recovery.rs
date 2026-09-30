@@ -28,6 +28,16 @@ impl MomoCore {
                     .map_err(|error| momo_memory::MemoryError::InvalidPatch(error.to_string()))?,
             );
         }
+        for entry in std::fs::read_dir(self.data_dir().join("spaces"))
+            .map_err(momo_memory::MemoryError::from)?
+        {
+            let entry = entry.map_err(momo_memory::MemoryError::from)?;
+            if entry.path().join("memory-journal.sqlite3").exists()
+                && let Ok(space) = uuid::Uuid::parse_str(&entry.file_name().to_string_lossy())
+            {
+                spaces.insert(space);
+            }
+        }
         for space in spaces {
             // A damaged Space must not prevent unrelated Spaces or diagnostics starting.
             if let Err(error) = self.recover_space_commits(space).await {
@@ -38,53 +48,36 @@ impl MomoCore {
     }
 
     pub fn memory_recovery_status(&self) -> std::collections::BTreeMap<uuid::Uuid, String> {
-        self.recovery_failures
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        let mut failures = self.recovery_failures.call(|failures| failures.clone());
+        failures.extend(self.space_workers.status());
+        failures
     }
 
     pub(crate) fn mark_memory_commit_pending(&self, space: uuid::Uuid) {
-        self.recovery_failures
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
+        self.recovery_failures.call(move |failures| {
+            failures.insert(
                 space,
-                "prepared memory commit awaiting acknowledgement".to_owned(),
+                "prepared memory commit awaiting acknowledgement".into(),
             );
+        });
     }
 
     fn clear_memory_commit_pending(&self, space: uuid::Uuid) {
-        self.recovery_failures
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&space);
+        self.recovery_failures.call(move |failures| {
+            failures.remove(&space);
+        });
     }
 
     /// Typed, ordered ownership shared by imports, retrieval and all memory writers.
     /// Pending commits are completed before admitting any subsequent operation.
-    pub(crate) async fn lock_spaces(
+    pub(crate) async fn reserve_spaces(
         &self,
         spaces: impl IntoIterator<Item = uuid::Uuid>,
-    ) -> Result<Vec<tokio::sync::OwnedMutexGuard<()>>, CoreError> {
-        let spaces: std::collections::BTreeSet<_> = spaces.into_iter().collect();
-        let mut guards = Vec::with_capacity(spaces.len());
-        for space in &spaces {
-            let lock = {
-                let mut locks = self.space_locks.lock().await;
-                if locks.len() >= 1024 {
-                    locks.retain(|_, lock| lock.strong_count() > 0);
-                }
-                if let Some(lock) = locks.get(space).and_then(std::sync::Weak::upgrade) {
-                    lock
-                } else {
-                    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-                    locks.insert(*space, std::sync::Arc::downgrade(&lock));
-                    lock
-                }
-            };
-            guards.push(lock.lock_owned().await);
-        }
+    ) -> Result<Vec<crate::space_worker::reservations::SpaceReservation>, CoreError> {
+        let spaces = spaces
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let reservation = self.space_reservations.acquire(spaces.clone()).await?;
         let core = self.clone();
         self.finish_commit(async move {
             for space in spaces {
@@ -92,10 +85,12 @@ impl MomoCore {
                     core.recover_space_commits(space).await?;
                 }
             }
-            Ok(guards)
+            Ok(vec![reservation])
         })
         .await
-        .map_err(|error| momo_memory::MemoryError::InvalidPatch(error.to_string()))?
+        .map_err(|error| {
+            momo_memory::MemoryError::InvalidPatch(format!("Space recovery task failed: {error}"))
+        })?
     }
 
     pub(crate) async fn finish_commit<T: Send + 'static>(
@@ -106,25 +101,16 @@ impl MomoCore {
         let task = tokio::spawn(async move {
             let _ = sender.send(commit.await);
         });
-        {
-            let mut tasks = self
-                .commit_tasks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.commit_tasks.call(move |tasks| {
             tasks.retain(|task| !task.is_finished());
             tasks.push(task);
-        }
+        });
         receiver.await
     }
 
     pub(crate) async fn wait_for_commits(&self) {
         loop {
-            let tasks = std::mem::take(
-                &mut *self
-                    .commit_tasks
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
+            let tasks = self.commit_tasks.call(std::mem::take);
             if tasks.is_empty() {
                 return;
             }
@@ -138,6 +124,10 @@ impl MomoCore {
 
     async fn recover_space_commits(&self, space: uuid::Uuid) -> Result<(), CoreError> {
         let result = async {
+            // Clear supersedes earlier maintenance/review plans. Finish its SQL
+            // cleanup before inspecting those plans, so they cannot resurrect data.
+            self.finish_memory_clear(space).await?;
+            self.memory_for_space_unchecked(space)?.call(|_| Ok(()))?;
             for pending in self
                 .store()
                 .pending_lifecycle_events(Some(&space.to_string()))
@@ -167,11 +157,7 @@ impl MomoCore {
             Ok::<_, CoreError>(())
         }
         .await;
-        let mut failures = self
-            .recovery_failures
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match result {
+        self.recovery_failures.call(move |failures| match result {
             Ok(()) => {
                 failures.remove(&space);
                 Ok(())
@@ -184,7 +170,41 @@ impl MomoCore {
                     message,
                 })
             }
+        })
+    }
+
+    /// Caller retains the Space reservation through intent, cleanup and acknowledgement.
+    pub(crate) async fn clear_space_memory(
+        &self,
+        space: uuid::Uuid,
+        memory: bool,
+        semantic_graph: bool,
+    ) -> Result<usize, CoreError> {
+        self.mark_memory_commit_pending(space);
+        let core = self.clone();
+        let removed = tokio::task::spawn_blocking(move || {
+            core.memory_for_space_unchecked(space)?
+                .clear_memory(memory, semantic_graph)
+        })
+        .await
+        .map_err(|error| momo_memory::MemoryError::InvalidPatch(error.to_string()))??;
+        self.finish_memory_clear(space).await?;
+        self.clear_memory_commit_pending(space);
+        Ok(removed)
+    }
+
+    async fn finish_memory_clear(&self, space: uuid::Uuid) -> Result<(), CoreError> {
+        let worker = self.memory_for_space_unchecked(space)?;
+        if let Some((memory, semantic_graph)) = worker.pending_clear()? {
+            self.store()
+                .clear_space_memory_state(space, memory, semantic_graph)
+                .await?;
+            if semantic_graph {
+                self.vector_store().remove_nsg_vectors(space, None).await?;
+            }
+            worker.acknowledge_clear()?;
         }
+        Ok(())
     }
 
     pub(crate) async fn commit_prepared_review(
@@ -238,7 +258,7 @@ impl MomoCore {
     ) -> Result<momo_memory::MaintenanceReport, CoreError> {
         let core = self.clone();
         self.finish_commit(async move {
-            let _guards = core.lock_spaces([space]).await?;
+            let _guards = core.reserve_spaces([space]).await?;
             let mut result = momo_memory::MaintenanceReport::default();
             for pending in core
                 .store()

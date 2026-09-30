@@ -4,7 +4,7 @@ MOMO Core is a local-first Rust workspace. Its crates are internal modules of
 the same system and may be used directly or through the local HTTP/SSE server.
 
 Read [the 1.0 architecture](architecture_1_0.md) before changing runtime ownership,
-application interfaces, lock ordering or cross-store commit behavior. Rust
+application interfaces, mailbox admission or cross-store commit behavior. Rust
 callers use typed operations; internal JSON compatibility wrappers have been removed.
 
 The complete local candidate check is `./scripts/test-release.ps1` on Windows
@@ -44,7 +44,16 @@ cargo doc --workspace --all-features --no-deps
 
 Runtime state is intentionally split between `momo.sqlite3` (SQLx/SQLite
 application records) and `nsg-vectors.db` (the standalone Turso database used
-for NSG vector indexes). DMW and NSG source documents remain in the filesystem.
+for NSG vector indexes). Each Space also owns
+`spaces/<space_id>/memory-journal.sqlite3`, a SQLite after-image journal committed
+before DMW/NSG files are changed. `spaces/<space_id>/memory` is its materialized
+checkpoint; `.memory-worker-cache` beside it is disposable private working state.
+Only Space worker messages may mutate these workspaces. Every worker start
+restores the latest journal snapshot, including snapshots already marked applied;
+external file edits are not ingested. Clearing also journals pending SQL/vector
+cleanup and blocks that Space until cleanup is acknowledged. Journals and working
+copies are excluded from portable MOC modules. See the architecture document for
+panic isolation, startup recovery and the current complete-snapshot I/O cost.
 Imported CHARX source containers are retained under
 `character-packages/<character_id>/source.charx`; they are compatibility
 payloads used for asset-preserving CHARX and MOC round trips, not executable
@@ -88,7 +97,7 @@ Function timings include nested work and async waiting; they are not CPU samples
 and must not be summed as exclusive time. Whole-run reports include warm-up and
 fixture/index construction. The examples separately print repeated warm-query
 percentiles. Lifecycle timing covers file-plan preparation/application, not the
-full Core SQL journal, provenance eligibility or foreground lock contention.
+full Core/Space-worker journals, provenance eligibility or mailbox contention.
 The vector benchmark uses an in-memory cache and exact ranking. Run without
 `hotpath` for uninstrumented latency; use full native workloads before making
 product SLA claims. SQL/HTTP tracing, lock wrappers, allocation tracing and CPU

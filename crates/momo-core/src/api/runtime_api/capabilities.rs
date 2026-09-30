@@ -19,11 +19,10 @@ pub async fn discover_capabilities(
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     document.ttl_seconds = document.ttl_seconds.clamp(1, MAX_DISCOVERY_TTL_SECONDS);
     let now = chrono::Utc::now().timestamp();
+    let registration = document.clone();
     runtime
         .capabilities()
-        .write()
-        .await
-        .register_document(&provider_id, document.clone(), now)
+        .call(move |registry| registry.register_document(&provider_id, registration, now))
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     let expires_at_unix = now.saturating_add(document.ttl_seconds as i64);
     Ok(json!({
@@ -40,9 +39,7 @@ pub async fn register_capabilities(
 ) -> Result<(), RuntimeApiError> {
     runtime
         .capabilities()
-        .write()
-        .await
-        .register_document(&provider_id, document, fetched_at_unix)
+        .call(move |registry| registry.register_document(&provider_id, document, fetched_at_unix))
         .map(|_| ())
         .map_err(|error| RuntimeApiError::internal(error.to_string()))
 }
@@ -52,11 +49,9 @@ pub async fn resolve_capability(
     provider_id: String,
     model: String,
 ) -> Result<serde_json::Value, RuntimeApiError> {
-    let resolved = runtime.capabilities().read().await.resolve(
-        &provider_id,
-        &model,
-        chrono::Utc::now().timestamp(),
-    );
+    let resolved = runtime.capabilities().call(move |registry| {
+        registry.resolve(&provider_id, &model, chrono::Utc::now().timestamp())
+    });
     Ok(json!({
         "profile": resolved.profile,
         "source": match resolved.source {

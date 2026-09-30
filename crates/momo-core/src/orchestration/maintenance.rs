@@ -162,9 +162,7 @@ impl MomoApiService {
         });
         self.coordination
             .maintenance_tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(task);
+            .call(move |tasks| tasks.push(task));
         for (kind, enabled, threshold) in [
             (
                 MaintenanceKind::Memory,
@@ -191,13 +189,10 @@ impl MomoApiService {
                     tracing::warn!(?kind, %error, "background response maintenance failed; turns remain pending");
                 }
             });
-            let mut tasks = self
-                .coordination
-                .maintenance_tasks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            tasks.retain(|task| !task.is_finished());
-            tasks.push(task);
+            self.coordination.maintenance_tasks.call(move |tasks| {
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(task);
+            });
         }
     }
 
@@ -205,14 +200,7 @@ impl MomoApiService {
     /// finished. Transports should call this after they stop accepting work.
     pub async fn wait_for_maintenance(&self) {
         loop {
-            let tasks = {
-                let mut tasks = self
-                    .coordination
-                    .maintenance_tasks
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                std::mem::take(&mut *tasks)
-            };
+            let tasks = self.coordination.maintenance_tasks.call(std::mem::take);
             if tasks.is_empty() {
                 self.runtime().core().wait_for_commits().await;
                 return;
@@ -648,7 +636,7 @@ impl MomoApiService {
             .finish_commit(async move {
                 let _maintenance_guard = _guard;
                 let guard = runtime
-                    .lock_space(
+                    .reserve_space(
                         uuid::Uuid::parse_str(&scope_id).map_err(MomoApiError::bad_request)?,
                     )
                     .await
@@ -662,8 +650,7 @@ impl MomoApiService {
                         MaintenanceKind::Memory => memory
                             .prepare_identity_patch_commit(&patch, provenance.identity.as_ref()),
                         MaintenanceKind::SemanticGraph => {
-                            momo_memory::nsg::NsgWorkspace::initialize(memory.root())?
-                                .prepare_patch_commit(&patch)
+                            memory.nsg()?.prepare_patch_commit(&patch)
                         }
                     }?;
                     memory.trace_commit(plan, Some(parsed_scope_id), &provenance)
@@ -709,7 +696,7 @@ impl MomoApiService {
                         .map_err(MomoApiError::bad_request)?,
                 );
                 let _guard = runtime
-                    .lock_space(
+                    .reserve_space(
                         uuid::Uuid::parse_str(&pending.batch.scope_id)
                             .map_err(MomoApiError::bad_request)?,
                     )
@@ -731,7 +718,7 @@ async fn validate_maintenance_patch(
 ) -> Result<(), String> {
     let parsed_scope_id = uuid::Uuid::parse_str(scope_id).map_err(|error| error.to_string())?;
     let _state_guard = runtime
-        .lock_space(parsed_scope_id)
+        .reserve_space(parsed_scope_id)
         .await
         .map_err(|error| error.to_string())?;
     let core = runtime.core_handle();
@@ -743,12 +730,11 @@ async fn validate_maintenance_patch(
             MaintenanceKind::Memory => memory
                 .prepare_identity_patch_commit(&patch, provenance.identity.as_ref())
                 .map_err(|error| error.to_string()),
-            MaintenanceKind::SemanticGraph => {
-                momo_memory::nsg::NsgWorkspace::initialize(memory.root())
-                    .map_err(|error| error.to_string())?
-                    .prepare_patch_commit(&patch)
-                    .map_err(|error| error.to_string())
-            }
+            MaintenanceKind::SemanticGraph => memory
+                .nsg()
+                .map_err(|error| error.to_string())?
+                .prepare_patch_commit(&patch)
+                .map_err(|error| error.to_string()),
         }?;
         memory
             .trace_commit(plan, Some(parsed_scope_id), &provenance)

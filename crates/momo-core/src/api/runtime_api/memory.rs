@@ -13,7 +13,7 @@ pub async fn retry_memory_recovery(
     space_id: uuid::Uuid,
 ) -> RuntimeApiResult<()> {
     let _guard = runtime
-        .lock_space(space_id)
+        .reserve_space(space_id)
         .await
         .map_err(RuntimeApiError::recovery)?;
     Ok(())
@@ -205,7 +205,7 @@ pub(crate) async fn retrieve_scoped_memory_snapshot(
     // revision between a returned body and its recorded source identity.
     let state_guards = runtime
         .core()
-        .lock_spaces(lock_space_ids)
+        .reserve_spaces(lock_space_ids)
         .await
         .map_err(RuntimeApiError::recovery)?;
     let core = runtime.core().clone();
@@ -451,7 +451,7 @@ pub async fn retrieve_memory_items(
     max_tokens: usize,
 ) -> Result<Vec<serde_json::Value>, RuntimeApiError> {
     let guard = runtime
-        .lock_space(scope_id)
+        .reserve_space(scope_id)
         .await
         .map_err(RuntimeApiError::recovery)?;
     let core = runtime.core().clone();
@@ -492,7 +492,7 @@ async fn retrieve_memory(
         validate_query_vector(vector_query)?;
         let vector_workspace = Arc::clone(&workspace);
         let hashes = tokio::task::spawn_blocking(move || {
-            let nsg = momo_memory::nsg::NsgWorkspace::initialize(vector_workspace.root())?;
+            let nsg = vector_workspace.nsg()?;
             Ok::<_, momo_memory::MemoryError>(
                 nsg.embedding_documents()?
                     .into_iter()
@@ -525,7 +525,8 @@ async fn retrieve_memory(
             plan.include_semantic_graph,
         );
         let nsg = if plan.include_semantic_graph {
-            momo_memory::nsg::NsgWorkspace::initialize(workspace.root())
+            workspace
+                .nsg()
                 .map_err(|error| RuntimeApiError::internal(error.to_string()))?
                 .retrieve(
                     &plan.query,
@@ -641,7 +642,7 @@ pub async fn validate_memory_patch(
     let scope_id = uuid::Uuid::parse_str(&scope_id)
         .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
     let _state_guard = runtime
-        .lock_space(scope_id)
+        .reserve_space(scope_id)
         .await
         .map_err(RuntimeApiError::recovery)?;
     let core = runtime.core_handle();
@@ -871,22 +872,19 @@ pub async fn archive_memory_document(
         let workspace = core
             .memory_for_space(scope_id)
             .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-        workspace
-            .read_document_by_id(&document_id)
-            .map_err(|error| RuntimeApiError::not_found(error.to_string()))?;
-        let index_path = workspace.root().join("indexes/memory_index.yaml");
-        let index_text = std::fs::read_to_string(&index_path)
-            .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-        let entry_path = find_entry_path(&index_text, &document_id)?;
-        let yaml_patch = format!(
-            "patches:\n  - target_file: \"{entry_path}\"\n    operations:\n      - type: update_frontmatter\n        fields:\n          status: archived\n          weight: 0.1\n",
-        );
-        workspace
-            .apply_patch(&yaml_patch)
-            .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-        workspace
-            .move_archived_document(&entry_path)
-            .map_err(|error| RuntimeApiError::internal(error.to_string()))
+        workspace.call(move |workspace| {
+            workspace.read_document_by_id(&document_id)?;
+            let snapshot = workspace.export_snapshot()?;
+            let index = snapshot.files.get("indexes/memory_index.yaml")
+                .ok_or_else(|| momo_memory::MemoryError::InvalidIndex("memory index missing".into()))?;
+            let entry_path = find_entry_path(index, &document_id)
+                .map_err(|error| momo_memory::MemoryError::InvalidPatch(error.to_string()))?;
+            let yaml_patch = format!(
+                "patches:\n  - target_file: \"{entry_path}\"\n    operations:\n      - type: update_frontmatter\n        fields:\n          status: archived\n          weight: 0.1\n",
+            );
+            workspace.apply_patch(&yaml_patch)?;
+            workspace.move_archived_document(&entry_path)
+        }).map_err(|error| RuntimeApiError::internal(error.to_string()))
     })
     .await?;
     Ok(())

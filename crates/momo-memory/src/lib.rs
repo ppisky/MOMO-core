@@ -14,12 +14,13 @@ mod patch;
 mod retrieval;
 
 use std::{
+    cell::RefCell,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{self, Write},
     path::{Component, Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -395,10 +396,10 @@ pub struct DocumentSummary {
     pub injection_character_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MemoryWorkspace {
     root: PathBuf,
-    index_cache: Arc<RwLock<Option<CachedMemoryIndex>>>,
+    index_cache: RefCell<Option<CachedMemoryIndex>>,
 }
 
 #[derive(Debug, Clone)]
