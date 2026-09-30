@@ -9,6 +9,8 @@ permissions:
 
 jobs:
   rust:
+    env:
+      HOTPATH_METRICS_SERVER_OFF: "1"
     strategy:
       fail-fast: false
       matrix:

@@ -63,6 +63,37 @@ incremental NSG index rebuilds, and query-text embedding. The implemented
 contract and its 0.4.2 protocol alignment are documented in
 `vectorization_model_interface_0_4_2.md`.
 
+## Offline performance investigation
+
+On Windows, run `./scripts/profile-core.ps1`. It builds Release examples before
+timing, then runs DMW retrieval/lifecycle and vector workloads sequentially.
+All data is synthetic or tracked repository text; no model credentials are used.
+Timings, hotpath JSON and environment details are saved under `target/`.
+The first Windows measurements and their limits are recorded in
+[the 2026-09-30 performance report](performance_2026_09_30.zh-CN.md).
+
+The `hotpath` feature on `momo-memory` and `momo-storage` is opt-in. Normal builds
+do not include the profiler. An all-features build includes these diagnostics
+and is not the normal production profile.
+
+Equivalent commands on other platforms (set `HOTPATH_METRICS_SERVER_OFF=1` to
+disable the profiler's local metrics listener):
+
+```bash
+HOTPATH_METRICS_SERVER_OFF=1 cargo run --release -p momo-memory --example retrieval_benchmark --features hotpath --locked -- 1000 25 5
+HOTPATH_METRICS_SERVER_OFF=1 cargo run --release -p momo-storage --example vector_benchmark --features hotpath --locked -- 5000 384 64 25
+```
+
+Function timings include nested work and async waiting; they are not CPU samples
+and must not be summed as exclusive time. Whole-run reports include warm-up and
+fixture/index construction. The examples separately print repeated warm-query
+percentiles. Lifecycle timing covers file-plan preparation/application, not the
+full Core SQL journal, provenance eligibility or foreground lock contention.
+The vector benchmark uses an in-memory cache and exact ranking. Run without
+`hotpath` for uninstrumented latency; use full native workloads before making
+product SLA claims. SQL/HTTP tracing, lock wrappers, allocation tracing and CPU
+sampling are not enabled by this initial integration.
+
 ## Runtime data and secrets
 
 API keys, signing certificates, production credentials, user data, and runtime

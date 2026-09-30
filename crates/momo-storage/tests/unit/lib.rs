@@ -1,6 +1,72 @@
 use super::*;
 
 #[tokio::test]
+async fn vector_cache_survives_disk_reopen_replacement_and_deletion() {
+    let directory = tempfile::tempdir().expect("temporary cache");
+    let path = directory.path().join("vectors.db");
+    let scope = new_id();
+    let space = "reopen-test|3";
+    let mut record = NsgVectorRecord {
+        scope_id: scope,
+        node_id: "before".into(),
+        source_hash: "a".repeat(64),
+        vector_space_id: space.into(),
+        dimension: 3,
+        vector: vec![1.0, 0.0, 0.0],
+        created_at: Utc::now(),
+    };
+    {
+        let store = TursoVectorStore::open(&path).await.expect("open");
+        store
+            .upsert_nsg_vectors(&[record.clone()])
+            .await
+            .expect("write");
+    }
+    {
+        let store = TursoVectorStore::open(&path).await.expect("reopen");
+        let rows = store.list_nsg_vectors(scope, space).await.expect("read");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].node_id, "before");
+        assert_eq!(rows[0].vector, record.vector);
+        record.node_id = "after".into();
+        store
+            .replace_nsg_vectors(scope, space, &[record.clone()])
+            .await
+            .expect("replace");
+    }
+    {
+        let store = TursoVectorStore::open(&path)
+            .await
+            .expect("reopen replacement");
+        let hashes = HashMap::from([(record.node_id.clone(), record.source_hash.clone())]);
+        assert_eq!(
+            store
+                .rank_nsg_vectors(scope, space, &record.vector, &hashes, 1)
+                .await
+                .expect("rank"),
+            ["after"]
+        );
+        assert_eq!(
+            store
+                .remove_nsg_vectors(scope, Some(space))
+                .await
+                .expect("delete"),
+            1
+        );
+    }
+    let store = TursoVectorStore::open(&path)
+        .await
+        .expect("reopen deletion");
+    assert!(
+        store
+            .list_nsg_vectors(scope, space)
+            .await
+            .expect("empty")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn prepared_journal_cannot_be_discarded_or_acknowledged_with_different_evidence() {
     let store = LocalStore::in_memory().await.expect("store");
     let space = Uuid::new_v4().to_string();

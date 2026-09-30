@@ -93,6 +93,7 @@ impl MemoryWorkspace {
     /// Freeze activity, content changes, index, tombstones and audit together.
     /// The caller must journal this plan before applying it, then acknowledge
     /// the response event. Replaying the prepared plan cannot age memory twice.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn prepare_lifecycle_activity(
         &self,
         activity: &LifecycleActivity,

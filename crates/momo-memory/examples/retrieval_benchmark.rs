@@ -1,8 +1,10 @@
 use std::{collections::BTreeMap, env, fs, process::ExitCode, time::Instant};
 
+use momo_memory::lifecycle::{LifecycleActivity, LifecycleSettings};
 use momo_memory::{ConservativeTokenCounter, MemoryDocument, MemoryWorkspace, Metadata};
 use tempfile::TempDir;
 
+#[cfg_attr(feature = "hotpath", hotpath::main(report = "functions-timing"))]
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -16,7 +18,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let document_count = env::args()
         .nth(1)
-        .ok_or("usage: retrieval_benchmark <document-count>")?
+        .ok_or("usage: retrieval_benchmark <document-count> [retrieval-trials] [lifecycle-trials]")?
         .parse::<usize>()?;
     if document_count == 0 {
         return Err("document-count must be greater than zero".into());
@@ -29,6 +31,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if trials == 0 {
         return Err("trials must be greater than zero".into());
     }
+    let lifecycle_trials = env::args()
+        .nth(3)
+        .map(|value| value.parse::<usize>())
+        .transpose()?
+        .unwrap_or(0);
+    let conversation = "00000000-0000-4000-8000-000000000001";
+    let character = "00000000-0000-4000-8000-000000000002";
 
     let temp = TempDir::new()?;
     let memory = MemoryWorkspace::initialize(temp.path())?;
@@ -53,8 +62,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 tags: vec![format!("fixture-{index:05}")],
                 aliases: Vec::new(),
                 injection_scope: None,
-                injection_conversation_id: None,
-                injection_character_id: None,
+                injection_conversation_id: Some(conversation.to_owned()),
+                injection_character_id: Some(character.to_owned()),
                 status: "active".to_owned(),
             },
             body: format!("# {title}\n\nSynthetic DMW retrieval benchmark record {index:05}.\n"),
@@ -105,6 +114,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("retrieval_p95_us={}", percentile(&samples_us, 95));
     println!("retrieval_p99_us={}", percentile(&samples_us, 99));
     println!("retrieval_max_us={}", samples_us[samples_us.len() - 1]);
+    if lifecycle_trials > 0 {
+        let activity = LifecycleActivity {
+            identity: None,
+            conversation_id: conversation.to_owned(),
+            character_id: character.to_owned(),
+            query: "unrelated conversation".to_owned(),
+            settings: LifecycleSettings::default(),
+        };
+        let mut samples = Vec::with_capacity(lifecycle_trials);
+        for turn in 0..lifecycle_trials {
+            let started = Instant::now();
+            let (plan, _) =
+                memory.prepare_lifecycle_activity(&activity, 1_700_000_000 + turn as i64)?;
+            memory.apply_prepared_commit(&plan)?;
+            samples.push(started.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        println!("lifecycle_trials={lifecycle_trials}");
+        println!(
+            "lifecycle_prepare_apply_p50_us={}",
+            percentile(&samples, 50)
+        );
+        println!(
+            "lifecycle_prepare_apply_p95_us={}",
+            percentile(&samples, 95)
+        );
+    }
     Ok(())
 }
 

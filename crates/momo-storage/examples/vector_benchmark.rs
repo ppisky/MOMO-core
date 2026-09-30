@@ -9,10 +9,15 @@ const DEFAULT_DIMENSION: usize = 384;
 const DEFAULT_TOP_K: usize = 64;
 
 #[tokio::main]
+#[cfg_attr(feature = "hotpath", hotpath::main(report = "functions-timing"))]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_count = argument(1, DEFAULT_NODE_COUNT)?;
     let dimension = argument(2, DEFAULT_DIMENSION)?;
     let top_k = argument(3, DEFAULT_TOP_K)?;
+    let trials = argument(4, 25)?;
+    if trials == 0 {
+        return Err("trials must be greater than zero".into());
+    }
     if node_count == 0 || dimension == 0 || dimension > 8_192 {
         return Err("node_count must be positive and dimension must be between 1 and 8192".into());
     }
@@ -41,19 +46,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.upsert_nsg_vectors(&records).await?;
     let write_elapsed = write_started.elapsed();
 
-    let search_started = Instant::now();
-    let ranked = store
+    let warm = store
         .rank_nsg_vectors(scope_id, &vector_space_id, &query, &current_hashes, top_k)
         .await?;
-    let search_elapsed = search_started.elapsed();
+    let mut samples = Vec::with_capacity(trials);
+    for _ in 0..trials {
+        let started = Instant::now();
+        let ranked = store
+            .rank_nsg_vectors(scope_id, &vector_space_id, &query, &current_hashes, top_k)
+            .await?;
+        samples.push(started.elapsed().as_micros());
+        if ranked != warm {
+            return Err("ranking changed for the same vector snapshot".into());
+        }
+    }
+    samples.sort_unstable();
 
     println!("nodes={node_count} dimension={dimension} top_k={top_k}");
     println!("write_ms={:.3}", write_elapsed.as_secs_f64() * 1_000.0);
+    println!("search_trials={trials}");
     println!(
-        "exact_search_ms={:.3}",
-        search_elapsed.as_secs_f64() * 1_000.0
+        "exact_search_p50_us={}",
+        samples[(trials * 50).div_ceil(100) - 1]
     );
-    println!("results={}", ranked.len());
+    println!(
+        "exact_search_p95_us={}",
+        samples[(trials * 95).div_ceil(100) - 1]
+    );
+    println!("results={}", warm.len());
     Ok(())
 }
 

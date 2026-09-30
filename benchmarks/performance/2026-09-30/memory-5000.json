@@ -1,0 +1,114 @@
+{
+  "type": "hotpath_report",
+  "version": "0.27.0",
+  "meta": {
+    "rustc": "1.96.1",
+    "os": "windows-x86_64",
+    "created_at": "2026-09-30T12:23:30Z",
+    "source_root": ""
+  },
+  "functions_timing": {
+    "profiling_mode": "timing",
+    "time_elapsed": "12.95 s",
+    "total_elapsed_ns": 12946089700,
+    "description": "Execution duration of functions.",
+    "caller_name": "retrieval_benchmark::main",
+    "percentiles": [
+      95.0
+    ],
+    "data": [
+      {
+        "id": 6,
+        "name": "retrieval_benchmark::main",
+        "calls": 1,
+        "sampled_calls": 1,
+        "avg": "12.95 s",
+        "p95": "12.95 s",
+        "total": "12.95 s",
+        "percent_total": "100.00%",
+        "location": {
+          "file": "crates\\momo-memory\\examples\\retrieval_benchmark.rs",
+          "line": 8,
+          "column": 4
+        }
+      },
+      {
+        "id": 5,
+        "name": "momo_memory::lifecycle::prepare_lifecycle_activity",
+        "calls": 5,
+        "sampled_calls": 5,
+        "avg": "1.37 s",
+        "p95": "1.39 s",
+        "total": "6.87 s",
+        "percent_total": "53.06%",
+        "location": {
+          "file": "crates\\momo-memory\\src\\lifecycle.rs",
+          "line": 97,
+          "column": 12
+        }
+      },
+      {
+        "id": 1,
+        "name": "momo_memory::workspace::build_index_data",
+        "calls": 6,
+        "sampled_calls": 6,
+        "avg": "574.83 ms",
+        "p95": "618.14 ms",
+        "total": "3.45 s",
+        "percent_total": "26.64%",
+        "location": {
+          "file": "crates\\momo-memory\\src\\workspace.rs",
+          "line": 1415,
+          "column": 19
+        }
+      },
+      {
+        "id": 4,
+        "name": "momo_memory::workspace::retrieve_in_scope",
+        "calls": 26,
+        "sampled_calls": 26,
+        "avg": "115.67 ms",
+        "p95": "116.98 ms",
+        "total": "3.01 s",
+        "percent_total": "23.23%",
+        "location": {
+          "file": "crates\\momo-memory\\src\\workspace.rs",
+          "line": 214,
+          "column": 12
+        }
+      },
+      {
+        "id": 2,
+        "name": "momo_memory::workspace::index_source_signature",
+        "calls": 27,
+        "sampled_calls": 27,
+        "avg": "97.40 ms",
+        "p95": "99.75 ms",
+        "total": "2.63 s",
+        "percent_total": "20.31%",
+        "location": {
+          "file": "crates\\momo-memory\\src\\workspace.rs",
+          "line": 1373,
+          "column": 8
+        }
+      },
+      {
+        "id": 3,
+        "name": "momo_memory::workspace::load_index",
+        "calls": 26,
+        "sampled_calls": 26,
+        "avg": "97.64 ms",
+        "p95": "99.94 ms",
+        "total": "2.54 s",
+        "percent_total": "19.61%",
+        "location": {
+          "file": "crates\\momo-memory\\src\\workspace.rs",
+          "line": 1286,
+          "column": 19
+        }
+      }
+    ],
+    "total_count": 6,
+    "included_count": 6
+  }
+}

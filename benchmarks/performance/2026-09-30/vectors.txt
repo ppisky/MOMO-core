@@ -1,0 +1,6 @@
+nodes=5000 dimension=384 top_k=64
+write_ms=437.491
+search_trials=25
+exact_search_p50_us=78874
+exact_search_p95_us=81086
+results=64

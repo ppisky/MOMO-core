@@ -210,6 +210,7 @@ impl MemoryWorkspace {
         self.retrieve_in_scope(query, max_tokens, counter, None)
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn retrieve_in_scope(
         &self,
         query: &str,
@@ -1281,6 +1282,7 @@ impl MemoryWorkspace {
         }))
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn load_index(&self) -> Result<Arc<MemoryIndex>, MemoryError> {
         let source_signature = self.index_source_signature()?;
         if let Some(cached) = self
@@ -1367,6 +1369,7 @@ impl MemoryWorkspace {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn index_source_signature(&self) -> Result<Vec<IndexSourceStamp>, MemoryError> {
         let mut paths = self.all_long_term_memory_paths()?;
         paths.push(PathBuf::from("indexes/memory_index.yaml"));
@@ -1408,6 +1411,7 @@ impl MemoryWorkspace {
             }))
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn build_index_data(
         &self,
         previous: Option<&MemoryIndex>,

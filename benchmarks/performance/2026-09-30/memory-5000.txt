@@ -1,0 +1,12 @@
+documents=5000
+indexed_documents=5000
+fixture_write_ms=1705
+index_rebuild_ms=770
+retrieval_trials=25
+retrieval_p50_us=114476
+retrieval_p95_us=116708
+retrieval_p99_us=116981
+retrieval_max_us=116981
+lifecycle_trials=5
+lifecycle_prepare_apply_p50_us=1394112
+lifecycle_prepare_apply_p95_us=1402885

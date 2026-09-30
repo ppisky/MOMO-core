@@ -1,0 +1,23 @@
+revision=049500450912cddfd0dc0f3e7048cd7735b2a156
+working_tree= M .github/workflows/ci.yml
+ M Cargo.lock
+ M Cargo.toml
+ M crates/momo-memory/Cargo.toml
+ M crates/momo-memory/examples/retrieval_benchmark.rs
+ M crates/momo-memory/src/lifecycle.rs
+ M crates/momo-memory/src/workspace.rs
+ M crates/momo-storage/Cargo.toml
+ M crates/momo-storage/examples/vector_benchmark.rs
+ M crates/momo-storage/src/vector.rs
+ M crates/momo-storage/tests/unit/lib.rs
+ M docs/development.en.md
+?? benchmarks/performance/
+?? docs/performance_2026_09_30.zh-CN.md
+?? scripts/profile-core.ps1
+
+rustc=rustc 1.96.1 (31fca3adb 2026-06-26)
+cargo=cargo 1.96.1 (356927216 2026-06-26)
+os=Microsoft Windows NT 10.0.19045.0
+cpu=AMD Ryzen 7 PRO 6850H with Radeon Graphics
+documents=100,1000,5000 trials=25 lifecycle_trials=5 vectors=5000
+Mode: release; hotpath function timing only; synthetic data; no model calls

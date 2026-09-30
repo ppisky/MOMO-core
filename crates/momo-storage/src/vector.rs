@@ -34,6 +34,7 @@ impl TursoVectorStore {
         Ok(Self { database })
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn list_nsg_vectors(
         &self,
         scope_id: Uuid,
@@ -132,6 +133,7 @@ impl TursoVectorStore {
 }
 
 impl NsgVectorStore for TursoVectorStore {
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn upsert_nsg_vectors(&self, records: &[NsgVectorRecord]) -> Result<(), StorageError> {
         let mut dimensions = HashMap::new();
         for record in records {
@@ -179,6 +181,7 @@ impl NsgVectorStore for TursoVectorStore {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn rank_nsg_vectors(
         &self,
         scope_id: Uuid,
