@@ -78,6 +78,9 @@ impl MomoCore {
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
         let reservation = self.space_reservations.acquire(spaces.clone()).await?;
+        for space in &spaces {
+            self.require_live_space(*space)?;
+        }
         let core = self.clone();
         self.finish_commit(async move {
             for space in spaces {

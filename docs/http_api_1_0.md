@@ -58,6 +58,12 @@ file operations. Their request and response shapes may evolve with the workspace
 must not be used as a cross-version or remote public API without a host-owned
 adapter.
 
+`GET /v1/spaces/{id}/assets` and `POST /v1/spaces/{id}/remove` provide
+host-authorized inventory and durable migration/deletion with operation replay
+and startup recovery. These are local administration APIs, not new stable
+1.0 controls. See [Space lifecycle](space_lifecycle.zh-CN.md) for ownership,
+conflicts, deletion scope and recovery requirements.
+
 `GET/PUT /v1/runtime-settings` manages one runtime instance's typed behavior
 resource. `PUT` replaces the complete in-memory value; it is not persisted.
 `GET/PUT/DELETE /v1/prompt-spaces/{id}` manages the fixed prompt slots. MOMO

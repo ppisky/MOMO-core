@@ -13,7 +13,7 @@ use tokio::sync::{Notify, OwnedMutexGuard};
 
 use crate::{CapabilityRegistry, CoreError, MomoCore, OwnedState};
 
-mod settings;
+pub(crate) mod settings;
 pub use settings::RuntimeSettingsResource;
 pub use settings::runtime_settings_description;
 
@@ -82,7 +82,7 @@ impl CancellationSignal {
 #[derive(Debug)]
 pub struct MomoRuntime {
     core: Arc<MomoCore>,
-    settings: OwnedState<settings::SettingsStore>,
+    settings: Arc<OwnedState<settings::SettingsStore>>,
     prompt_spaces: crate::PromptSpaces,
     response_coordination: Arc<crate::orchestration::coordination::ResponseCoordination>,
     cancellations: OwnedState<HashMap<String, Arc<CancellationSignal>>>,
@@ -114,7 +114,7 @@ impl MomoRuntime {
             settings::SettingsStore::load(&core.data_dir().join("runtime-settings.json"))?;
         Ok(Self {
             core,
-            settings: OwnedState::new(settings),
+            settings: Arc::new(OwnedState::new(settings)),
             prompt_spaces,
             cancellations: OwnedState::new(HashMap::new()),
             response_coordination: Arc::default(),
@@ -161,6 +161,12 @@ impl MomoRuntime {
         settings: crate::MomoRuntimeSettings,
         expected_revision: Option<u64>,
     ) -> Result<RuntimeSettingsResource, crate::GovernanceError> {
+        let _admission = self.core.admit_settings_operation()?;
+        if let Some(space) = space_id {
+            self.core
+                .require_live_space(space)
+                .map_err(|error| crate::GovernanceError::Invalid(error.to_string()))?;
+        }
         let value = serde_json::to_value(settings)
             .map_err(|e| crate::GovernanceError::Invalid(e.to_string()))?;
         self.settings
@@ -173,6 +179,12 @@ impl MomoRuntime {
         patch: serde_json::Value,
         expected_revision: Option<u64>,
     ) -> Result<RuntimeSettingsResource, crate::GovernanceError> {
+        let _admission = self.core.admit_settings_operation()?;
+        if let Some(space) = space_id {
+            self.core
+                .require_live_space(space)
+                .map_err(|error| crate::GovernanceError::Invalid(error.to_string()))?;
+        }
         self.settings
             .call(move |current| current.update(space_id, expected_revision, Some(patch), true))
     }
@@ -182,12 +194,37 @@ impl MomoRuntime {
         space_id: Option<uuid::Uuid>,
         expected_revision: Option<u64>,
     ) -> Result<RuntimeSettingsResource, crate::GovernanceError> {
+        let _admission = self.core.admit_settings_operation()?;
+        if let Some(space) = space_id {
+            self.core
+                .require_live_space(space)
+                .map_err(|error| crate::GovernanceError::Invalid(error.to_string()))?;
+        }
         self.settings
             .call(move |current| current.update(space_id, expected_revision, None, false))
     }
 
     pub const fn prompt_spaces(&self) -> &crate::PromptSpaces {
         &self.prompt_spaces
+    }
+
+    pub async fn remove_space_assets(
+        &self,
+        request: crate::SpaceRemovalRequest,
+    ) -> crate::api::runtime_api::RuntimeApiResult<crate::SpaceRemovalReceipt> {
+        let settings = Arc::clone(&self.settings);
+        let path = self.data_dir().join("runtime-settings.json");
+        self.core
+            .remove_space_assets_with_publish(request, move || {
+                let reloaded = settings::SettingsStore::load(&path).map_err(|error| {
+                    crate::api::runtime_api::RuntimeApiError::internal(error.to_string())
+                })?;
+                settings.call(move |current| {
+                    *current = reloaded;
+                });
+                Ok(())
+            })
+            .await
     }
 
     pub(crate) fn core_handle(&self) -> Arc<MomoCore> {

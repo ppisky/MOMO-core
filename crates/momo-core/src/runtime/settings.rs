@@ -29,7 +29,7 @@ struct StoredSettings {
 }
 
 #[derive(Debug)]
-pub(super) struct SettingsStore {
+pub(crate) struct SettingsStore {
     path: PathBuf,
     stored: StoredSettings,
 }
@@ -267,7 +267,7 @@ fn decode(value: Value) -> Result<MomoRuntimeSettings, GovernanceError> {
 }
 
 impl SettingsStore {
-    pub(super) fn load(path: &Path) -> Result<Self, GovernanceError> {
+    pub(crate) fn load(path: &Path) -> Result<Self, GovernanceError> {
         let mut stored = match std::fs::read(path) {
             Ok(bytes) => {
                 if bytes.len() > 4 * 1024 * 1024 {
@@ -295,6 +295,52 @@ impl SettingsStore {
             path: path.to_owned(),
             stored,
         })
+    }
+
+    pub(crate) fn space_override(&self, id: Uuid) -> Option<Value> {
+        self.stored.spaces.get(&id).cloned()
+    }
+
+    pub(crate) fn removal_image(
+        mut self,
+        from: Uuid,
+        to: Option<Uuid>,
+    ) -> Result<Option<String>, GovernanceError> {
+        let Some(patch) = self.stored.spaces.remove(&from) else {
+            return Ok(None);
+        };
+        if let Some(to) = to {
+            if let Some(existing) = self.stored.spaces.get_mut(&to) {
+                crate::space_lifecycle::merge_maps(existing, patch, "runtime-settings")
+                    .map_err(invalid)?;
+            } else {
+                self.stored.spaces.insert(to, patch);
+            }
+        }
+        self.stored.revision = self
+            .stored
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("settings revision exhausted"))?;
+        Self::validate(&self.stored)?;
+        let image = serde_json::to_string(&self.stored).map_err(invalid)?;
+        if image.len() > 4 * 1024 * 1024 {
+            return Err(invalid("runtime settings file exceeds 4 MiB"));
+        }
+        Ok(Some(image))
+    }
+
+    pub(crate) fn apply_removal_image(path: &Path, image: &str) -> Result<(), GovernanceError> {
+        let stored: StoredSettings = serde_json::from_str(image).map_err(invalid)?;
+        Self::validate(&stored)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| invalid("missing settings parent"))?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(invalid)?;
+        staged.write_all(image.as_bytes()).map_err(invalid)?;
+        staged.as_file().sync_all().map_err(invalid)?;
+        staged.persist(path).map_err(invalid)?;
+        Ok(())
     }
 
     fn effective(stored: &StoredSettings, space: Option<Uuid>) -> MomoRuntimeSettings {

@@ -75,11 +75,17 @@ fn build_app(state: AppState) -> Router {
         .nest("/v1", api_routes())
         .layer(DefaultBodyLimit::max(MAX_RESPONSE_REQUEST_BYTES))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            space_admission,
+        ))
         .with_state(state)
 }
 
 fn api_routes() -> Router<AppState> {
     Router::new()
+        .route("/spaces/:id/assets", get(get_space_assets))
+        .route("/spaces/:id/remove", post(remove_space_assets))
         .route("/health", get(health))
         .route("/characters", get(list_characters).post(create_character))
         .route(
@@ -262,13 +268,19 @@ fn control_api_error(error: runtime_api::RuntimeApiError) -> ApiError {
 fn runtime_api_error(error: runtime_api::RuntimeApiError) -> ApiError {
     use runtime_api::RuntimeApiErrorKind;
 
-    match error.kind {
+    let code = error.code;
+    let mut result = match error.kind {
         RuntimeApiErrorKind::InvalidRequest => ApiError::bad_request(error.message),
         RuntimeApiErrorKind::NotFound => ApiError::not_found(error.message),
         RuntimeApiErrorKind::Conflict => ApiError::conflict(error.message),
         RuntimeApiErrorKind::Upstream => ApiError::bad_gateway(error.message),
         RuntimeApiErrorKind::Internal => ApiError::internal(error.message),
+    };
+    if let Some(code) = code {
+        result.error.code = code.into();
+        result.error.error_type = code.into();
     }
+    result
 }
 
 fn embedding_api_error(error: momo_core::EmbeddingError) -> ApiError {

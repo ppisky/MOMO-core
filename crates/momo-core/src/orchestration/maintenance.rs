@@ -181,6 +181,7 @@ impl MomoApiService {
             let service = self.clone();
             let scope_id = scope_id.clone();
             let task = tokio::spawn(async move {
+                let _admission = service.runtime().core().admit_space_operation().await;
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 if service.coordination.has_active_responses(&scope_id) {
                     return;
@@ -241,6 +242,11 @@ impl MomoApiService {
         threshold: usize,
         trigger: &str,
     ) -> Result<bool, MomoApiError> {
+        let _admission = self
+            .runtime()
+            .core()
+            .try_admit_space_operation()
+            .map_err(MomoApiError::internal)?;
         let timeout = self
             .config_for_space(scope_id)
             .mo_state
@@ -263,6 +269,12 @@ impl MomoApiService {
         let normalized_scope = uuid::Uuid::parse_str(scope_id)
             .map_err(MomoApiError::bad_request)?
             .to_string();
+        self.runtime()
+            .core()
+            .require_live_space(
+                uuid::Uuid::parse_str(&normalized_scope).map_err(MomoApiError::bad_request)?,
+            )
+            .map_err(MomoApiError::internal)?;
         let scope_id = normalized_scope.as_str();
         let config = self.config_for_space(scope_id);
         if threshold == 0 {

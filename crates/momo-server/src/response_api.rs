@@ -40,6 +40,7 @@ pub(super) struct CancelResponseRequest {
 
 pub(super) async fn create_response(
     State(state): State<AppState>,
+    axum::Extension(admission): axum::Extension<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     payload: Result<Json<MomoResponseRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = payload.map_err(|rejection| {
@@ -77,6 +78,7 @@ pub(super) async fn create_response(
             let stream = stream.clone();
             let request_id = request_id.clone();
             async move {
+                let _admission = admission;
                 match execute_response_bounded(
                     state,
                     request,

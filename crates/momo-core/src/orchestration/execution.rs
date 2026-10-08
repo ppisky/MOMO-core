@@ -26,6 +26,11 @@ impl MomoApiService {
         request_id: &str,
         stream: Option<&dyn MomoResponseEventSink>,
     ) -> Result<MomoResponse, MomoApiError> {
+        let _admission = self
+            .runtime()
+            .core()
+            .try_admit_space_operation()
+            .map_err(MomoApiError::internal)?;
         let mut normalized = request.clone();
         normalized
             .normalize_identifiers()

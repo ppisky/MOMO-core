@@ -14,6 +14,10 @@ mod portable;
 mod product_prompts;
 mod prompt_spaces;
 mod recovery;
+mod space_lifecycle;
+pub use space_lifecycle::{
+    SpaceAssets, SpaceDisposition, SpaceRemovalReceipt, SpaceRemovalRequest,
+};
 mod response;
 mod runtime;
 mod vision;
@@ -144,6 +148,9 @@ pub struct MomoCore {
     space_reservations: space_worker::reservations::SpaceReservations,
     recovery_failures: Arc<OwnedState<std::collections::BTreeMap<uuid::Uuid, String>>>,
     commit_tasks: Arc<OwnedState<Vec<tokio::task::JoinHandle<()>>>>,
+    lifecycle_gate: Arc<tokio::sync::RwLock<()>>,
+    retired_spaces: Arc<OwnedState<std::collections::BTreeSet<uuid::Uuid>>>,
+    pending_space_transition: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MomoCore {
@@ -167,8 +174,12 @@ impl MomoCore {
             space_reservations: space_worker::reservations::SpaceReservations::start(),
             recovery_failures: Arc::default(),
             commit_tasks: Arc::default(),
+            lifecycle_gate: Arc::default(),
+            retired_spaces: Arc::default(),
+            pending_space_transition: Arc::default(),
         };
         core.recover_maintenance_commits().await?;
+        core.recover_space_removals().await?;
         Ok(core)
     }
 
@@ -191,6 +202,7 @@ impl MomoCore {
         &self,
         space_id: uuid::Uuid,
     ) -> Result<Arc<SpaceHandle>, momo_memory::MemoryError> {
+        self.require_live_space(space_id)?;
         if let Some(message) = self.memory_recovery_status().get(&space_id) {
             return Err(momo_memory::MemoryError::InvalidPatch(format!(
                 "Space {space_id} requires recovery: {message}"

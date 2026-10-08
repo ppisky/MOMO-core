@@ -52,9 +52,14 @@ pub enum RuntimeApiErrorKind {
 pub struct RuntimeApiError {
     pub kind: RuntimeApiErrorKind,
     pub message: String,
+    pub code: Option<&'static str>,
 }
 
 impl RuntimeApiError {
+    pub fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
+    }
     fn recovery(error: crate::CoreError) -> Self {
         match error {
             crate::CoreError::Recovery { .. } => Self::conflict(error.to_string()),
@@ -64,6 +69,7 @@ impl RuntimeApiError {
     pub fn invalid(message: impl Into<String>) -> Self {
         Self {
             kind: RuntimeApiErrorKind::InvalidRequest,
+            code: None,
             message: message.into(),
         }
     }
@@ -71,6 +77,7 @@ impl RuntimeApiError {
     pub fn not_found(message: impl Into<String>) -> Self {
         Self {
             kind: RuntimeApiErrorKind::NotFound,
+            code: None,
             message: message.into(),
         }
     }
@@ -78,6 +85,7 @@ impl RuntimeApiError {
     pub fn conflict(message: impl Into<String>) -> Self {
         Self {
             kind: RuntimeApiErrorKind::Conflict,
+            code: None,
             message: message.into(),
         }
     }
@@ -85,6 +93,7 @@ impl RuntimeApiError {
     pub fn upstream(message: impl Into<String>) -> Self {
         Self {
             kind: RuntimeApiErrorKind::Upstream,
+            code: None,
             message: message.into(),
         }
     }
@@ -92,6 +101,7 @@ impl RuntimeApiError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             kind: RuntimeApiErrorKind::Internal,
+            code: None,
             message: message.into(),
         }
     }

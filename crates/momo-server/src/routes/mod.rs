@@ -10,3 +10,5 @@ mod nsg;
 pub(crate) use nsg::*;
 mod portable;
 pub(crate) use portable::*;
+mod spaces;
+pub(crate) use spaces::*;
