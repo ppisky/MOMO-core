@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -917,6 +917,7 @@ fn preflight_conversations(
     let messages: Vec<Message> =
         serde_json::from_slice(&fs::read(directory.join("messages.json"))?)?;
     let mut message_owners = Vec::with_capacity(messages.len());
+    let mut message_roles = HashMap::new();
     for message in messages {
         if !local_conversations.contains(&message.conversation_id) {
             return Err(PortableError::InvalidData(format!(
@@ -931,11 +932,38 @@ fn preflight_conversations(
             )));
         }
         message_owners.push((message.id, message.conversation_id));
+        message_roles.insert(message.id, message.role);
+    }
+    let mut context_ids = HashSet::new();
+    for context in portable_message_contexts(directory)? {
+        let role = message_roles.get(&context.message_id).ok_or_else(|| {
+            PortableError::InvalidData("message context has no local anchor".into())
+        })?;
+        if !context_ids.insert(context.message_id) {
+            return Err(PortableError::InvalidData(
+                "duplicate message context".into(),
+            ));
+        }
+        context
+            .payload
+            .validate(role.clone())
+            .map_err(|e| PortableError::InvalidData(e.into()))?;
     }
     Ok(PreflightConversations {
         conversation_ids: local_conversations,
         message_owners,
     })
+}
+
+fn portable_message_contexts(
+    directory: &Path,
+) -> Result<Vec<momo_domain::conversation::MessageContext>, PortableError> {
+    let path = directory.join("message-context.json");
+    match fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn preflight_workspace_tree(directory: &Path) -> Result<(), PortableError> {
@@ -1214,6 +1242,16 @@ async fn export_conversations(
         &directory.join("messages.json"),
         &serde_json::to_vec_pretty(&messages)?,
     )?;
+    let contexts = core
+        .store()
+        .message_contexts_for_scope(scope_id, &messages.iter().map(|m| m.id).collect::<Vec<_>>())
+        .await?;
+    if !contexts.is_empty() {
+        atomic_write(
+            &directory.join("message-context.json"),
+            &serde_json::to_vec_pretty(&contexts)?,
+        )?;
+    }
     Ok(())
 }
 
@@ -1438,6 +1476,10 @@ async fn import_conversations(
 
     let messages: Vec<Message> =
         serde_json::from_slice(&fs::read(directory.join("messages.json"))?)?;
+    let mut contexts: HashMap<_, _> = portable_message_contexts(directory)?
+        .into_iter()
+        .map(|context| (context.message_id, context.payload))
+        .collect();
     let mut known_message_ids = HashSet::new();
     for conversation_id in &available {
         known_message_ids.extend(
@@ -1457,11 +1499,9 @@ async fn import_conversations(
             report.skipped_conflicts += 1;
             continue;
         }
-        if known_message_ids.contains(&message.id) {
-            core.store().stage_message_update(&message).await?;
-        } else {
-            core.store().stage_message(&message).await?;
-        }
+        core.store()
+            .save_message_with_context(&message, contexts.remove(&message.id).as_ref())
+            .await?;
         known_message_ids.insert(message.id);
         report.messages_imported += 1;
     }

@@ -361,7 +361,11 @@ async fn staged_native_maintenance_commits_evidence_and_retrieves_only_for_captu
         user_content: "amberkey".into(),
         assistant_content: message.content.clone(),
     };
-    let response = json!({"momo":{"request_audit":{"memory_identity":identity}}}).to_string();
+    let capture = momo_domain::provenance::ResponseEvidenceCapture {
+        identity: identity.clone(),
+        kind: momo_domain::provenance::EvidenceKind::Conversation,
+        configuration: Default::default(),
+    };
     store
         .commit_response_completion(momo_storage::ResponseCompletion {
             lifecycle_activity_json: None,
@@ -372,7 +376,8 @@ async fn staged_native_maintenance_commits_evidence_and_retrieves_only_for_captu
             memory_enabled: true,
             nsg_enabled: false,
             mo_state_operation_id: None,
-            response_json: &response,
+            evidence: Some(&capture),
+            response_json: r#"{"status":"completed"}"#,
         })
         .await
         .unwrap();

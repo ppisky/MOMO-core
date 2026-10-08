@@ -21,6 +21,14 @@ pub(crate) struct PreparedFile {
 }
 
 impl PreparedMemoryCommit {
+    /// Used by automatic-maintenance policy; manual edits remain explicit operations.
+    pub fn changes_current_scene(&self) -> bool {
+        self.files.iter().any(|file| {
+            file.before != file.after
+                && file.path.starts_with("current/")
+                && (file.path.ends_with("/scene.md") || file.path.ends_with("/active_threads.md"))
+        })
+    }
     pub(crate) fn prepare(root: &Path, mutations: &[FileMutation]) -> Result<Self, MemoryError> {
         let mut files = Vec::with_capacity(mutations.len());
         let mut seen = HashSet::new();

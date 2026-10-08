@@ -1,5 +1,99 @@
 use super::*;
 
+#[tokio::test]
+async fn conversation_evidence_round_trips_and_rebinds_scope() {
+    use momo_domain::conversation::{MessageContextPayload, StoredImage, StoredToolExchange};
+    let directory = tempfile::tempdir().unwrap();
+    let source = MomoCore::initialize(directory.path()).await.unwrap();
+    let scope = new_id();
+    let (_, conversation_id) = seed_character_conversation(&source, scope).await;
+    let contexts = [
+        (
+            MessageRole::User,
+            MessageContextPayload::UserImages {
+                images: vec![StoredImage {
+                    image_url: "https://example.test/photo.png".into(),
+                    detail: Some("high".into()),
+                }],
+            },
+        ),
+        (
+            MessageRole::Assistant,
+            MessageContextPayload::ToolExchanges {
+                exchanges: vec![StoredToolExchange {
+                    call_id: "inspect-1".into(),
+                    name: "inspect".into(),
+                    arguments: "{}".into(),
+                    output: "red".into(),
+                }],
+            },
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (role, context) in &contexts {
+        let message = Message {
+            id: new_id(),
+            conversation_id,
+            role: role.clone(),
+            content: "anchor".into(),
+            created_at: Utc::now(),
+        };
+        source
+            .store()
+            .save_message_with_context(&message, Some(context))
+            .await
+            .unwrap();
+        ids.push(message.id);
+    }
+    let path = directory.path().join("evidence.moc");
+    export_moc(
+        &source,
+        &path,
+        &test_export_plan(
+            scope,
+            &[MocModule::Conversations],
+            None,
+            MocCompatibility::None,
+        ),
+    )
+    .await
+    .unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let target = MomoCore::initialize(target_dir.path()).await.unwrap();
+    let target_scope = new_id();
+    import_moc(
+        &target,
+        &path,
+        &test_import_plan(scope, target_scope, ConflictMode::Replace),
+    )
+    .await
+    .unwrap();
+    let restored = target
+        .store()
+        .message_contexts_for_scope(target_scope, &ids)
+        .await
+        .unwrap();
+    assert_eq!(restored.len(), 2);
+    for (id, (_, payload)) in ids.iter().zip(&contexts) {
+        assert_eq!(
+            &restored
+                .iter()
+                .find(|context| context.message_id == *id)
+                .unwrap()
+                .payload,
+            payload
+        );
+    }
+    assert!(
+        target
+            .store()
+            .message_contexts_for_scope(scope, &ids)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn encrypted_moc_envelope_is_bounded_before_allocation() {
     validate_private_moc_envelope_size(PRIVATE_MOC_MAX_ENVELOPE_BYTES).expect("boundary envelope");

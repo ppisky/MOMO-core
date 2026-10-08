@@ -1,5 +1,6 @@
 //! End-to-end response assembly and its local stages.
 
+use momo_domain::provenance::{EvidenceKind, ResponseEvidenceCapture};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -9,24 +10,26 @@ use super::{
     generation::{GatewayResponseAttempt, response_usage, tool_choice_to_chat, tools_to_chat},
     state,
 };
+use crate::ChatInput;
 use crate::{
-    ChatInput, ContextBudget, ContextRequest, ContextSections, MoStateProfile, MomoResponse,
+    ContextBudget, ContextRequest, ContextSections, MoStateProfile, MomoResponse,
     MomoResponseMetadata, MomoResponseRequest, PromptSpaceId, ResponseOutputContent,
-    ResponseOutputItem, api::runtime_api, prepare_context,
+    ResponseOutputItem, api::runtime_api,
 };
 
 impl MomoApiService {
     pub(super) async fn respond(
         &self,
         request: &MomoResponseRequest,
+        conversation: ResponseConversation,
         attempt: GovernedResponseAttempt<'_>,
-    ) -> Result<(MomoResponse, Option<String>), MomoApiError> {
-        let config = self.config_snapshot();
+    ) -> Result<(MomoResponse, Option<String>, ResponseEvidenceCapture), MomoApiError> {
         let GovernedResponseAttempt {
+            config,
+            supports_images,
             request_id,
             operation_key,
             request_fingerprint,
-            persisted,
             resolved_input,
             mut governed,
             mut warnings,
@@ -40,15 +43,6 @@ impl MomoApiService {
             .personal_space_id
             .clone()
             .expect("validated personal Space");
-        let conversation = self
-            .prepare_response_conversation(
-                request,
-                operation_key,
-                request_fingerprint,
-                persisted,
-                resolved_input,
-            )
-            .await?;
         let conversation_space_id = conversation.conversation_space_id;
         let conversation_id = conversation.conversation_id;
         let character_id = conversation.character_id;
@@ -66,11 +60,12 @@ impl MomoApiService {
             .await
             .map_err(MomoApiError::internal)?;
         governed.audit["memory_identity"] = json!(&identity);
-        governed.audit["evidence_kind"] = json!(if request.input.has_function_outputs() {
-            "tool"
+        let evidence_kind = if request.input.has_function_outputs() {
+            EvidenceKind::Tool
         } else {
-            "conversation"
-        });
+            EvidenceKind::Conversation
+        };
+        governed.audit["evidence_kind"] = json!(evidence_kind);
 
         let context_window = governed.context_window;
         let reserve_output_tokens = governed.max_output_tokens;
@@ -160,12 +155,13 @@ impl MomoApiService {
         let state = self
             .compile_response_state(state::StateRequest {
                 request,
-                config: &config,
+                config,
                 operation_key,
                 request_fingerprint,
                 managed_space_id: &managed_space_id,
                 conversation_id: &conversation_id,
                 character_id: &character_id,
+                character_definition: &character,
                 source_observations: &source_observations,
                 memory: &memory,
                 nsg: &nsg,
@@ -192,16 +188,18 @@ impl MomoApiService {
             .runtime()
             .core()
             .store()
-            .list_messages_for_scope(conversation_scope_uuid, conversation_uuid)
+            .list_message_window_for_scope(
+                conversation_scope_uuid,
+                conversation_uuid,
+                config.history_window.enabled.then_some((
+                    config.history_window.trigger_turns,
+                    config.history_window.evict_turns,
+                )),
+            )
             .await
             .map_err(MomoApiError::internal)?;
-        let mut messages = history
-            .into_iter()
-            .map(|message| ChatInput {
-                role: message.role,
-                content: message.content,
-            })
-            .collect::<Vec<_>>();
+        let history_evicted_messages = history.evicted_messages;
+        let mut messages = history.messages;
         if request.input.is_structured()
             && (direct_multimodal || !request.input.has_images())
             && messages.last().is_some_and(|message| {
@@ -210,7 +208,82 @@ impl MomoApiService {
         {
             messages.pop();
         }
-        let history_evicted_messages = evict_history_window(&mut messages, &config.history_window);
+        let contexts = self
+            .runtime()
+            .core()
+            .store()
+            .message_contexts_for_scope(
+                conversation_scope_uuid,
+                &messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(MomoApiError::internal)?;
+        let history_context = super::history::HistoryContext::new(
+            messages,
+            contexts,
+            config.vision.enabled && supports_images,
+            crate::MAX_RESPONSE_IMAGES.saturating_sub(request.input.image_inputs().len()),
+        );
+        let mut messages = history_context.messages.clone();
+        let history_message_count = messages.len();
+        let structured_input =
+            request.input.is_structured() && (direct_multimodal || !request.input.has_images());
+        let current_messages = if structured_input {
+            request
+                .input
+                .gateway_messages()
+                .map_err(MomoApiError::bad_request)?
+        } else {
+            Vec::new()
+        };
+        let current_message_count = current_messages.len();
+        // Tool exchanges and image groups stay whole. Ordinary structured text
+        // uses the same suffix selection and truncation as a plain user turn.
+        let atomic_input = structured_input
+            && (request.input.has_images() || request.input.has_function_outputs());
+        let current_input_tokens = if atomic_input {
+            current_messages
+                .iter()
+                .map(crate::context::estimate_gateway_message_tokens)
+                .sum()
+        } else {
+            messages.extend(current_messages.iter().map(|message| ChatInput {
+                role: match message.role {
+                    crate::GatewayMessageRole::System => momo_domain::MessageRole::System,
+                    crate::GatewayMessageRole::User => momo_domain::MessageRole::User,
+                    crate::GatewayMessageRole::Assistant => momo_domain::MessageRole::Assistant,
+                    crate::GatewayMessageRole::Tool => unreachable!("tool input is atomic"),
+                },
+                content: gateway_message_text(message),
+            }));
+            0
+        };
+        let tools = (governed.allow_tools && !request.tools.is_empty())
+            .then(|| tools_to_chat(&request.tools))
+            .transpose()?;
+        let tool_choice = if governed.allow_tools {
+            request
+                .tool_choice
+                .as_ref()
+                .map(tool_choice_to_chat)
+                .transpose()?
+        } else {
+            None
+        };
+        let tool_configuration_tokens: usize = tools
+            .iter()
+            .chain(tool_choice.iter())
+            .map(|value| crate::estimate_text_tokens(&value.to_string()))
+            .sum();
+        let reserved_input_tokens = current_input_tokens + tool_configuration_tokens;
+        let text_input_limit = context_window
+            .saturating_sub(reserve_output_tokens)
+            .saturating_sub(crate::context::CONTEXT_SAFETY_MARGIN);
+        if reserved_input_tokens >= text_input_limit {
+            return Err(MomoApiError::bad_request(
+                "structured input and tool configuration exceed the model's input token budget",
+            ));
+        }
         governed.audit["history_window"] = json!({"settings": config.history_window, "evicted_messages": history_evicted_messages});
         let assistant_prompt = self.runtime.prompt_spaces().get(PromptSpaceId::Assistant);
         let roleplay_director = self
@@ -245,12 +318,36 @@ impl MomoApiService {
             )
             .await
             .map_err(MomoApiError::internal)?;
-        governed.audit["evidence_configuration"] = json!({
-            "character_sha256": character_revision,
-            "assistant_revision": if assistant_enabled { assistant_prompt.revision.clone() } else { String::new() },
-            "roleplay_director_revision": if roleplay_director_enabled { roleplay_director.revision.clone() } else { String::new() },
-            "instructions_sha256": hex::encode(Sha256::digest(governed.instructions.as_deref().unwrap_or_default().as_bytes())),
-        });
+        let evidence_configuration = std::collections::BTreeMap::from([
+            ("character_sha256".to_owned(), character_revision),
+            (
+                "assistant_revision".to_owned(),
+                if assistant_enabled {
+                    assistant_prompt.revision.clone()
+                } else {
+                    String::new()
+                },
+            ),
+            (
+                "roleplay_director_revision".to_owned(),
+                if roleplay_director_enabled {
+                    roleplay_director.revision.clone()
+                } else {
+                    String::new()
+                },
+            ),
+            (
+                "instructions_sha256".to_owned(),
+                hex::encode(Sha256::digest(
+                    governed
+                        .instructions
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                )),
+            ),
+        ]);
+        governed.audit["evidence_configuration"] = json!(&evidence_configuration);
         let memory_markdown = if include_memory {
             joined_bodies(&prompt_memory)
         } else {
@@ -261,7 +358,7 @@ impl MomoApiService {
         } else {
             String::new()
         };
-        let prepared = prepare_context(ContextRequest {
+        let prepared = history_context.prepare_context(ContextRequest {
             sections: ContextSections {
                 runtime_instructions: governed.instructions.as_deref().unwrap_or({
                     if assistant_enabled {
@@ -283,22 +380,59 @@ impl MomoApiService {
             },
             messages: &messages,
             budget: ContextBudget {
-                context_window,
+                context_window: context_window.saturating_sub(reserved_input_tokens),
                 reserve_output_tokens,
             },
         });
-        let mut gateway_messages = prepared
+        let mut history_prepared = prepared.clone();
+        let retained_current = if atomic_input {
+            0
+        } else {
+            current_messages.len().saturating_sub(
+                prepared
+                    .omitted_messages
+                    .saturating_sub(history_message_count),
+            )
+        };
+        let current_prepared = history_prepared
             .messages
+            .split_off(history_prepared.messages.len() - retained_current);
+        history_prepared.omitted_messages = prepared.omitted_messages.min(history_message_count);
+        let (mut gateway_messages, history_replay) = history_context.expand(&history_prepared);
+        if atomic_input {
+            gateway_messages.extend(current_messages);
+        } else {
+            for (mut original, admitted) in current_messages
+                .into_iter()
+                .skip(current_message_count - retained_current)
+                .zip(current_prepared)
+            {
+                let original_text = gateway_message_text(&original);
+                if admitted.content != original_text {
+                    original.content = Some(admitted.content.into());
+                }
+                gateway_messages.push(original);
+            }
+        }
+        let estimated_input_tokens: usize = gateway_messages
             .iter()
-            .map(crate::GatewayMessage::from)
-            .collect::<Vec<_>>();
+            .map(crate::context::estimate_gateway_message_tokens)
+            .sum::<usize>()
+            + tool_configuration_tokens;
+        if estimated_input_tokens > text_input_limit {
+            return Err(MomoApiError::bad_request(
+                "expanded context exceeds the model's input token budget",
+            ));
+        }
+        governed.audit["history_context"] = history_replay;
         governed.audit["text_context"] = json!({
-            "estimated_input_tokens": prepared.estimated_input_tokens,
+            "estimated_input_tokens": estimated_input_tokens,
             "omitted_messages": prepared.omitted_messages,
             "truncated_messages": prepared.truncated_messages,
             "sections": prepared.section_audit,
-            "excludes_appended_structured_input": request.input.is_structured()
-                && (direct_multimodal || !request.input.has_images()),
+            "excludes_appended_structured_input": false,
+            "excludes_image_tokens": request.input.has_images() || governed.audit["history_context"]["image_count"].as_u64().unwrap_or_default() > 0,
+            "tool_configuration_tokens": tool_configuration_tokens,
         });
         if prepared
             .section_audit
@@ -307,14 +441,6 @@ impl MomoApiService {
         {
             warnings.push("system context sections were truncated; inspect request_audit.text_context.sections".to_owned());
         }
-        if request.input.is_structured() && (direct_multimodal || !request.input.has_images()) {
-            gateway_messages.extend(
-                request
-                    .input
-                    .gateway_messages()
-                    .map_err(|error| MomoApiError::bad_request(error.to_string()))?,
-            );
-        }
         let mut request_parameters = serde_json::Map::from_iter([
             ("max_tokens".to_owned(), json!(reserve_output_tokens)),
             ("momo_hop".to_owned(), json!(1)),
@@ -322,13 +448,11 @@ impl MomoApiService {
         ]);
         let parameter_object = &mut request_parameters;
         parameter_object.extend(governed.parameters.clone());
-        if governed.allow_tools && !request.tools.is_empty() {
-            parameter_object.insert("tools".to_owned(), tools_to_chat(&request.tools)?);
+        if let Some(tools) = tools {
+            parameter_object.insert("tools".to_owned(), tools);
         }
-        if governed.allow_tools
-            && let Some(choice) = &request.tool_choice
-        {
-            parameter_object.insert("tool_choice".to_owned(), tool_choice_to_chat(choice)?);
+        if let Some(choice) = tool_choice {
+            parameter_object.insert("tool_choice".to_owned(), choice);
         }
         let completion = self
             .generate_response_completion(GatewayResponseAttempt {
@@ -369,6 +493,27 @@ impl MomoApiService {
                 status: "completed".to_owned(),
             });
         }
+        let mut usage = response_usage(&completion);
+        if let Some(calls) = state_result
+            .pointer("/audit/ddm_profile/calls")
+            .and_then(Value::as_array)
+        {
+            for call in calls {
+                if let Some(value) = call.get("usage").filter(|value| !value.is_null()) {
+                    let profile_usage: crate::ChatUsage =
+                        serde_json::from_value(value.clone()).map_err(MomoApiError::internal)?;
+                    usage.input_tokens = usage
+                        .input_tokens
+                        .saturating_add(profile_usage.input_tokens);
+                    usage.output_tokens = usage
+                        .output_tokens
+                        .saturating_add(profile_usage.output_tokens);
+                    usage.total_tokens = usage
+                        .total_tokens
+                        .saturating_add(profile_usage.total_tokens);
+                }
+            }
+        }
         Ok((
             MomoResponse {
                 id: format!("resp_{request_id}"),
@@ -377,7 +522,7 @@ impl MomoApiService {
                 model: request.model.clone(),
                 output,
                 output_text: content,
-                usage: response_usage(&completion),
+                usage,
                 finish_reason: completion.finish_reason.clone(),
                 momo: MomoResponseMetadata {
                     schema: crate::MOMO_RESPONSE_SCHEMA.to_owned(),
@@ -394,6 +539,11 @@ impl MomoApiService {
                 },
             },
             mo_state_operation_id,
+            ResponseEvidenceCapture {
+                identity,
+                kind: evidence_kind,
+                configuration: evidence_configuration,
+            },
         ))
     }
 }
@@ -438,6 +588,7 @@ pub(super) fn joined_bodies(values: &[Value]) -> String {
         .join("\n\n")
 }
 
+#[cfg(test)]
 fn evict_history_window(
     messages: &mut Vec<ChatInput>,
     settings: &crate::HistoryWindowSettings,
@@ -447,15 +598,24 @@ fn evict_history_window(
     }
     let mut boundaries = Vec::new();
     let mut has_user = false;
+    let mut has_assistant = false;
     for (index, message) in messages.iter().enumerate() {
         match message.role {
-            momo_domain::MessageRole::User => has_user = true,
+            momo_domain::MessageRole::User => {
+                if has_user && has_assistant {
+                    boundaries.push(index);
+                }
+                has_user = true;
+                has_assistant = false;
+            }
             momo_domain::MessageRole::Assistant if has_user => {
-                boundaries.push(index + 1);
-                has_user = false;
+                has_assistant = true;
             }
             _ => {}
         }
+    }
+    if has_user && has_assistant {
+        boundaries.push(messages.len());
     }
     if boundaries.len() < settings.trigger_turns || settings.evict_turns == 0 {
         return 0;
@@ -606,6 +766,24 @@ pub(super) fn retrieval_audit(items: &[Value], enabled: bool, status: &str) -> V
     json!({"enabled": enabled, "status": status, "count": entries.len(), "entries": entries})
 }
 
+fn gateway_message_text(message: &crate::GatewayMessage) -> String {
+    match &message.content {
+        Some(crate::GatewayMessageContent::Text(text)) => text.clone(),
+        Some(crate::GatewayMessageContent::Parts(parts)) => parts
+            .iter()
+            .filter_map(|part| {
+                if let crate::GatewayContentPart::Text { text } = part {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => String::new(),
+    }
+}
+
 pub(super) fn state_input_audit(
     memory: &[Value],
     nsg: &[Value],
@@ -628,21 +806,22 @@ pub(super) fn state_input_audit(
     }))
 }
 
-struct ResponseConversation {
-    conversation_space_id: String,
-    conversation_id: String,
-    character_id: String,
-    character: momo_domain::CharacterCard,
+pub(super) struct ResponseConversation {
+    pub(super) conversation_space_id: String,
+    pub(super) conversation_id: String,
+    pub(super) character_id: String,
+    pub(super) character: momo_domain::CharacterCard,
 }
 
 impl MomoApiService {
-    async fn prepare_response_conversation(
+    pub(super) async fn prepare_response_conversation(
         &self,
         request: &MomoResponseRequest,
         operation_key: &str,
         request_fingerprint: &str,
         persisted: Option<&momo_storage::ResponseOperation>,
         resolved_input: &ResolvedResponseInput,
+        conversation_guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
     ) -> Result<ResponseConversation, MomoApiError> {
         let conversation_space_id = request
             .momo
@@ -692,6 +871,12 @@ impl MomoApiService {
             .map(str::to_owned)
             .or(attempted_conversation);
         let (conversation_id, character_id) = if let Some(id) = existing_conversation_id {
+            if conversation_guard.is_none() {
+                *conversation_guard = Some(
+                    self.lock_active_conversation(&conversation_space_id, &id, operation_key)
+                        .await?,
+                );
+            }
             let conversation_uuid =
                 uuid::Uuid::parse_str(&id).map_err(MomoApiError::bad_request)?;
             let conversation = self
@@ -750,6 +935,16 @@ impl MomoApiService {
                 created_at: now,
                 updated_at: now,
             };
+            // Lock the resolved identity before publishing it. The caller
+            // retains this guard through the assistant's final commit.
+            *conversation_guard = Some(
+                self.lock_active_conversation(
+                    &conversation_space_id,
+                    &conversation.id.to_string(),
+                    operation_key,
+                )
+                .await?,
+            );
             self.runtime()
                 .core()
                 .store()
@@ -817,7 +1012,26 @@ impl MomoApiService {
                 self.runtime()
                     .core()
                     .store()
-                    .append_response_user_message(operation_key, conversation_scope_uuid, &message)
+                    .append_response_user_message_with_context(
+                        operation_key,
+                        conversation_scope_uuid,
+                        &message,
+                        (resolved_input.image_handling == ImageInputHandling::DirectMultimodal)
+                            .then(
+                                || momo_domain::conversation::MessageContextPayload::UserImages {
+                                    images: request
+                                        .input
+                                        .image_inputs()
+                                        .into_iter()
+                                        .map(|image| momo_domain::conversation::StoredImage {
+                                            image_url: image.image_url,
+                                            detail: image.detail,
+                                        })
+                                        .collect(),
+                                },
+                            )
+                            .as_ref(),
+                    )
                     .await
                     .map_err(MomoApiError::internal)?;
             } else {

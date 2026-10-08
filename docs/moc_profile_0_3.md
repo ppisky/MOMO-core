@@ -23,6 +23,14 @@ This profile records the Core 1.0 implementation of
 - passphrase protection wraps a complete v3 inner MOC in the authenticated
   encrypted-container envelope.
 
+Conversation payloads may include `message-context.json` beside the message
+records. It contains typed image references/data URLs and complete tool exchanges
+bound to message IDs in that same Space payload. Preflight rejects missing or
+duplicate anchors and role-incompatible evidence. It follows the conversation's
+Space mapping, grants no memory access, and is optional for older packs. Replace
+imports without this file clear old context for replaced messages; KeepExisting
+preserves the existing message and its context together.
+
 Example export plan:
 
 ```json

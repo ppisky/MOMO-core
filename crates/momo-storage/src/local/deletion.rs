@@ -64,10 +64,22 @@ impl LocalStore {
                     .iter()
                     .map(message_from_row)
                     .collect::<Result<Vec<_>, _>>()?;
+                let context_rows = sqlx::query("SELECT x.message_id,x.payload_json FROM message_context x JOIN messages m ON m.id=x.message_id WHERE m.conversation_id=?")
+                    .bind(id.to_string()).fetch_all(&mut *transaction).await?;
+                let contexts = context_rows
+                    .iter()
+                    .map(|row| -> Result<_, StorageError> {
+                        Ok(momo_domain::conversation::MessageContext {
+                            message_id: Uuid::parse_str(row.try_get("message_id")?)?,
+                            payload: serde_json::from_str(row.try_get("payload_json")?)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let payload = conversation
                     .map(|conversation| DeletedConversationSnapshot {
                         conversation,
                         messages,
+                        contexts,
                     })
                     .map(|snapshot| serde_json::to_string(&snapshot))
                     .transpose()?;
@@ -83,12 +95,23 @@ impl LocalStore {
                     .fetch_optional(&mut *transaction)
                     .await?;
                 let message = row.as_ref().map(message_from_row).transpose()?;
+                let context: Option<String> = sqlx::query_scalar(
+                    "SELECT payload_json FROM message_context WHERE message_id=?",
+                )
+                .bind(id.to_string())
+                .fetch_optional(&mut *transaction)
+                .await?;
+                let context = context
+                    .map(|json| serde_json::from_str(&json))
+                    .transpose()?;
                 sqlx::query("DELETE FROM messages WHERE id=?")
                     .bind(id.to_string())
                     .execute(&mut *transaction)
                     .await?;
                 message
-                    .map(|message| serde_json::to_string(&message))
+                    .map(|message| {
+                        serde_json::to_string(&DeletedMessageSnapshot { message, context })
+                    })
                     .transpose()?
             }
             _ => unreachable!("stage_delete is private and uses known object types"),

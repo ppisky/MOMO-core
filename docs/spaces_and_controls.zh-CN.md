@@ -28,13 +28,13 @@ Space 的记忆；角色卡本身不会因此复制到这些 Space。
 不能把 A 的经历或承诺自动转移给 B。优先共享读取权威记录，避免按功能默认复制多份。
 工作树已通过 [Profile 1](memory_provenance_runtime.md) 接入记录策略与资格检查；宿主仍负责 Space 授权。
 
-两者解决不同的问题。个人 Space 让同一用户跨频道保持自己的长期记忆；会话 Space
-保证群 A 的消息不会被群 B 当成历史。对于 Discord 群聊，mobot 默认提交两个记忆源：
+两者解决不同的问题。个人 Space 让同一用户跨会话保持自己的长期记忆；会话 Space
+保证群 A 的消息不会被群 B 当成历史。群聊请求可以明确选择个人和共享记忆源：
 
 ```json
 [
-  {"space_id":"<person>","label":"personal","weight":70},
-  {"space_id":"<channel>","label":"conversation","weight":30}
+  {"space_id":"<person>","label":"personal","weight":70,"memory":true,"semantic_graph":true},
+  {"space_id":"<conversation-space>","label":"conversation","weight":30,"memory":true,"semantic_graph":true}
 ]
 ```
 
@@ -83,41 +83,28 @@ Space 的记忆；角色卡本身不会因此复制到这些 Space。
 同一标识若换成不同动作内容则返回 HTTP 409。直接 CRUD 删除路由属于可信本机管理 profile，
 不能替代面向最终用户的控制协议；完整分层见 [HTTP 边界](http_api_1_0.md)。
 
-mobot 把这些控制映射为不同命令：
+宿主将用户动作映射为下面的职责。Core 不规定客户端命令或界面标签。
 
-| 意图 | CLI / 交互 | Discord |
-| --- | --- | --- |
-| 新建会话映射 | `new` / `/new` | `!momo new` |
-| 删除当前会话数据 | `control delete-conversation` / `/delete` | `!momo delete` |
-| 清个人记忆 | `control clear-memory --target personal ...` / `/clear-personal` | `!momo clear personal` |
-| 清群聊记忆 | `control clear-memory --target conversation ...` / `/clear-conversation` | `!momo clear conversation` |
-| 切换角色 | `control switch-character <UUID>` / `/character <UUID>` | `!momo character <UUID>` |
+| 意图 | MOMO 接入方式 |
+| --- | --- |
+| 开始新会话 | 宿主选择或创建会话，并更新自己的 session 映射 |
+| 删除会话数据 | `delete_conversation`，携带明确的会话 Space 和会话 ID |
+| 清个人或共享记忆 | `clear_memory`，携带目标 Space UUID 和模块选择 |
+| 切换角色 | `switch_character`，携带明确的会话和角色 ID |
 
-“清记忆”还可选择 `memory`、`semantic-graph` 或 `all`。自然语言消息即使写着“忘掉
+“清记忆”通过 `memory` 和 `semantic_graph` 布尔字段选择模块。自然语言消息即使写着“忘掉
 所有东西”，也不会获得删除能力；必须走上述结构化控制面。
 
 ## 权重和写入目标
 
-这些选择属于宿主的会话策略；宿主把它们转换成每次
-`momo.responses/1.0` 请求里的 `memory_sources` 与
-`memory_write_space_id`。例如宿主可维护如下自己的配置：
+宿主选择每次 `momo.responses/1.0` 请求里的 `memory_sources` 与
+`memory_write_space_id`。每个来源带有明确的 Space UUID、权重和模块开关。
+`70/30` 不是相似度阈值或权限比例，而是两个来源竞争有限上下文预算时的相对份额；
+每个权重可取 1..100。省略某个会话来源会停止本次请求读取它，但不会删除数据。
+写入目标是明确的 Space UUID，不是客户端配置中的枚举；Core 会根据请求来源校验它。
 
-```toml
-personal_memory_weight = 70
-conversation_memory_weight = 30
-conversation_memory_enabled = true
-memory_write_target = "personal"
-```
-
-`70/30` 不是相似度阈值，也不是权限比例，而是两个来源竞争有限上下文预算时的相对份额。
-宿主可以改成其他 1..100 数值。`conversation_memory_enabled = false` 会停止把会话 Space
-作为群聊记忆来源，但不会删除数据。`memory_write_target` 只能选 `personal` 或
-`conversation`；选后者时若当前运行环境没有会话记忆来源，配置/请求会被拒绝，而不是退回
-个人 Space。
-
-这些字段属于宿主的用户配置，不属于 MOMO Core 读取的文件。宿主把它们转换为原生响应
-字段与 `/v1/runtime-settings` 资源；详见
-[`runtime_config_0_1.md`](runtime_config_0_1.md)。
+Core 不规定宿主怎样保存或展示这些选择。维护策略使用独立的类型化运行时设置资源，
+详见[`runtime_config_0_1.md`](runtime_config_0_1.md)。
 
 ## MOC 导入导出
 
@@ -135,7 +122,7 @@ Space、DMW Space 与 NSG Space。导入默认保留来源 UUID；只有显式 `
 通用助手、视觉回退、DMW、NSG 与前台角色扮演提示词都具有
 `crates/momo-core/src/product_prompts/` 下的 Markdown 默认值，并通过
 `include_str!` 编译进 `momo_core`。MOMO 不读取 `momo.toml`；这些提示词也不属于
-MOC 或任何 Space。进程级覆盖值只能通过 Prompt Spaces HTTP API 管理。
+MOC 或任何 Space。实例级覆盖值通过类型化 `PromptSpaces` Rust API 或 HTTP API 管理，并保存在运行时数据目录中。
 详见[Prompt Spaces 说明](maintenance_prompts.zh-CN.md)。
 
 ## 2026-09-30 provenance profile update

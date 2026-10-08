@@ -128,7 +128,16 @@ fn api_routes() -> Router<AppState> {
         )
         .route(
             "/runtime-settings",
-            get(get_runtime_settings).put(replace_runtime_settings),
+            get(get_runtime_settings)
+                .put(replace_runtime_settings)
+                .patch(patch_runtime_settings),
+        )
+        .route(
+            "/runtime-settings/:id",
+            get(get_space_runtime_settings)
+                .put(replace_space_runtime_settings)
+                .patch(patch_space_runtime_settings)
+                .delete(reset_space_runtime_settings),
         )
         .route("/momo/control", post(execute_control))
         .route("/metrics", get(metrics))
@@ -136,6 +145,21 @@ fn api_routes() -> Router<AppState> {
         .route("/capabilities/resolve", post(resolve_capability))
         .route("/context/prepare", post(prepare_context))
         .route("/mo-state/compile", post(compile_mo_state))
+        .route("/runtime-settings/metadata", get(get_settings_metadata))
+        .route(
+            "/runtime-settings/description",
+            get(get_settings_description),
+        )
+        .route(
+            "/mo-state/contract",
+            get(get_state_contract)
+                .put(replace_state_contract)
+                .delete(reset_state_contract),
+        )
+        .route(
+            "/mo-state/ddm-profile",
+            get(get_managed_ddm_profile).delete(reset_managed_ddm_profile),
+        )
         .route("/mo-state/runtime", get(get_mo_state_runtime))
         .route("/memory/retrieve-scoped", post(retrieve_scoped_memory))
         .route("/memory/maintenance", post(run_memory_maintenance))

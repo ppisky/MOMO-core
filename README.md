@@ -52,6 +52,11 @@ host configuration file. See [`contracts/1.0/response_request.json`](contracts/1
 for a stable request example, and [`docs/http_api_1_0.md`](docs/http_api_1_0.md)
 for the deployment trust boundary.
 
+Runtime settings persist in the runtime data directory and support sparse
+per-Space overrides, partial updates and revision checks. Prompt Space overrides
+also persist. Hosts reconcile their desired configuration explicitly. See the
+[configuration and control inventory](docs/configuration_controls.zh-CN.md).
+
 `momo-server` provides the API and does not include a graphical interface.
 
 The crates under `crates/` are implementation modules of MOMO Core. They are
@@ -64,6 +69,8 @@ without an independent crates.io SemVer promise. See the
 [HTTP boundary](docs/http_api_1_0.md) and [specification index](docs/spec_index.md).
 `momo-server` exposes the same Core capabilities over a loopback HTTP/SSE
 interface for local applications.
+No general FFI or C ABI is shipped; foreign-language bindings can be considered
+when a concrete host needs in-process integration.
 
 ## Character-card format boundary
 
@@ -99,7 +106,7 @@ See [the 1.0 architecture](docs/architecture_1_0.md) for dependencies, runtime
 ownership, lock ordering and cross-store recovery boundaries.
 
 - `momo-core`: orchestration and client-facing Rust APIs
-- `momo-domain`: shared domain types
+- `momo-domain`: domain records and validity rules
 - `momo-storage`: SQLite application persistence and Turso vector storage
 - `momo-memory`: DMW, NSG, retrieval, scene parsing, and MO State projection
 - `momo-moc`: MOC containers
@@ -121,8 +128,13 @@ in one SQLite file:
   source container so binary assets and application extensions can round-trip
   through MOC.
 
-DMW and NSG YAML/Markdown documents under `spaces/<space_id>/memory` remain the
-portable sources of truth. Turso vectors are validated by source hash and
+DMW and NSG YAML/Markdown documents under `spaces/<space_id>/memory` are portable
+materializations of the per-Space authoritative `memory-journal.sqlite3`.
+Use Core edit/import APIs for durable changes. Before recovery or a write replaces
+divergent materialized files, Core preserves them as a complete JSON snapshot in
+`spaces/<space_id>/memory-recovery-backups`; backup failure stops the overwrite.
+These backups are local recovery data and are excluded from MOC.
+Turso vectors are validated by source hash and
 vector-space identity, can be rebuilt from those documents, and are not stored
 in MOC files. `NsgVectorStore` is only the internal boundary that keeps Turso
 details out of the rest of Core; it is not a third database. When upgrading to
@@ -152,7 +164,11 @@ The local 1.0 candidate includes the Core image-input path: up to eight user
 images go directly to an image-capable conversation model, or through the
 optional logical `vision` description route when the conversation model is
 text-only. Resolved input and usage are persisted for deterministic request-ID
-replay. The `momo.responses/1.0` cross-repository fixtures are frozen.
+replay. MOMO's `momo.responses/1.0` fixtures are frozen.
+Direct image references/data URLs and completed tool exchanges now persist with
+their scoped message anchors and survive restart, deletion restore, and MOC.
+Historical images require an image-capable route and available image quota;
+tool evidence is admitted as complete pairs through the history text budget.
 `v1.0.0-rc.3` adds the complete opt-in implementation of the experimental DDM
 projection, including character-owned MOC profiles, typed signals, deterministic
 selection, persisted hysteresis, and atomic audit state; broader credentialed
@@ -171,7 +187,7 @@ DDM's implementation boundary and remaining experimental limitations are in
 the [DDM status report](docs/ddm_implementation_status.md).
 
 Prompt Spaces are named runtime resources with reviewed defaults compiled into
-`momo_core`. Their active values can be replaced through the native HTTP API;
+`momo_core`. Their active values can be replaced through typed Rust or native HTTP APIs;
 MOMO itself does not read `momo.toml` or carry them in MOC content. Read the
 [English Prompt Spaces guide](docs/maintenance_prompts.en.md) or the
 [简体中文指南](docs/maintenance_prompts.zh-CN.md).
@@ -203,15 +219,16 @@ Generate a model plan without contacting a provider:
 
 ```bash
 bash scripts/run-morp-model.sh \
-  --config benchmarks/morp/configs/qwen3.8-flash.momo.json
+  --config benchmarks/morp/configs/momo-live.example.json
 ```
 
 The runner supports lightweight selection by persona, dimension, scenario
-family, or exact case ID. The rc.3 deployment profile uses one Qwen model for
+family, or exact case ID. A benchmark deployment can share one model for
 conversation, DMW distillation, and NSG governance across the three core arms,
 plus one embedding model. Reports expose a 0–100 role-play score after one
-identity-bound reviewer supplies grounded quotes and reasons; Codex may perform
-that review without posing as a human. Pending reviews remain null. Record a credentialed run in the
+identity-bound reviewer supplies grounded quotes and reasons. An automated
+reviewer must identify itself and must not pose as a human. Pending reviews
+remain null. Record a credentialed run in the
 [real-results template](benchmarks/morp/RESULTS_TEMPLATE.md).
 The current non-normative engineering assessment is available in the
 [role-playing implementation review](docs/roleplay_implementation_review.en.md).

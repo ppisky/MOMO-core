@@ -27,6 +27,88 @@ const CONTRACT_MAX_SIZE: u64 = 65_536;
 const STATE_CONTEXT_TOKEN_RATIO: usize = 10;
 const DEFAULT_CONTRACT: &str = include_str!("../resources/default_state_contract.yaml");
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StateContractResource {
+    pub content: String,
+    pub source: String,
+    pub revision: String,
+}
+
+impl MemoryWorkspace {
+    pub fn state_contract_resource(&self) -> Result<StateContractResource, MemoryError> {
+        use sha2::{Digest, Sha256};
+        let path = self.resolve(std::path::Path::new("config/state_contract.yaml"))?;
+        if let Ok(metadata) = fs::metadata(&path)
+            && metadata.len() > CONTRACT_MAX_SIZE
+        {
+            return Err(MemoryError::InvalidAccess(
+                "state contract exceeds 64 KiB".into(),
+            ));
+        }
+        let (content, source) = match fs::read_to_string(path) {
+            Ok(content) => (content, "override"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                (DEFAULT_CONTRACT.to_owned(), "builtin")
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let revision = hex::encode(Sha256::digest(format!("{source}\0{content}").as_bytes()));
+        Ok(StateContractResource {
+            content,
+            source: source.into(),
+            revision,
+        })
+    }
+
+    pub fn replace_state_contract(
+        &self,
+        content: Option<&str>,
+        expected: Option<&str>,
+    ) -> Result<StateContractResource, MemoryError> {
+        let current = self.state_contract_resource()?;
+        if let Some(expected) = expected
+            && expected != current.revision
+        {
+            return Err(MemoryError::RevisionConflict {
+                expected: expected.into(),
+                actual: current.revision,
+            });
+        }
+        let path = self.resolve(std::path::Path::new("config/state_contract.yaml"))?;
+        if let Some(content) = content {
+            if content.trim().is_empty()
+                || content.len() > CONTRACT_MAX_SIZE as usize
+                || content.contains('\0')
+            {
+                return Err(MemoryError::InvalidAccess(
+                    "state contract must contain 1..=65536 bytes without NUL".into(),
+                ));
+            }
+            let mut audit = MoStateAudit::default();
+            let value: yaml_serde::Value = yaml_serde::from_str(content)?;
+            let _: StateContract = yaml_serde::from_value(value.clone())?;
+            let parsed = parse_user_contract(value, &mut audit)?;
+            let version = parsed.version;
+            let mut builtin: StateContract = yaml_serde::from_str(DEFAULT_CONTRACT)?;
+            merge_contract(&mut builtin, parsed, &mut audit);
+            if version != 1 || !audit.warnings.is_empty() {
+                return Err(MemoryError::InvalidAccess(format!(
+                    "state contract validation failed: {:?}",
+                    audit.warnings
+                )));
+            }
+            crate::filesystem::atomic_write(&path, content)?;
+        } else {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.state_contract_resource()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MoStateAudit {
     pub timestamp: i64,

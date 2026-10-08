@@ -24,15 +24,14 @@ An adapter translates between one external system and `MomoApi`. Adapters do
 not own memory, context construction, or model-governance policy. Built-in or
 separately distributed adapters may include:
 
-- CLI and Discord host adapters;
-- OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages ingress;
+- application and platform ingress adapters;
+- external model-protocol ingress;
 - model-provider egress;
 - future visual-description adapters.
 
 `momo-server` is the HTTP/SSE transport for `MomoApi`. Business orchestration
-must be callable without starting the server. `mobot` is an adapter host and
-may expose or consume configured adapters, but it must not duplicate Core's
-conversation pipeline.
+must be callable without starting the server. A host may expose or consume
+configured adapters, but it must not duplicate Core's conversation pipeline.
 
 ## 2. Configuration ownership
 
@@ -49,7 +48,7 @@ Portable product behaviour. It may be included in a MOC snapshot and contains:
 - character/runtime defaults that are safe to move between hosts.
 
 It must never contain credentials, absolute host paths, listener addresses, or
-Discord identifiers.
+external platform identifiers.
 
 ### `config.toml`
 
@@ -59,7 +58,7 @@ Host-local deployment and adapter wiring. It contains:
 - provider endpoints, protocols, model IDs, and credential environment names;
 - listener addresses and authentication policy;
 - executable, data, and run directories;
-- Discord and other host-specific settings.
+- host-specific platform settings.
 
 It is not included in a portable MOC by default. Secrets remain in environment
 variables or an external secret store.

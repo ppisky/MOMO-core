@@ -27,8 +27,8 @@ The local `PUT /v1/runtime-settings` resource accepts this optional object under
 
 These defaults are configurable, not empirically calibrated universal values.
 Both intervals accept integers 1–1,000,000; the finite factor must be strictly
-between 0 and 1. Settings are instance-wide and reconciled by the host; there
-is no per-Space override. `enabled: false` stops new lifecycle events;
+between 0 and 1. Settings have instance defaults and sparse per-Space overrides,
+reconciled by the host. `enabled: false` stops new lifecycle events;
 `auto_forget: false` retains decay/archive without physical forgetting for new
 events. Accepted events keep their captured settings, including during recovery.
 

@@ -309,6 +309,7 @@ pub(super) fn momo_api_error(error: MomoApiError) -> ApiError {
         MomoApiErrorKind::BadRequest => ApiError::bad_request(error.message),
         MomoApiErrorKind::Conflict => ApiError::conflict(error.message),
         MomoApiErrorKind::Cancelled => ApiError::cancelled(),
+        MomoApiErrorKind::Timeout => ApiError::gateway_timeout(error.message),
         MomoApiErrorKind::Model => model_api_error(error.message),
         MomoApiErrorKind::Internal => ApiError::internal(error.message),
     }

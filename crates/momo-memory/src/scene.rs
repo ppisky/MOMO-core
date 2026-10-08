@@ -41,22 +41,38 @@ impl MemoryWorkspace {
     /// Volatile indexes and audit logs are intentionally excluded from the DMW
     /// identity so a read-only retrieval does not manufacture a new state.
     pub fn mo_state_source_fingerprint(&self) -> Result<MoStateSourceFingerprint, MemoryError> {
-        let memory = self.export_memory_partition_snapshot()?;
-        let nsg = self.export_semantic_graph_partition_snapshot()?;
-        let dmw = digest_snapshot(&memory, is_dmw_state_path);
-        let nsg = digest_snapshot(&nsg, |_| true);
-        let scene_document = self.read("current/scene.md")?;
-        let threads_document = self.read("current/active_threads.md")?;
-        let scene_source = format!("{}\n{}", scene_document.body, threads_document.body);
-        let scene_hash = digest_text(&scene_source);
-        let scene_snapshot = parse_scene(&scene_document.body, &threads_document.body, &scene_hash);
-        Ok(MoStateSourceFingerprint {
-            dmw,
-            nsg,
-            scene: scene_hash,
-            scene_snapshot,
-        })
+        // Preserve governed read access while deriving content from one export.
+        self.read("current/scene.md")?;
+        self.read("current/active_threads.md")?;
+        source_fingerprint(&self.export_snapshot()?)
     }
+}
+
+/// Compute the same source identity from an owner's already durable snapshot.
+pub fn source_fingerprint(
+    snapshot: &MemorySnapshot,
+) -> Result<MoStateSourceFingerprint, MemoryError> {
+    let dmw = digest_snapshot(snapshot, is_dmw_state_path);
+    let nsg = digest_snapshot(snapshot, super::is_semantic_graph_snapshot_path);
+    let document = |path: &str| {
+        MemoryDocument::parse(
+            snapshot
+                .files
+                .get(path)
+                .ok_or_else(|| MemoryError::NotFound(path.into()))?,
+        )
+    };
+    let scene_document = document("current/scene.md")?;
+    let threads_document = document("current/active_threads.md")?;
+    let scene_source = format!("{}\n{}", scene_document.body, threads_document.body);
+    let scene_hash = digest_text(&scene_source);
+    let scene_snapshot = parse_scene(&scene_document.body, &threads_document.body, &scene_hash);
+    Ok(MoStateSourceFingerprint {
+        dmw,
+        nsg,
+        scene: scene_hash,
+        scene_snapshot,
+    })
 }
 
 fn is_dmw_state_path(path: &str) -> bool {

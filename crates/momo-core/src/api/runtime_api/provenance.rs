@@ -11,6 +11,9 @@ pub(crate) async fn qualify_memory_items(
     let mut ledgers = std::collections::BTreeMap::new();
     let mut evidence_statuses = std::collections::BTreeMap::new();
     let mut qualified = Vec::new();
+    type RevisionChecks =
+        std::collections::BTreeMap<(uuid::Uuid, bool), Vec<(usize, String, String)>>;
+    let mut revision_checks = RevisionChecks::new();
     for mut item in items {
         let Some(space) = item.pointer("/memory_space/id").and_then(Value::as_str) else {
             continue;
@@ -19,11 +22,10 @@ pub(crate) async fn qualify_memory_items(
             uuid::Uuid::parse_str(space).map_err(|e| RuntimeApiError::invalid(e.to_string()))?;
         let graph = item.get("graph_id").is_some();
         if let std::collections::btree_map::Entry::Vacant(entry) = ledgers.entry((space, graph)) {
-            let workspace = core
-                .memory_for_space(space)
-                .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+            let core = core.clone();
             let ledger = run_blocking("read provenance", move || {
-                workspace
+                core.memory_for_space(space)
+                    .map_err(|e| RuntimeApiError::internal(e.to_string()))?
                     .provenance(graph)
                     .map_err(|e| RuntimeApiError::internal(e.to_string()))
             })
@@ -70,23 +72,6 @@ pub(crate) async fn qualify_memory_items(
         if history.is_some_and(|h| h.deleted) {
             continue;
         }
-        if let Some(path) = item.get("path").and_then(Value::as_str) {
-            let workspace = core
-                .memory_for_space(space)
-                .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
-            let id = id.clone();
-            let path = path.replace('\\', "/");
-            let ledger = Arc::clone(&ledgers[&(space, graph)]);
-            if !run_blocking("verify provenance revision", move || {
-                workspace
-                    .record_revision_matches_in_ledger(&ledger, &id, &path)
-                    .map_err(|e| RuntimeApiError::internal(e.to_string()))
-            })
-            .await?
-            {
-                continue;
-            }
-        }
         let mut statuses = Vec::new();
         if let Some(history) = history {
             for evidence in history.evidence.values() {
@@ -111,6 +96,13 @@ pub(crate) async fn qualify_memory_items(
                 || (statuses.contains(&"revoked") && history.is_none_or(|h| !h.exact_evidence)))
         {
             continue;
+        }
+        if let Some(path) = item.get("path").and_then(Value::as_str) {
+            revision_checks.entry((space, graph)).or_default().push((
+                qualified.len(),
+                id.clone(),
+                path.replace('\\', "/"),
+            ));
         }
         let own = policy.is_some_and(|p| p.owner_character_id == Some(identity.character_id));
         let shared_knowledge = policy
@@ -151,7 +143,30 @@ pub(crate) async fn qualify_memory_items(
         });
         qualified.push(item);
     }
-    Ok(qualified)
+    let mut valid = vec![true; qualified.len()];
+    for ((space, graph), checks) in revision_checks {
+        let ledger = Arc::clone(&ledgers[&(space, graph)]);
+        let core = core.clone();
+        let records = checks
+            .iter()
+            .map(|(_, id, path)| (id.clone(), path.clone()))
+            .collect();
+        let matches = run_blocking("verify provenance revisions", move || {
+            core.memory_for_space(space)
+                .map_err(|e| RuntimeApiError::internal(e.to_string()))?
+                .record_revisions_match_in_ledger(ledger, records)
+                .map_err(|e| RuntimeApiError::internal(e.to_string()))
+        })
+        .await?;
+        for ((index, _, _), matches) in checks.into_iter().zip(matches) {
+            valid[index] = matches;
+        }
+    }
+    Ok(qualified
+        .into_iter()
+        .zip(valid)
+        .filter_map(|(item, valid)| valid.then_some(item))
+        .collect())
 }
 
 #[cfg(test)]

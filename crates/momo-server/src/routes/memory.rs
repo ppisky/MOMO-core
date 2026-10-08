@@ -317,7 +317,9 @@ pub(crate) async fn drain_momo_kind(
         momo_core::MaintenanceKind::Memory => "memory",
         momo_core::MaintenanceKind::SemanticGraph => "semantic_graph",
     };
-    let batch_limit = state.momo_api.maintenance_batch_limit(kind);
+    let batch_limit = state
+        .momo_api
+        .maintenance_batch_limit_for_space(space_id, kind);
     for batch in 0..=64 {
         let pending = runtime_api::pending_maintenance_turns(
             state.runtime.as_ref(),

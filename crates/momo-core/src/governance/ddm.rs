@@ -1,12 +1,12 @@
-//! Runtime rollout switch for character-owned DDM profiles.
+//! Runtime rollout switch for MO State DDM generation and projection.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DdmRuntimeConfig {
-    /// Global rollout gate. Profiles themselves are author-owned character
-    /// extensions and are never loaded from runtime filesystem paths.
+    /// Effective instance/Space gate. MO State generates a validated cache when
+    /// no optional author-owned character override exists.
     #[serde(default)]
     pub enabled: bool,
 }

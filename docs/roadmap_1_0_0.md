@@ -62,7 +62,7 @@ not compatibility surfaces.
   references with `auto`, `low`, or `high` detail.
 - [x] Images are limited to eight per operation, allowed only as user input,
   and cannot be mixed into a function-call continuation.
-- [x] Portable `vision.enabled` permits image input; its governed prompt applies
+- [x] Instance runtime `vision.enabled` permits image input; its governed prompt applies
   only to the text-description fallback.
 - [x] When `conversation` advertises `image`, original image blocks go directly
   to the final roleplay call without invoking the vision adapter.
@@ -74,9 +74,6 @@ not compatibility surfaces.
   response operation, preserving request-ID retry semantics.
 - [x] Unit and workspace tests cover validation, multimodal serialization,
   governed resolution, persistence, and replay.
-- [x] The `mobot` adapter host advertises explicit per-model modalities,
-  supports an optional `vision` fallback route, and preserves image blocks for
-  each supported provider protocol.
 - [ ] Owner-run credentialed Core -> gateway -> provider smoke tests with both a
   remote HTTPS image and a bounded data URL.
 
@@ -90,12 +87,12 @@ and cross-protocol tests are green.
   independently published crates.io SemVer APIs; every package is marked
   `publish = false`. The versioned HTTP wire and documented portable formats
   remain the product stability surface.
-- [x] Keep byte-identical Core/mobot `contracts/1.0` golden fixtures.
+- [x] Freeze and checksum MOMO's `contracts/1.0` golden fixtures for integrations.
 - [x] Publish [migration notes](migration_0_5_0_to_1_0_0.md) for the
   `MomoApiService::execute` ownership change, multimodal gateway-message
   content type, and SQLite migration.
 - [x] Verify formatting, strict Clippy, all-feature tests, rustdoc, fixture
-  checksums, and the adapter-host contract from the same revisions.
+  checksums, and the documented integration boundary from the same Core revision.
 - [x] Update workspace package versions to `1.0.0` for local release-candidate
   builds.
 - [x] Expose host hand-off for unknown MOC modules: explicit validated claim on
@@ -124,10 +121,9 @@ and cross-protocol tests are green.
   and Space/control guides. The former host TOML example is available in Git
   history; Core does not read it.
 - [x] Re-run formatting, all-target/all-feature tests, strict Clippy, rustdoc,
-  cross-repository fixture comparison, and Release builds from the final
-  revisions.
-- [x] Confirm both services remain stopped, scan Release binaries for the
-  removed default UUID/constants, and record SHA-256 hashes.
+  contract fixture checksums and Release builds from the final Core revision.
+- [x] Confirm the local Core service remains stopped, scan its Release binary
+  for the removed default UUID/constants, and record its SHA-256 hash.
 - [x] Create an annotated local-only `v1.0.0` test ref for the early candidate
   exercise without publishing it. That non-authoritative ref was later removed
   when GitHub was established as the release source of truth.
@@ -136,9 +132,9 @@ and cross-protocol tests are green.
   `v1.0.0-rc.1` GitHub prerelease.
 - [x] Add the default Roleplay Director and MORP 1.0 role-play-only benchmark,
   run all 64 bilingual cases, and retain provider failures as scored zeroes.
-- [x] Reduce the recommended rc.2 topology to one Qwen deployment shared by
+- [x] Reduce the benchmark rc.2 topology to one conversation deployment shared by
   the three core scenarios plus one embedding deployment; use one auditable
-  Codex reviewer instead of requiring two external judge models.
+  identity-bound reviewer rather than require a particular review product.
 - [x] Receive owner authorization to publish `v1.0.0-rc.2` without moving the
   public `v1.0.0-rc.1` tag.
 - [x] Complete the optional experimental DDM projection: author-owned MOC
@@ -147,7 +143,7 @@ and cross-protocol tests are green.
   atomic MO State publication.
 - [x] Remove benchmark-derived product defaults from runtime policy.
 - [x] Record an rc.3 credentialed eight-case MORP smoke run with one case per
-  primary role-play dimension and an auditable Codex review.
+  primary role-play dimension and an auditable reviewer record.
 - [x] Record an eight-case mixed-context A/B run that exercises real retrieval
   and MO State, with direct and MOMO arms both scoring 84.375. Treat the tie as
   execution evidence, not evidence of benefit.
@@ -180,7 +176,5 @@ and lossy image carriers are not part of the 1.0 gate.
 
 - `target/release/momo-server.exe`
   SHA-256: `A67125947B96A8A0557B57736197482C31A8B118A3B829F8F47D100B6200B7E0`
-- `D:/mobot/target/release/momo-bot.exe`
-  SHA-256: `7E8D397274393F24558CB54EFED3D8D845F6A7038AABCDF656370498898AFACB`
 
-These are local test artifacts, not published release assets.
+This is a previously verified local MOMO test artifact, not a published release asset.

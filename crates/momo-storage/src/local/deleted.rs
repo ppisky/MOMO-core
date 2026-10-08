@@ -110,13 +110,32 @@ impl LocalStore {
                 for message in snapshot.messages {
                     insert_message_immutable(&mut transaction, &message).await?;
                 }
+                for context in snapshot.contexts {
+                    super::message_context::insert_message_context(
+                        &mut transaction,
+                        context.message_id,
+                        &context.payload,
+                        false,
+                    )
+                    .await?;
+                }
             }
             "message" => {
-                let message: Message = serde_json::from_str(&payload)?;
+                let snapshot: DeletedMessageSnapshot = serde_json::from_str(&payload)?;
+                let message = snapshot.message;
                 if message.id != object_id {
                     return Ok(false);
                 }
                 insert_message_immutable(&mut transaction, &message).await?;
+                if let Some(context) = snapshot.context {
+                    super::message_context::insert_message_context(
+                        &mut transaction,
+                        message.id,
+                        &context,
+                        false,
+                    )
+                    .await?;
+                }
             }
             _ => return Ok(false),
         }

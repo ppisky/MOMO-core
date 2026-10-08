@@ -220,7 +220,11 @@ mod tests {
             continuity_id: conversation,
             function_id: None,
         };
-        let response=serde_json::json!({"momo":{"request_audit":{"memory_identity":identity,"evidence_configuration":{"assistant_revision":"revision-a"}}}}).to_string();
+        let capture = momo_domain::provenance::ResponseEvidenceCapture {
+            identity,
+            kind: momo_domain::provenance::EvidenceKind::Conversation,
+            configuration: BTreeMap::from([("assistant_revision".into(), "revision-a".into())]),
+        };
         let maintenance = MaintenanceTurn {
             request_id: id.into(),
             scope_id: space.to_string(),
@@ -239,7 +243,8 @@ mod tests {
                         memory_enabled: true,
                         nsg_enabled: true,
                         mo_state_operation_id: None,
-                        response_json: &response
+                        evidence: Some(&capture),
+                        response_json: r#"{"status":"completed"}"#,
                     })
                     .await
                     .unwrap(),

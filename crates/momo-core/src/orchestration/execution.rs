@@ -66,7 +66,15 @@ impl MomoApiService {
         operation_key: &str,
         stream: Option<&dyn MomoResponseEventSink>,
     ) -> Result<MomoResponse, MomoApiError> {
-        let config = self.config_snapshot();
+        let personal_id = uuid::Uuid::parse_str(
+            request
+                .momo
+                .personal_space_id
+                .as_deref()
+                .expect("validated personal Space"),
+        )
+        .map_err(MomoApiError::bad_request)?;
+        let config = self.runtime().runtime_settings_for_space(personal_id);
         self.coordination.ensure_active(operation_key)?;
         let request_lock = {
             let mut locks = self.coordination.operation_locks.lock().await;
@@ -96,7 +104,7 @@ impl MomoApiService {
                     .map_err(|error| MomoApiError::internal(error.to_string()));
             }
         }
-        let _conversation_guard =
+        let mut conversation_guard =
             if let Some(conversation_id) = request.momo.conversation_id.as_deref() {
                 let conversation_space_id = request
                     .momo
@@ -116,12 +124,41 @@ impl MomoApiService {
             };
         if request.input.has_images() && !config.vision.enabled {
             return Err(MomoApiError::bad_request(
-                "image input requires vision.enabled = true in the portable MOMO configuration",
+                "image input requires vision.enabled = true in this runtime's settings",
             ));
         }
 
+        if request.input.has_function_outputs() {
+            let conversation = request.momo.conversation_id.as_deref().ok_or_else(|| {
+                MomoApiError::bad_request("tool continuations require an existing conversation_id")
+            })?;
+            let scope = uuid::Uuid::parse_str(
+                request
+                    .momo
+                    .conversation_space_id
+                    .as_deref()
+                    .expect("validated conversation Space"),
+            )
+            .map_err(MomoApiError::bad_request)?;
+            let count = self
+                .runtime()
+                .core()
+                .store()
+                .tool_continuation_count(
+                    scope,
+                    uuid::Uuid::parse_str(conversation).map_err(MomoApiError::bad_request)?,
+                )
+                .await
+                .map_err(MomoApiError::internal)?;
+            if count >= config.mo_state.max_agent_steps.saturating_sub(1) {
+                return Err(MomoApiError::bad_request(
+                    "tool continuation exceeds mo_state.max_agent_steps",
+                ));
+            }
+        }
+
         let mut warnings = Vec::new();
-        let capability = match self.gateway_response_budget().await {
+        let capability = match self.gateway_response_budget(&request.model).await {
             Ok(value) => value,
             Err(error) => {
                 warnings.push(format!("capability discovery degraded: {error}"));
@@ -181,14 +218,26 @@ impl MomoApiService {
         }
         self.coordination.ensure_active(operation_key)?;
 
-        let (mut response, mo_state_operation_id) = self
+        let conversation = self
+            .prepare_response_conversation(
+                request,
+                operation_key,
+                &fingerprint,
+                persisted.as_ref(),
+                &resolved_input,
+                &mut conversation_guard,
+            )
+            .await?;
+        let (mut response, mo_state_operation_id, evidence) = self
             .respond(
                 request,
+                conversation,
                 GovernedResponseAttempt {
+                    config: &config,
+                    supports_images: capability.supports_images,
                     request_id,
                     operation_key,
                     request_fingerprint: &fingerprint,
-                    persisted: persisted.as_ref(),
                     resolved_input: &resolved_input,
                     governed,
                     warnings,
@@ -248,13 +297,17 @@ impl MomoApiService {
         .map_err(MomoApiError::bad_request)?;
         let conversation_id = uuid::Uuid::parse_str(&response.momo.conversation_id)
             .map_err(MomoApiError::internal)?;
-        let assistant_message = (!response.output_text.is_empty()).then(|| momo_domain::Message {
-            id: momo_domain::new_id(),
-            conversation_id,
-            role: momo_domain::MessageRole::Assistant,
-            content: response.output_text.clone(),
-            created_at: chrono::Utc::now(),
-        });
+        let tool_context = super::history::tool_context(&request.input);
+        let assistant_message =
+            (!response.output_text.is_empty() || tool_context.is_some()).then(|| {
+                momo_domain::Message {
+                    id: momo_domain::new_id(),
+                    conversation_id,
+                    role: momo_domain::MessageRole::Assistant,
+                    content: response.output_text.clone(),
+                    created_at: chrono::Utc::now(),
+                }
+            });
         let maintenance_turn = (memory || semantic_graph).then(|| momo_storage::MaintenanceTurn {
             request_id: operation_key.to_owned(),
             scope_id: memory_write_space_id
@@ -272,19 +325,9 @@ impl MomoApiService {
         {
             Some(
                 serde_json::to_string(&momo_memory::lifecycle::LifecycleActivity {
-                    identity: Some(
-                        serde_json::from_value(
-                            response.momo.request_audit["memory_identity"].clone(),
-                        )
-                        .map_err(MomoApiError::internal)?,
-                    ),
+                    identity: Some(evidence.identity.clone()),
                     conversation_id: response.momo.conversation_id.clone(),
-                    character_id: response.momo.request_audit["active_character_id"]
-                        .as_str()
-                        .ok_or_else(|| {
-                            MomoApiError::internal("missing captured character identity")
-                        })?
-                        .to_owned(),
+                    character_id: evidence.identity.character_id.to_string(),
                     query: resolved_input.maintenance_user_text().to_owned(),
                     settings: config.mo_state.memory_lifecycle.clone(),
                 })
@@ -296,17 +339,21 @@ impl MomoApiService {
         self.runtime()
             .core()
             .store()
-            .commit_response_completion(momo_storage::ResponseCompletion {
-                lifecycle_activity_json: lifecycle_activity_json.as_deref(),
-                request_id: operation_key,
-                conversation_scope_id,
-                assistant_message: assistant_message.as_ref(),
-                maintenance_turn: maintenance_turn.as_ref(),
-                memory_enabled: memory,
-                nsg_enabled: semantic_graph,
-                mo_state_operation_id: mo_state_operation_id.as_deref(),
-                response_json: &response_json,
-            })
+            .commit_response_completion_with_context(
+                momo_storage::ResponseCompletion {
+                    lifecycle_activity_json: lifecycle_activity_json.as_deref(),
+                    request_id: operation_key,
+                    conversation_scope_id,
+                    assistant_message: assistant_message.as_ref(),
+                    maintenance_turn: maintenance_turn.as_ref(),
+                    memory_enabled: memory,
+                    nsg_enabled: semantic_graph,
+                    mo_state_operation_id: mo_state_operation_id.as_deref(),
+                    evidence: Some(&evidence),
+                    response_json: &response_json,
+                },
+                tool_context.as_ref(),
+            )
             .await
             .map_err(MomoApiError::internal)?;
         if memory || semantic_graph {

@@ -9,6 +9,7 @@ mod deleted;
 mod deletion;
 mod lifecycle;
 mod maintenance;
+mod message_context;
 mod messages;
 mod metadata;
 mod provenance;

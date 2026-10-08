@@ -62,10 +62,11 @@ conversations without changing the character's base definition.
 | Information | Owner | Persistence |
 | --- | --- | --- |
 | Stable disposition and base activation | Character Card semantics | Portable and author-owned |
-| Machine-readable DDM profile | Character-author-owned extension | MOC character asset `extensions/momo-ddm/profile.yaml`; management API outside Character Card v2 metadata |
+| Optional authored machine-readable DDM profile | Character-author-owned extension | MOC character asset `extensions/momo-ddm/profile.yaml`; management API outside Character Card v2 metadata |
 | Shared events and relationship evidence | DMW | Persistent evidence |
 | World rules and Canon | NSG | Persistent governed facts |
 | Current scene and internal state | MO State snapshot | Rebuildable runtime projection |
+| Managed derived profile | MO State authoring workflow | Fingerprinted local cache; excluded from MOC |
 | Effective disposition | DDM within MO State | Snapshot/audit only |
 | Natural-language behavior | Conversation model | Conversation history/event flow |
 
@@ -80,13 +81,20 @@ added to the Character Card v2 core metadata. The optional machine-readable
 profile is instead a character-owned MOC extension at the fixed path
 `extensions/momo-ddm/profile.yaml`. Core management transports MAY expose that
 asset directly, but MUST validate its `character_id` against the managed
-character and its owner Space. `momo.toml` contains only the deployment enable
-switch; it MUST NOT map characters to host filesystem paths. DDM does not
+character and its owner Space. The runtime-settings resource supplies `mo_state.ddm.enabled`; Core does not
+read `momo.toml` or map characters to host filesystem paths. DDM does not
 authorize a new Space or authoritative storage layer.
 
-If no profile is configured for the active character, Core MUST preserve the
-existing Markdown-only behavior and MUST NOT invent numeric parameters from
-prose during an ordinary response.
+If no author override is configured and DDM is enabled, MO State MAY establish
+a managed derived profile through a bounded, audited model proposal workflow.
+The captured character definition and generation-prompt revision fingerprint
+its cache. User descriptions and conversations MUST NOT rewrite stable bases.
+Typed identity, signals, numeric bounds and profile validation MUST precede
+publication. Failed proposals MUST NOT install a profile. The deterministic
+evaluator itself MUST NOT infer parameters from prose. Generated profiles are
+rebuildable runtime derivatives, MUST NOT modify Character Card, and MUST NOT
+be exported as author-owned profiles. Disabled DDM preserves Markdown-only
+behavior. An explicitly supplied author profile takes precedence.
 
 ## 3. Activation model
 

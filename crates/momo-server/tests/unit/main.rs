@@ -7,6 +7,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
 
+#[path = "configuration.rs"]
+mod configuration;
+
 static TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 static TEST_DATA_DIR: std::sync::LazyLock<tempfile::TempDir> =
@@ -151,6 +154,167 @@ async fn write_test_json_response(socket: &mut tokio::net::TcpStream, body: Valu
         .write_all(response.as_bytes())
         .await
         .expect("write test response");
+}
+
+#[tokio::test]
+async fn image_and_tool_history_survive_restart_and_response_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let gateway = tokio::spawn(async move {
+        for turn in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(
+                read_test_http_request(&mut socket)
+                    .await
+                    .starts_with("GET /v1/models/conversation ")
+            );
+            write_test_json_response(&mut socket, json!({"momo":{"context_window":16384,"max_output_tokens":1024,"modalities":["text","image"]}})).await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_test_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /v1/chat/completions "));
+            let body: Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            let messages = body["messages"].as_array().unwrap();
+            assert!(messages.iter().any(|message| message["role"] == "user"
+                && message["content"].as_array().is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part["type"] == "image_url"
+                            && part["image_url"]["url"] == "data:image/png;base64,evidence"
+                    })
+                })));
+            if turn >= 1 {
+                assert!(messages.iter().any(|message| {
+                    message["role"] == "assistant"
+                        && message["tool_calls"]
+                            .as_array()
+                            .is_some_and(|calls| calls.iter().any(|call| call["id"] == "inspect-1"))
+                }));
+                assert!(messages.iter().any(|message| message["role"] == "tool"
+                    && message["tool_call_id"] == "inspect-1"
+                    && message["content"] == "{\"color\":\"red\"}"));
+                assert!(!messages.iter().any(|message| message["role"] == "user"
+                    && message["content"] == "{\"color\":\"red\"}"));
+            }
+            let message = if turn == 0 {
+                json!({"role":"assistant","content":"I will inspect.","tool_calls":[{"id":"inspect-1","type":"function","function":{"name":"inspect","arguments":"{}"}}]})
+            } else {
+                json!({"role":"assistant","content":"It is red."})
+            };
+            write_test_json_response(&mut socket, json!({"choices":[{"message":message,"finish_reason":if turn == 0 {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}})).await;
+        }
+    });
+    let mut config = MomoRuntimeSettings::default();
+    config.vision.enabled = true;
+    config.runtime.memory_distillation_enabled = false;
+    config.runtime.semantic_graph_enabled = false;
+    let runtime = Arc::new(MomoRuntime::initialize(directory.path()).await.unwrap());
+    runtime.update_runtime_settings(config.clone()).unwrap();
+    let scope = uuid::Uuid::now_v7().to_string();
+    let character = runtime_api::stage_character(
+        &runtime,
+        scope.clone(),
+        "test".into(),
+        "Inspector".into(),
+        "Inspect evidence.".into(),
+        String::new(),
+    )
+    .await
+    .unwrap();
+    let conversation = runtime_api::stage_conversation(
+        &runtime,
+        None,
+        scope.clone(),
+        "Evidence".into(),
+        character.id.to_string(),
+    )
+    .await
+    .unwrap();
+    let make_request = |input: Value| -> momo_core::MomoResponseRequest {
+        serde_json::from_value(json!({"model":"conversation","input":input,"tools":[{"type":"function","name":"inspect","parameters":{"type":"object","properties":{}}}],"momo":{"schema":"momo.responses/1.0","personal_space_id":scope,"conversation_space_id":scope,"conversation_id":conversation.id,"character_id":character.id,"memory_sources":[],"mo_state":false}})).unwrap()
+    };
+    let service = MomoApiService::new(
+        Arc::clone(&runtime),
+        format!("http://{address}/v1"),
+        None,
+        reqwest::Client::new(),
+    );
+    let image = make_request(
+        json!([{"type":"input_text","text":"Inspect this."},{"type":"input_image","image_url":"data:image/png;base64,evidence"}]),
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        service.execute(&image, "image-1", None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let tool = make_request(
+        json!([{"type":"function_call","call_id":"inspect-1","name":"inspect","arguments":"{}"},{"type":"function_call_output","call_id":"inspect-1","output":"{\"color\":\"red\"}"}]),
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        service.execute(&tool, "tool-1", None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(service);
+    drop(runtime);
+
+    let runtime = Arc::new(MomoRuntime::initialize(directory.path()).await.unwrap());
+    runtime.update_runtime_settings(config).unwrap();
+    let service = MomoApiService::new(
+        Arc::clone(&runtime),
+        format!("http://{address}/v1"),
+        None,
+        reqwest::Client::new(),
+    );
+    let followup = make_request(json!("What did we see and measure?"));
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        service.execute(&followup, "followup-1", None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.output_text, "It is red.");
+    assert_eq!(
+        response.momo.request_audit["history_context"]["image_count"],
+        1
+    );
+    assert_eq!(
+        response.momo.request_audit["history_context"]["tool_exchanges"],
+        1
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(3), gateway)
+        .await
+        .unwrap()
+        .unwrap();
+    let before = runtime
+        .core()
+        .store()
+        .list_messages(conversation.id)
+        .await
+        .unwrap();
+    let replay = service
+        .execute(&followup, "followup-1", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(replay).unwrap(),
+        serde_json::to_value(response).unwrap()
+    );
+    assert_eq!(
+        runtime
+            .core()
+            .store()
+            .list_messages(conversation.id)
+            .await
+            .unwrap()
+            .len(),
+        before.len()
+    );
 }
 
 #[test]

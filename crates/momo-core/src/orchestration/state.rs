@@ -14,6 +14,7 @@ pub(super) struct StateRequest<'a> {
     pub(super) managed_space_id: &'a str,
     pub(super) conversation_id: &'a str,
     pub(super) character_id: &'a str,
+    pub(super) character_definition: &'a momo_domain::CharacterCard,
     pub(super) source_observations: &'a [momo_storage::MoStateSourceObservation],
     pub(super) memory: &'a [Value],
     pub(super) nsg: &'a [Value],
@@ -36,6 +37,19 @@ impl MomoApiService {
         &self,
         input: StateRequest<'_>,
     ) -> Result<CompiledResponseState, MomoApiError> {
+        let limit = input.config.mo_state.operation_timeout_ms;
+        tokio::time::timeout(
+            std::time::Duration::from_millis(limit),
+            self.compile_response_state_inner(input),
+        )
+        .await
+        .map_err(|_| MomoApiError::timeout("MO State operation_timeout_ms exceeded"))?
+    }
+
+    async fn compile_response_state_inner(
+        &self,
+        input: StateRequest<'_>,
+    ) -> Result<CompiledResponseState, MomoApiError> {
         let StateRequest {
             request,
             config,
@@ -44,6 +58,7 @@ impl MomoApiService {
             managed_space_id,
             conversation_id,
             character_id,
+            character_definition,
             source_observations,
             memory,
             nsg,
@@ -155,21 +170,34 @@ impl MomoApiService {
                     .map_err(|error| MomoApiError::internal(error.to_string()))?;
                 state_result_from_snapshot(&snapshot)
             } else {
-                let ddm_profile = if config.mo_state.ddm.enabled {
-                    let character_uuid =
-                        uuid::Uuid::parse_str(character_id).map_err(MomoApiError::internal)?;
-                    self.runtime()
-                        .core()
-                        .store()
-                        .portable_metadata("character_ddm_profile", &character_uuid.to_string())
-                        .await
-                        .map_err(MomoApiError::internal)?
-                        .map(|yaml| momo_memory::DdmProfile::parse_yaml(&yaml))
-                        .transpose()
-                        .map_err(MomoApiError::internal)?
-                } else {
-                    None
+                let (ddm_profile, ddm_profile_audit) = match self
+                    .resolve_ddm_profile(
+                        managed_space_id,
+                        character_id,
+                        character_definition,
+                        operation_key,
+                        config,
+                    )
+                    .await
+                {
+                    Ok(resolved) => resolved,
+                    Err(error) if error.kind == super::MomoApiErrorKind::Cancelled => {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        warnings.push(format!("DDM profile generation degraded: {error}"));
+                        (
+                            None,
+                            json!({"source":"degraded", "error":error.to_string()}),
+                        )
+                    }
                 };
+                if ddm_profile_audit["source"] == "degraded" {
+                    warnings.push(format!(
+                        "DDM profile generation degraded: {}",
+                        ddm_profile_audit["error"]
+                    ));
+                }
                 let previous_ddm_state = if autonomous && ddm_profile.is_some() {
                     self.runtime()
                         .core()
@@ -264,6 +292,7 @@ impl MomoApiService {
                             )
                         }
                     };
+                compiled["audit"]["ddm_profile"] = ddm_profile_audit;
                 if let Some(state_operation_id) = operation_id.as_ref() {
                     let ddm_update = compiled
                         .get("audit")

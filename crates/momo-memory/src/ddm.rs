@@ -1,7 +1,7 @@
 //! Deterministic Dynamic Disposition Model projection.
 //!
-//! DDM profiles are authored data. This module only evaluates explicit,
-//! governed signals; it never infers dispositions from free-form prose.
+//! DDM profiles are validated author overrides or MO State proposals. This
+//! evaluator uses explicit governed signals; model proposals are handled by Core.
 
 use std::collections::{BTreeMap, BTreeSet};
 

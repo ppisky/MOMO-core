@@ -10,6 +10,8 @@ pub(crate) const VISION_FALLBACK: &str = include_str!("product_prompts/vision_fa
 pub(crate) const MEMORY_DISTILLATION: &str = include_str!("product_prompts/dmw_distiller.md");
 pub(crate) const SEMANTIC_GRAPH_GOVERNANCE: &str = include_str!("product_prompts/nsg_governor.md");
 pub(crate) const ROLEPLAY_DIRECTOR: &str = include_str!("product_prompts/roleplay_director.md");
+pub(crate) const DDM_PROFILE_GENERATION: &str =
+    include_str!("product_prompts/ddm_profile_generation.md");
 
 #[cfg(test)]
 #[path = "../tests/unit/product_prompts.rs"]

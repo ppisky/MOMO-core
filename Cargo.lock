@@ -2148,8 +2148,10 @@ name = "momo-domain"
 version = "1.0.0"
 dependencies = [
  "chrono",
+ "semver",
  "serde",
  "serde_json",
+ "url",
  "uuid",
 ]
 
@@ -2234,6 +2236,7 @@ dependencies = [
 name = "momo_core"
 version = "1.0.0"
 dependencies = [
+ "axum",
  "base64",
  "chrono",
  "crc32fast",

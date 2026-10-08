@@ -13,6 +13,10 @@ use tokio::sync::{Notify, OwnedMutexGuard};
 
 use crate::{CapabilityRegistry, CoreError, MomoCore, OwnedState};
 
+mod settings;
+pub use settings::RuntimeSettingsResource;
+pub use settings::runtime_settings_description;
+
 #[derive(Debug)]
 pub(crate) struct CancellationSignal {
     cancelled: AtomicBool,
@@ -78,7 +82,7 @@ impl CancellationSignal {
 #[derive(Debug)]
 pub struct MomoRuntime {
     core: Arc<MomoCore>,
-    settings: OwnedState<crate::MomoRuntimeSettings>,
+    settings: OwnedState<settings::SettingsStore>,
     prompt_spaces: crate::PromptSpaces,
     response_coordination: Arc<crate::orchestration::coordination::ResponseCoordination>,
     cancellations: OwnedState<HashMap<String, Arc<CancellationSignal>>>,
@@ -106,9 +110,11 @@ impl MomoRuntime {
         let core = Arc::new(MomoCore::initialize(data_dir).await?);
         let prompt_spaces =
             crate::PromptSpaces::load_or_default(core.data_dir().join("prompt-spaces.json"))?;
+        let settings =
+            settings::SettingsStore::load(&core.data_dir().join("runtime-settings.json"))?;
         Ok(Self {
             core,
-            settings: OwnedState::new(crate::MomoRuntimeSettings::default()),
+            settings: OwnedState::new(settings),
             prompt_spaces,
             cancellations: OwnedState::new(HashMap::new()),
             response_coordination: Arc::default(),
@@ -123,17 +129,61 @@ impl MomoRuntime {
         self.core.as_ref()
     }
 
+    /// Validates, persists, then publishes the complete instance policy.
     pub fn update_runtime_settings(
         &self,
         settings: crate::MomoRuntimeSettings,
     ) -> Result<(), crate::GovernanceError> {
-        settings.validate()?;
-        self.settings.call(move |current| *current = settings);
+        self.replace_runtime_settings(None, settings, None)?;
         Ok(())
     }
 
+    /// Returns a snapshot of this runtime's current settings.
     pub fn runtime_settings(&self) -> crate::MomoRuntimeSettings {
-        self.settings.call(|settings| settings.clone())
+        self.runtime_settings_resource(None).settings
+    }
+
+    pub fn runtime_settings_for_space(&self, space_id: uuid::Uuid) -> crate::MomoRuntimeSettings {
+        self.runtime_settings_resource(Some(space_id)).settings
+    }
+
+    pub fn runtime_settings_resource(
+        &self,
+        space_id: Option<uuid::Uuid>,
+    ) -> RuntimeSettingsResource {
+        self.settings
+            .call(move |settings| settings.resource(space_id))
+    }
+
+    pub fn replace_runtime_settings(
+        &self,
+        space_id: Option<uuid::Uuid>,
+        settings: crate::MomoRuntimeSettings,
+        expected_revision: Option<u64>,
+    ) -> Result<RuntimeSettingsResource, crate::GovernanceError> {
+        let value = serde_json::to_value(settings)
+            .map_err(|e| crate::GovernanceError::Invalid(e.to_string()))?;
+        self.settings
+            .call(move |current| current.update(space_id, expected_revision, Some(value), false))
+    }
+
+    pub fn patch_runtime_settings(
+        &self,
+        space_id: Option<uuid::Uuid>,
+        patch: serde_json::Value,
+        expected_revision: Option<u64>,
+    ) -> Result<RuntimeSettingsResource, crate::GovernanceError> {
+        self.settings
+            .call(move |current| current.update(space_id, expected_revision, Some(patch), true))
+    }
+
+    pub fn reset_runtime_settings(
+        &self,
+        space_id: Option<uuid::Uuid>,
+        expected_revision: Option<u64>,
+    ) -> Result<RuntimeSettingsResource, crate::GovernanceError> {
+        self.settings
+            .call(move |current| current.update(space_id, expected_revision, None, false))
     }
 
     pub const fn prompt_spaces(&self) -> &crate::PromptSpaces {

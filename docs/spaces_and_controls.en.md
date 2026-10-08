@@ -36,16 +36,16 @@ weights. Weights allocate retrieval budget and do not grant access. The host
 authorizes every readable Space. One maintenance run writes to exactly one
 explicit `memory_write_space_id`, even when several Spaces were read.
 
-For a Discord group conversation, mobot normally sends sources equivalent to:
+For a group conversation, a host may select personal and shared sources:
 
 ```json
 [
-  {"space_id":"<person>","label":"personal","weight":70},
-  {"space_id":"<channel>","label":"conversation","weight":30}
+  {"space_id":"<person>","label":"personal","weight":70,"memory":true,"semantic_graph":true},
+  {"space_id":"<conversation-space>","label":"conversation","weight":30,"memory":true,"semantic_graph":true}
 ]
 ```
 
-The personal Space supports continuity for one person across channels. The
+The personal Space supports continuity for one person across conversations. The
 conversation Space prevents group A's messages and shared memory from becoming
 group B's history. They are orthogonal ownership boundaries.
 
@@ -94,41 +94,32 @@ Completed controls are persistently replayable by `actor_space_id` plus
 profile and are not substitutes for this end-user control protocol; see the
 [HTTP boundary](http_api_1_0.md).
 
-mobot exposes separate commands rather than overloading one reset operation:
+Hosts map user actions to the following responsibilities. Core does not define
+client commands or interaction labels.
 
-| Intent | CLI / interactive | Discord |
-| --- | --- | --- |
-| Detach and create a new session | `new` / `/new` | `!momo new` |
-| Delete current conversation data | `control delete-conversation` / `/delete` | `!momo delete` |
-| Clear personal memory | `control clear-memory --target personal ...` / `/clear-personal` | `!momo clear personal` |
-| Clear group memory | `control clear-memory --target conversation ...` / `/clear-conversation` | `!momo clear conversation` |
-| Switch character | `control switch-character <UUID>` / `/character <UUID>` | `!momo character <UUID>` |
+| Intent | MOMO integration |
+| --- | --- |
+| Start a new session | Host selects/creates a conversation and replaces its session mapping |
+| Delete conversation data | `delete_conversation` with explicit conversation Space and conversation IDs |
+| Clear personal or shared memory | `clear_memory` with an explicit target Space UUID and selected modules |
+| Switch character | `switch_character` with explicit conversation and character IDs |
 
 Memory clearing selects DMW, semantic graph, or both. Natural-language text
 cannot acquire deletion authority.
 
 ## Weights and the write target
 
-These are host conversation-policy choices. The host resolves them into each
-`momo.responses/1.0` request's `memory_sources` and
-`memory_write_space_id`. A host may represent its own policy as:
+The host chooses each `momo.responses/1.0` request's `memory_sources` and
+`memory_write_space_id`. Each source carries an explicit Space UUID, weight
+and module flags. Weights from 1 through 100 are relative shares of a bounded
+retrieval context, not similarity thresholds or authorization percentages.
+Omitting a conversation source stops reading it for that request without
+deleting its data. The write target is an explicit Space UUID, not a client
+configuration enum; Core validates it against the requested sources.
 
-```toml
-personal_memory_weight = 70
-conversation_memory_weight = 30
-conversation_memory_enabled = true
-memory_write_target = "personal"
-```
-
-The weights are relative shares of a bounded retrieval context, not similarity
-thresholds or authorization percentages. Each may be any value from 1 through
-100. Disabling conversation memory stops reading that Space but does not delete
-it. `memory_write_target` is either `personal` or `conversation`; Core does not
-silently fall back to another Space when the selected target is unavailable.
-
-These names belong to host user configuration, not a file read by MOMO Core.
-The host resolves them into native response fields and the typed
-`/v1/runtime-settings` resource. See [`runtime_config_0_1.md`](runtime_config_0_1.md).
+Core does not prescribe how a host stores or presents these choices. Runtime
+maintenance policy uses the separate typed settings resource, described in
+[`runtime_config_0_1.md`](runtime_config_0_1.md).
 
 ## MOC import and export
 
@@ -147,8 +138,8 @@ character directory.
 The assistant, vision fallback, DMW, NSG, and foreground role-play prompts have
 reviewed Markdown defaults under `crates/momo-core/src/product_prompts/`,
 compiled into `momo_core` with `include_str!`. MOMO does not read `momo.toml`;
-the prompts are not part of MOC or any Space. Process-wide replacements use the
-Prompt Spaces HTTP API. See [the Prompt Spaces guide](maintenance_prompts.en.md).
+the prompts are not part of MOC or any Space. Runtime-owned replacements use the typed `PromptSpaces` Rust API or the
+Prompt Spaces HTTP API; normal runtime overrides persist in its data directory. See [the Prompt Spaces guide](maintenance_prompts.en.md).
 
 ## 2026-09-30 provenance profile update
 

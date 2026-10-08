@@ -4,6 +4,50 @@ This describes the current implementation and its ownership rules. Product
 and artifact contracts retain the precedence defined in [spec_index.md](spec_index.md).
 MOMO is a local-first modular monolith: one live Core owns a data directory.
 
+## Domain concepts and implementation status
+
+The current system has some domain rules within a modular monolith. It does
+not claim a complete DDD model merely because code is split into crates.
+Domain boundaries follow business identity, permitted transitions and
+consistency requirements; worker ownership and module layout describe technical
+boundaries. A `SpaceWorker` is a serialization/recovery owner, not automatically
+a domain aggregate or a bounded context. SQLite is a persistence choice and is
+compatible with these domain responsibilities.
+
+| Responsibility | Current owner |
+| --- | --- |
+| Native character definition validity | `CharacterCard::validate` in `momo-domain`; the application translates validation failures |
+| Character scope access and create/update workflow | Typed `momo-core` application operations |
+| Memory identity, evidence and record policy vocabulary | `momo-domain::provenance`; memory qualification and lifecycle behavior also live in `momo-memory` |
+| Response replay, cancellation and coordinating a completion | `momo-core` orchestration |
+| Atomic persisted completion and actual message anchors | `momo-storage`, in one SQLite transaction |
+| Model access and HTTP serialization | Gateway adapters and `momo-server` |
+| Deployment configuration and authorized caller selection | The host; Core validates its typed inputs |
+
+Character records are still publicly mutable data. Native create/update paths
+call the domain validator, while compatibility/import paths retain their format
+validation. This is an incremental rule boundary, not a guarantee that every
+record construction or write is protected by a domain aggregate. Other workflow
+rules still reside in application and memory modules. Move a rule when its
+business owner and invariants are clear, rather than adding repository traits
+or a service for every table.
+
+The current integration choices are the typed Rust application API from a
+pinned workspace revision and the documented HTTP/SSE contract. No general FFI
+or C ABI is shipped or committed here. If a host later needs an in-process
+foreign-language binding, its adapter can be designed around a concrete use
+case and the same application operations.
+
+See the [Chinese concept and configuration guide](domain_and_configuration_boundaries.zh-CN.md)
+for decisions, examples and remaining gaps. This clarification does not extend
+the HTTP or artifact contracts.
+
+"Host" means the application integrating Core, such as a desktop client,
+backend service or local adapter. It chooses desired configuration and
+authorized access; Core enforces its input validity, domain rules and commit
+boundaries. A model gateway connects logical model routes to providers. These
+are responsibilities, not dependencies on named external products.
+
 ## Dependencies and application boundaries
 
 ```text
@@ -12,7 +56,7 @@ momo-server (startup, DTOs, routes, HTTP/SSE)
         -> momo-memory (DMW, NSG, retrieval, projection, file plans)
         -> momo-storage (SQLite transactions and disposable Turso vectors)
         -> momo-moc / momo-crypto / momo-config (portable artifacts)
-            -> momo-domain (shared domain records where needed)
+            -> momo-domain (domain records and validity rules where needed)
 ```
 
 `momo-server/src/main.rs` only starts the application. The library owns HTTP
@@ -61,6 +105,9 @@ The supervisor owns the address registry, with at most 128 live workers and
 64 queued commands per worker. Idle addresses can be evicted; addresses held
 by callers or running commands cannot. Registry and worker shutdown are joined
 before releasing their ownership of the data-directory lock.
+Cold initialization reserves its registry entry, then performs disk recovery in
+the requesting caller outside the registry loop. Concurrent callers for that
+Space wait for one initialization; hot addresses remain available.
 
 DMW and NSG maintenance retain separate batch lanes. Operations spanning Space
 commands and SQLite work request a mailbox reservation. A multi-Space request
@@ -76,6 +123,24 @@ state owners. There is no poisoned-lock `into_inner` recovery. A failed volatile
 owner closes its mailbox and fails closed until the runtime is recreated.
 Persistent Prompt Spaces publish their file snapshot before replacing the
 cached overrides. Worker failure recovery is described below.
+
+Settings and prompts have different lifetimes:
+
+| Resource | Scope | Persistence and update |
+| --- | --- | --- |
+| `MomoRuntimeSettings` | One runtime, instance policy plus sparse Space overrides | Atomic runtime-settings.json restore; PUT/PATCH/reset with revision/CAS |
+| Prompt Spaces | The registry owned by that runtime; fixed slots, no per-user identity | Runtime-loaded overrides in `<data_dir>/prompt-spaces.json`; replacement/reset persists before publishing |
+| Governed request overrides | One request, subject to runtime policy | Request/response audit and replay record, not a replacement of runtime settings |
+| Character definitions and character-owned DDM profiles | Their explicit domain identities | Business assets can be carried by the appropriate MOC module |
+
+The host owns its configuration file and reconciles desired settings after
+initialization. Core does not discover that file. Runtime-settings `PUT` is
+complete replacement with defaults for omitted fields, not a partial update.
+Runtime policy has revision/CAS and is captured once for each foreground response.
+Prompt slots are read independently; there is no automatic host-file reload or
+atomic settings-plus-prompts transaction. Accepted maintenance batches and lifecycle events retain their captured
+inputs/settings for recovery. See [runtime settings](runtime_config_0_1.md)
+and [Prompt Spaces](maintenance_prompts.en.md) for the exact current behavior.
 
 Cancellation registrations have a drop guard. Cancelling or dropping an
 upstream request cannot leave a stale registration behind. Foreground streaming
@@ -105,6 +170,12 @@ All groups use the same `LocalStore` and SQLite pool. Response completion still
 commits the assistant message, maintenance evidence, state-operation completion
 and replay response in one transaction. Splitting source files must never split
 that transaction into independent repository calls.
+
+The response application captures a typed `ResponseEvidenceCapture` directly
+from its selected identity, evidence kind and configuration fingerprints.
+Storage checks its conversation identity and binds actual persisted user and
+assistant message IDs in that transaction. The serialized response remains a
+replay payload; storage does not interpret its `request_audit` to derive evidence.
 
 ## Cross-store memory commits
 
@@ -151,15 +222,22 @@ replaying prepared maintenance, lifecycle or review plans; cleared plans cannot
 resurrect content. Cleanup failure isolates the Space and preserves the intent
 for retry. Tests cover process exits during clearing and SQL cleanup failure.
 
-This first implementation stores complete after-images and scans snapshots at
-command boundaries; it trades additional I/O and disk space for one recovery
+Mutating commands retain complete after-images and scan their private snapshot;
+pure provenance/state reads do not export or journal a snapshot. Revision checks
+are batched once per Space/module instead of submitting one command per record.
+Snapshot export uses the worker's durable cached after-image. This trades
+additional mutation I/O and disk space for one recovery
 path covering existing low-level mutations. Incremental logging and scheduling
 optimizations must preserve this commit point and the fault-injection tests.
 An MOC operation covering multiple modules/Spaces and SQL repositories still
 is not one distributed transaction; each worker command is independently durable.
 After the initial migration checkpoint, direct filesystem edits are never
-ingested into the worker cache and are overwritten by journal reconstruction.
-Use the import APIs to change managed content durably.
+ingested into the worker cache. Before recovery or a durable write replaces a
+divergent materialization, its complete JSON snapshot is saved with a unique ID
+under `spaces/<space_id>/memory-recovery-backups`. This can contain external edits
+or a partially applied checkpoint. Failure to preserve it prevents replacement.
+Backups are retained locally, excluded from MOC, and never treated as authorized
+memory. Use the edit/import APIs to change managed content durably.
 
 SQLite migration `0024_prepared_maintenance_commit.sql` extends the existing
 maintenance and review records with a private prepared-file plan. It is runtime

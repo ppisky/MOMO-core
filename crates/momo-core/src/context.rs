@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ChatInput, TokenizerProfile};
 
-const CONTEXT_SAFETY_MARGIN: usize = 128;
+pub(crate) const CONTEXT_SAFETY_MARGIN: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextBudget {
@@ -74,7 +74,9 @@ pub struct ContextRequest<'a> {
 /// provider limit.
 #[must_use]
 pub fn prepare_context(request: ContextRequest<'_>) -> PreparedContext {
-    prepare_context_with_counter(request, &estimate_text_tokens)
+    prepare_context_with_message_tokens(request, &|message| {
+        estimate_message_tokens_with(message, &estimate_text_tokens)
+    })
 }
 
 /// Equivalent to [`prepare_context`] but uses the endpoint's declared exact
@@ -85,12 +87,25 @@ pub fn prepare_context_with_tokenizer(
     request: ContextRequest<'_>,
     tokenizer: &TokenizerProfile,
 ) -> PreparedContext {
-    prepare_context_with_counter(request, &|text| tokenizer.count_or_conservative(text))
+    let counter = |text: &str| tokenizer.count_or_conservative(text);
+    prepare_context_with_counter(request, &counter, &|message| {
+        estimate_message_tokens_with(message, &counter)
+    })
+}
+
+/// Budget evidence anchors using the messages they will expand into, while
+/// retaining the ordinary text counter for system sections and truncation.
+pub(crate) fn prepare_context_with_message_tokens(
+    request: ContextRequest<'_>,
+    message_tokens: &dyn Fn(&ChatInput) -> usize,
+) -> PreparedContext {
+    prepare_context_with_counter(request, &estimate_text_tokens, message_tokens)
 }
 
 fn prepare_context_with_counter(
     request: ContextRequest<'_>,
     counter: &dyn Fn(&str) -> usize,
+    message_tokens: &dyn Fn(&ChatInput) -> usize,
 ) -> PreparedContext {
     let input_limit = request
         .budget
@@ -111,7 +126,7 @@ fn prepare_context_with_counter(
         let newest_reserve = request
             .messages
             .last()
-            .map(|message| estimate_message_tokens_with(message, counter))
+            .map(message_tokens)
             .unwrap_or_default()
             .min(input_limit.div_ceil(2));
         let system_budget = input_limit.saturating_sub(newest_reserve);
@@ -134,7 +149,7 @@ fn prepare_context_with_counter(
     let mut reverse_messages = Vec::new();
     let mut history_tokens = 0_usize;
     for message in request.messages.iter().rev() {
-        let tokens = estimate_message_tokens_with(message, counter);
+        let tokens = message_tokens(message);
         if history_tokens.saturating_add(tokens) > available {
             // Always retain a meaningful part of the newest turn.  Older
             // oversized messages remain all-or-nothing so chronology stays
@@ -146,11 +161,13 @@ fn prepare_context_with_counter(
                 if !content.is_empty() {
                     let mut shortened = message.clone();
                     shortened.content = content;
-                    history_tokens = history_tokens
-                        .saturating_add(estimate_message_tokens_with(&shortened, counter));
-                    reverse_messages.push(shortened);
-                    if was_truncated {
-                        truncated_messages += 1;
+                    let shortened_tokens = message_tokens(&shortened);
+                    if shortened_tokens <= remaining {
+                        history_tokens = history_tokens.saturating_add(shortened_tokens);
+                        reverse_messages.push(shortened);
+                        if was_truncated {
+                            truncated_messages += 1;
+                        }
                     }
                 }
             }
@@ -191,6 +208,39 @@ pub fn estimate_text_tokens(value: &str) -> usize {
 
 fn estimate_message_tokens_with(message: &ChatInput, counter: &dyn Fn(&str) -> usize) -> usize {
     counter(&message.content).saturating_add(6)
+}
+
+/// Text and tool fields on the actual gateway message. Image token costs are
+/// provider-specific and are deliberately excluded from this text estimate.
+pub(crate) fn estimate_gateway_message_tokens(message: &crate::GatewayMessage) -> usize {
+    let content_tokens = match &message.content {
+        Some(crate::GatewayMessageContent::Text(text)) => estimate_text_tokens(text),
+        Some(crate::GatewayMessageContent::Parts(parts)) => parts
+            .iter()
+            .map(|part| match part {
+                crate::GatewayContentPart::Text { text } => estimate_text_tokens(text),
+                crate::GatewayContentPart::ImageUrl { .. } => 0,
+            })
+            .sum(),
+        None => 0,
+    };
+    let calls = if message.tool_calls.is_empty() {
+        0
+    } else {
+        estimate_text_tokens(
+            &serde_json::to_string(&message.tool_calls).expect("serializable tool calls"),
+        )
+    };
+    content_tokens
+        .saturating_add(calls)
+        .saturating_add(
+            message
+                .tool_call_id
+                .as_deref()
+                .map(estimate_text_tokens)
+                .unwrap_or_default(),
+        )
+        .saturating_add(6)
 }
 
 /// Fits message content into a total message budget (including the fixed wire

@@ -141,6 +141,22 @@ impl LocalStore {
         conversation_scope_id: Uuid,
         message: &Message,
     ) -> Result<bool, StorageError> {
+        self.append_response_user_message_with_context(
+            request_id,
+            conversation_scope_id,
+            message,
+            None,
+        )
+        .await
+    }
+
+    pub async fn append_response_user_message_with_context(
+        &self,
+        request_id: &str,
+        conversation_scope_id: Uuid,
+        message: &Message,
+        context: Option<&momo_domain::conversation::MessageContextPayload>,
+    ) -> Result<bool, StorageError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
             "SELECT conversation_id, user_written FROM response_operations WHERE request_id=?",
@@ -175,6 +191,15 @@ impl LocalStore {
                 .bind(message.conversation_id.to_string())
                 .execute(&mut *transaction)
                 .await?;
+        }
+        if let Some(context) = context {
+            super::message_context::insert_message_context(
+                &mut transaction,
+                message.id,
+                context,
+                false,
+            )
+            .await?;
         }
         sqlx::query(
             "UPDATE response_operations SET user_written=1, user_message_id=?, updated_at=? WHERE request_id=?",
@@ -213,6 +238,15 @@ impl LocalStore {
         &self,
         completion: ResponseCompletion<'_>,
     ) -> Result<bool, StorageError> {
+        self.commit_response_completion_with_context(completion, None)
+            .await
+    }
+
+    pub async fn commit_response_completion_with_context(
+        &self,
+        completion: ResponseCompletion<'_>,
+        context: Option<&momo_domain::conversation::MessageContextPayload>,
+    ) -> Result<bool, StorageError> {
         let ResponseCompletion {
             lifecycle_activity_json,
             request_id,
@@ -222,6 +256,7 @@ impl LocalStore {
             memory_enabled,
             nsg_enabled,
             mo_state_operation_id,
+            evidence,
             response_json,
         } = completion;
         let mut transaction = self.pool.begin().await?;
@@ -262,6 +297,19 @@ impl LocalStore {
                     .execute(&mut *transaction)
                     .await?;
             }
+            if let Some(context) = context {
+                super::message_context::insert_message_context(
+                    &mut transaction,
+                    message.id,
+                    context,
+                    false,
+                )
+                .await?;
+            }
+        } else if context.is_some() {
+            return Err(StorageError::Database(sqlx::Error::Protocol(
+                "message context requires an assistant anchor".into(),
+            )));
         }
         if let Some(turn) = maintenance_turn {
             if turn.request_id != request_id {
@@ -294,10 +342,10 @@ impl LocalStore {
                 .bind(request_id).bind(&turn.scope_id).bind(activity)
             .execute(&mut *transaction).await?;
         }
-        let response: serde_json::Value = serde_json::from_str(response_json)?;
-        if let Some(identity) = response.pointer("/momo/request_audit/memory_identity") {
-            let identity: momo_domain::provenance::MemoryIdentity =
-                serde_json::from_value(identity.clone())?;
+        // Validate the replay payload's syntax without interpreting its audit fields.
+        let _: serde_json::Value = serde_json::from_str(response_json)?;
+        if let Some(capture) = evidence {
+            let identity = &capture.identity;
             if identity.conversation_id.to_string() != conversation_id {
                 return Err(StorageError::Database(sqlx::Error::Protocol(
                     "captured evidence identity differs from response conversation".into(),
@@ -318,26 +366,13 @@ impl LocalStore {
             }
             let evidence = momo_domain::provenance::Evidence {
                 id: request_id.to_owned(),
-                kind: if response
-                    .pointer("/momo/request_audit/evidence_kind")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("tool")
-                {
-                    momo_domain::provenance::EvidenceKind::Tool
-                } else {
-                    momo_domain::provenance::EvidenceKind::Conversation
-                },
+                kind: capture.kind,
                 original_space_id: conversation_scope_id,
                 personal_space_id: identity.personal_space_id,
                 conversation_id: Some(identity.conversation_id),
                 character_id: Some(identity.character_id),
                 message_ids,
-                configuration: response
-                    .pointer("/momo/request_audit/evidence_configuration")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()?
-                    .unwrap_or_default(),
+                configuration: capture.configuration.clone(),
             };
             sqlx::query("INSERT INTO response_evidence(request_id,conversation_id,character_id,evidence_json,identity_json) VALUES(?,?,?,?,?)")
                 .bind(request_id).bind(identity.conversation_id.to_string()).bind(identity.character_id.to_string())

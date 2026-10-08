@@ -55,7 +55,7 @@ DMW、NSG 继续按 Space 存储和管理。助手是稳定的身份，提示词
 - 切换会话角色只影响之后的活动身份。历史消息与记忆的来源 MUST 保留事件发生时的身份，
   不能事后使用会话的当前 `character_id` 回填所有历史。
 
-当前 `assistant` Prompt Space 是进程级具名提示词槽位，不是用户 Space、功能 Space 或
+当前 `assistant` Prompt Space 是运行时实例级具名提示词槽位，不是用户 Space、功能 Space 或
 某个助手的身份。覆盖它影响所有走该回退路径的请求，不提供每用户助手身份隔离。
 当前新会话使用显式 `character_id` 或宿主为个人 Space 设置的默认角色映射；两条路径都有稳定角色身份。
 

@@ -123,7 +123,7 @@ DMW 与 NSG 使用独立的 `memory_done` / `nsg_done` 标记。
 | 自动 DMW 提炼 | 默认开启，每 12 个待处理轮次一批 | `/v1/runtime-settings` 的 `runtime.memory_distillation_enabled`、`memory_distill_every_turns`，轮数 1–200 |
 | 自动 NSG 治理 | 默认开启，每 12 个待处理轮次一批 | 同资源的 `semantic_graph_enabled`、`nsg_govern_every_turns`，轮数 1–200 |
 | MO State | 默认 `closed_autonomous`、场景管理开启、注入 `active` | 同资源的 `mo_state`；部分限制目前仅治理/审计，见 MO State 实现边界 |
-| 默认助手/提炼器/治理器提示词 | 进程级具名槽位 | `/v1/prompt-spaces/:id`，持久覆盖值 |
+| 默认助手/提炼器/治理器提示词 | 实例级具名槽位 | `/v1/prompt-spaces/:id`，持久覆盖值 |
 | DMW 衰减间隔与倍率 | 默认 48 个后续未命中交互，乘 0.9 | `mo_state.memory_lifecycle.decay_after_turns` / `decay_factor` |
 | DMW 自动归档 | 活跃 event 在衰减时低于 weight 0.2，importance < 0.8，且无保护 | 生命周期自动执行 |
 | DMW 自动遗忘 | 默认归档后 240 个后续未命中交互，并满足低权重等条件 | `forget_after_turns` / `auto_forget`；`enabled` 控制新生命周期事件 |
@@ -177,7 +177,7 @@ MO State 在合格响应完成后自动处理生命周期事件，并在后续�
 
 当前只有在请求没有获准的 `instructions`，且所选角色的 `character_markdown` 为空时，
 响应才使用 `assistant` 槽位。非空角色卡会抑制这一回退；获准的请求指令使用自身内容。
-槽位是进程级资源，覆盖值持久保存，后续读取生效；`DELETE` 恢复内置默认值。
+槽位是运行时实例级资源，覆盖值持久保存，后续读取生效；`DELETE` 恢复内置默认值。
 它不创建新身份、不删除记忆，也不等于给某个用户单独修改角色卡。
 
 代码依据：[实际选择分支](../crates/momo-core/src/orchestration/response.rs)、

@@ -111,7 +111,7 @@ impl MomoApiService {
     }
 
     pub(super) async fn recover_due_maintenance(&self, scope_id: &str) -> Vec<String> {
-        let config = self.config_snapshot();
+        let config = self.config_for_space(scope_id);
         let mut warnings = Vec::new();
         match uuid::Uuid::parse_str(scope_id) {
             Ok(space) => {
@@ -150,7 +150,7 @@ impl MomoApiService {
     }
 
     pub(super) fn schedule_maintenance(&self, scope_id: String) {
-        let config = self.config_snapshot();
+        let config = self.config_for_space(&scope_id);
         let core = self.runtime().core().clone();
         let lifecycle_space = scope_id.clone();
         let task = tokio::spawn(async move {
@@ -241,11 +241,30 @@ impl MomoApiService {
         threshold: usize,
         trigger: &str,
     ) -> Result<bool, MomoApiError> {
+        let timeout = self
+            .config_for_space(scope_id)
+            .mo_state
+            .operation_timeout_ms;
+        tokio::time::timeout(
+            Duration::from_millis(timeout),
+            self.maintain_with_trigger_inner(scope_id, kind, threshold, trigger),
+        )
+        .await
+        .map_err(|_| MomoApiError::timeout("MO State maintenance operation_timeout_ms exceeded"))?
+    }
+
+    async fn maintain_with_trigger_inner(
+        &self,
+        scope_id: &str,
+        kind: MaintenanceKind,
+        threshold: usize,
+        trigger: &str,
+    ) -> Result<bool, MomoApiError> {
         let normalized_scope = uuid::Uuid::parse_str(scope_id)
             .map_err(MomoApiError::bad_request)?
             .to_string();
         let scope_id = normalized_scope.as_str();
-        let config = self.config_snapshot();
+        let config = self.config_for_space(scope_id);
         if threshold == 0 {
             return Err(MomoApiError::bad_request(
                 "maintenance threshold must be positive",
@@ -360,12 +379,26 @@ impl MomoApiService {
             .await
             .map_err(MomoApiError::internal)?;
         if let Some(patch) = staged.clone() {
+            let captured = self
+                .runtime()
+                .core()
+                .store()
+                .maintenance_batch_provenance(&batch_key)
+                .await
+                .map_err(MomoApiError::internal)?
+                .map(|value| {
+                    serde_json::from_str::<momo_domain::provenance::RevisionContext>(&value)
+                })
+                .transpose()
+                .map_err(MomoApiError::internal)?
+                .unwrap_or_else(|| provenance.clone());
             let validation = validate_maintenance_patch(
                 self.runtime(),
                 scope_id,
                 kind,
                 patch,
-                provenance.clone(),
+                captured,
+                config.mo_state.scene_management,
             )
             .await;
             if let Err(error) = validation {
@@ -472,7 +505,9 @@ impl MomoApiService {
             if let Some(max_tokens) = maintenance_max_tokens {
                 maintenance_parameters["max_tokens"] = json!(max_tokens);
             }
+            let mut reconcile_attempts = 0;
             let generated_patch = loop {
+                reconcile_attempts += 1;
                 let user_content = repair_error.as_ref().map_or_else(
                     || maintenance_input.to_string(),
                     |error| {
@@ -532,7 +567,7 @@ impl MomoApiService {
                 let completion =
                     serde_json::to_value(completion).map_err(MomoApiError::internal)?;
                 if let Some(error) = maintenance_finish_error(&completion) {
-                    if repair_error.is_none() {
+                    if reconcile_attempts < config.mo_state.max_reconcile_steps {
                         repair_error = Some(format!(
                             "{error}. Regenerate a smaller complete patch. Prefer fewer complete targets and concise sections; never continue or complete the truncated YAML fragment."
                         ));
@@ -565,6 +600,7 @@ impl MomoApiService {
                             kind,
                             generated.clone(),
                             provenance.clone(),
+                            config.mo_state.scene_management,
                         )
                         .await
                     }
@@ -574,7 +610,8 @@ impl MomoApiService {
                     Ok(_)
                         if kind == MaintenanceKind::Memory
                             && memory_patch_is_noop(&generated)
-                            && repair_error.is_none() =>
+                            && repair_error.is_none()
+                            && reconcile_attempts < config.mo_state.max_reconcile_steps =>
                     {
                         repair_error = Some(
                             "The first pass returned an empty patch for a non-empty maintenance batch. Recheck every pending turn for explicit durable facts, corrections, commitments, boundaries, and activated outcomes. Return patches: [] again only if none are supported."
@@ -586,7 +623,7 @@ impl MomoApiService {
                             evidence_validation.map_err(MomoApiError::model)?;
                         break generated;
                     }
-                    Err(error) if repair_error.is_none() => {
+                    Err(error) if reconcile_attempts < config.mo_state.max_reconcile_steps => {
                         repair_error = Some(error.to_string());
                     }
                     Err(error) => {
@@ -715,6 +752,7 @@ async fn validate_maintenance_patch(
     kind: MaintenanceKind,
     patch: String,
     provenance: momo_domain::provenance::RevisionContext,
+    scene_management: bool,
 ) -> Result<(), String> {
     let parsed_scope_id = uuid::Uuid::parse_str(scope_id).map_err(|error| error.to_string())?;
     let _state_guard = runtime
@@ -736,6 +774,18 @@ async fn validate_maintenance_patch(
                 .prepare_patch_commit(&patch)
                 .map_err(|error| error.to_string()),
         }?;
+        let allow_scene = provenance
+            .configuration
+            .get("runtime_policy")
+            .and_then(|value| serde_json::from_str::<crate::MomoRuntimeSettings>(value).ok())
+            .map_or(scene_management, |settings| {
+                settings.mo_state.scene_management
+            });
+        if kind == MaintenanceKind::Memory && !allow_scene && plan.changes_current_scene() {
+            return Err(
+                "scene_management=false rejects automatic scene or active-thread mutations".into(),
+            );
+        }
         memory
             .trace_commit(plan, Some(parsed_scope_id), &provenance)
             .map(|_| ())
@@ -748,6 +798,35 @@ async fn validate_maintenance_patch(
 #[cfg(test)]
 mod recall_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disabled_scene_management_rejects_a_valid_model_scene_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = crate::MomoRuntime::initialize(dir.path()).await.unwrap();
+        let space = uuid::Uuid::now_v7();
+        let patch = "patches:\n  - target_file: current/scene.md\n    operations:\n      - type: append\n        section: Location\n        content: Harbor\n";
+        validate_maintenance_patch(
+            &runtime,
+            &space.to_string(),
+            MaintenanceKind::Memory,
+            patch.into(),
+            momo_domain::provenance::RevisionContext::manual("proposal"),
+            true,
+        )
+        .await
+        .unwrap();
+        let error = validate_maintenance_patch(
+            &runtime,
+            &space.to_string(),
+            MaintenanceKind::Memory,
+            patch.into(),
+            momo_domain::provenance::RevisionContext::manual("proposal"),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("scene_management=false"), "{error}");
+    }
 
     #[tokio::test]
     async fn distiller_receives_captured_personality_per_evidence_not_latest_profile() {

@@ -1,7 +1,7 @@
 # MOMO Core HTTP boundary 1.0
 
 **Status:** normative local transport contract
-**Updated:** 2026-09-03
+**Updated:** 2026-10-02
 
 `momo-server` is a loopback-oriented transport for MOMO Core. This document
 defines which parts of its `/v1` surface carry the MOMO 1.0 compatibility
@@ -58,10 +58,13 @@ file operations. Their request and response shapes may evolve with the workspace
 must not be used as a cross-version or remote public API without a host-owned
 adapter.
 
-`GET/PUT /v1/runtime-settings` manages the typed process-wide behavior resource.
+`GET/PUT /v1/runtime-settings` manages one runtime instance's typed behavior
+resource. `PUT` replaces the complete in-memory value; it is not persisted.
 `GET/PUT/DELETE /v1/prompt-spaces/{id}` manages the fixed prompt slots. MOMO
 does not read `momo.toml`; hosts translate their user configuration into these
 JSON APIs. MOC import/export does not carry runtime settings or prompt content.
+Prompt overrides are persisted in the runtime's data directory. See
+[runtime settings](runtime_config_0_1.md) for restart, replacement and update limits.
 
 `GET /v1/mo-state/runtime?space_id=<uuid>` exposes the local MO State manager
 status for diagnostics: the active profile, independent DMW/NSG/scene
@@ -111,6 +114,8 @@ do not use process-global Core state. HTTP handlers use these typed operations
 directly. The internal JSON wrapper API has been removed; native callers update
 to typed operations with the workspace. Runtime settings and persistent Prompt
 Spaces belong to `MomoRuntime`, not independently constructed execution services.
+No general FFI or C ABI is shipped. A future host binding should call these
+application operations and be designed for an actual integration requirement.
 See [architecture_1_0.md](architecture_1_0.md) for ownership and recovery boundaries.
 
 ## Memory recovery (local management)
@@ -152,3 +157,8 @@ See the [maintenance guide](memory_maintenance_current_behavior.zh-CN.md) and
 ## 2026-09-30 provenance profile update
 
 The working tree implements [memory provenance Profile 1](memory_provenance_runtime.md). This profile supersedes earlier planned-extension notes for identity, record eligibility, scoped scenes, source controls and the 12/2 context window. MOC preserves origin evidence while dropping imported local grants; source Space IDs are not rewritten by `space_map`.
+
+
+## Configuration management completion (2026-10-02)
+
+Runtime policy now persists with sparse Space overrides, PATCH and ETag/If-Match revision guards. Metadata and description routes expose effective sources and every field bound. State contracts use validated journaled GET/PUT/DELETE management; MO State generated DDM profiles have read/reset management. See [runtime settings](runtime_config_0_1.md) and the [complete control inventory](configuration_controls.zh-CN.md). These additions remain local administration, not frozen product wire.

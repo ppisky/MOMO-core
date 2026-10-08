@@ -1,7 +1,7 @@
 # MOMO Core 1.0 specification index
 
 **Status:** normative document precedence index
-**Updated:** 2026-09-30
+**Updated:** 2026-10-02
 
 When documents disagree, the current contracts in this section take
 precedence. Historical records explain earlier designs but do not define Core
@@ -12,6 +12,15 @@ precedence. Historical records explain earlier designs but do not define Core
 The current ownership, dependency and recovery implementation is described in
 [`architecture_1_0.md`](architecture_1_0.md). It does not override the wire or
 artifact contracts below.
+The [Chinese domain and configuration guide](domain_and_configuration_boundaries.zh-CN.md)
+clarifies current responsibilities, lifetimes and remaining gaps; it is an
+implementation guide and adds no DDD, FFI or configuration capability contract.
+
+Product documents define MOMO's contracts and the responsibilities of generic
+hosts, gateways and adapters. External applications' commands, configuration
+schemas, version requirements and release artifacts are not MOMO definitions.
+External format specifications, protocol names and attributed interoperability
+sources remain where needed to explain actual compatibility.
 
 | Area | Current contract | Status |
 | --- | --- | --- |
@@ -26,7 +35,8 @@ artifact contracts below.
 | Memory provenance and identity | [`memory_provenance_runtime.md`](memory_provenance_runtime.md) | Implemented working-tree local profile 1; awaiting review |
 | Activity-driven memory lifecycle | [`memory_lifecycle_runtime.md`](memory_lifecycle_runtime.md) | Implemented native MO State profile; replaces calendar aging on native/HTTP paths |
 | MOC | [`MOMO_Container_v3.md`](../MOMO_Container_v3.md) | Implemented v3 |
-| Instance runtime settings | [`runtime_config_0_1.md`](runtime_config_0_1.md) | Implemented local administration API |
+| Runtime settings and Space overrides | [`runtime_config_0_1.md`](runtime_config_0_1.md) | Persisted local administration API with PATCH and revision/CAS |
+| Configuration and control inventory | [`configuration_controls.zh-CN.md`](configuration_controls.zh-CN.md) | Complete current route/method inventory and configuration boundaries |
 | Prompt Spaces | [`maintenance_prompts.en.md`](maintenance_prompts.en.md) | Implemented local administration API |
 | LSB carrier | [`momo_lsb_carrier_v1.md`](momo_lsb_carrier_v1.md) | Implemented carrier v1 |
 | Private MOC encryption | [`encryption_profile_0_1.md`](encryption_profile_0_1.md) | Implemented envelope v1 |

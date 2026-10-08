@@ -2,9 +2,10 @@
 
 [English](maintenance_prompts.en.md)
 
-Prompt Spaces 是进程级的具名提示词资源。MOMO Core 仍然随二进制提供经过审查的
-Markdown 默认值，但运行值不再只能由编译结果决定。宿主通过原生 HTTP API 替换当前值，
-Core 将覆盖值作为内部 JSON 状态持久化在数据根目录下，不从 `momo.toml` 读取提示词正文。
+Prompt Spaces 是运行时实例所有的具名提示词资源。MOMO Core 仍然随二进制提供经过审查的
+Markdown 默认值，但运行值不再只能由编译结果决定。宿主通过类型化 `PromptSpaces` Rust API
+或原生 HTTP API 替换当前值；`MomoRuntime` 将覆盖值持久化到
+`<data_dir>/prompt-spaces.json`，不从 `momo.toml` 读取提示词正文。
 
 ## 固定槽位
 
@@ -15,6 +16,7 @@ Core 将覆盖值作为内部 JSON 状态持久化在数据根目录下，不从
 | `roleplay_director` | 前台角色表演策略 |
 | `memory_distillation` | DMW 后台提炼策略 |
 | `semantic_graph_governance` | NSG 后台治理策略 |
+| `ddm_profile_generation` | MO State 从角色描述建立 DDM 派生规则的策略 |
 
 这些 id 是封闭契约，不允许随意创建新名字，避免拼写错误悄悄产生无人使用的状态。
 Prompt Space 不是 Space，没有用户级所有权，也不随 MOC 导入或导出。
@@ -24,14 +26,16 @@ Prompt Space 不是 Space，没有用户级所有权，也不随 MOC 导入或�
 这里指默认通用系统提示词的配置入口，不要求在对话中途编辑角色卡；角色卡编辑是另一个
 资源操作。提炼/治理提示词也不能修改由代码强制执行的遗忘时间、归档阈值或 Canon 权限。
 
-`assistant` 是进程级提示词槽位，不是默认助手的身份标识。替换或恢复提示词只修改行为配置，
+`assistant` 是实例级提示词槽位，不是默认助手的身份标识。替换或恢复提示词只修改行为配置，
 不代表创建新助手、切换角色或重置记忆；返回的 `revision` 也不能用作助手 ID。
 宿主把默认选择从 A 改成 B 时，则需要保留 A、B 各自的稳定身份。
-此 API 不提供每用户或每助手的独立提示词槽位，覆盖值作用于所有使用该回退路径的请求。
+此 API 不提供每用户或每助手的独立提示词槽位，覆盖值作用于同一运行时中使用该回退路径的请求。
+共享运行时的服务共享注册表；独立构造的运行时不共享其内存所有者。
 
-[记忆身份、来源与共享设计](memory_identity_and_provenance.md)进一步定义默认助手、历史
-证据身份和跨助手记忆的目标规则；其完整来源链与适用性校验尚未实现。当前原生响应新会话
-仍要求有效的 `character_id`，不能把提示词槽位本身当作无角色身份的会话入口。
+已经实现的[provenance Profile 1](memory_provenance_runtime.md)定义捕获的历史身份、证据、
+记录适用性与宿主所有的默认助手映射。[记忆身份、来源与共享设计](memory_identity_and_provenance.md)
+保留更广的目标规则；与当前实现不同之处应以实现 profile 为准。原生响应创建需要有效的
+显式角色身份或宿主映射的默认角色身份，不能把提示词槽位本身当作无角色身份的会话入口。
 
 ## HTTP API
 
@@ -54,6 +58,9 @@ DELETE /v1/prompt-spaces/assistant
 `DELETE` 只删除覆盖值并恢复编译期默认值，不会删除这个具名槽位。替换无需重启即可被后续
 提示词读取看见，并能跨重启保留。Core 先完成持久化再提交内存状态，因此磁盘写入失败时，
 不会出现 API 报错但进程却偷偷采用了新值的情况。
+独立创建的 `PromptSpaces::in_memory()` 不落盘；上面的跨重启行为对应正常加载的运行时。
+内容哈希是指纹，不是递增版本或 CAS 令牌。响应和维护阶段分别读取槽位，没有把所有提示词
+与运行时设置一起固定为一个全程快照。
 
 只有响应既没有通过治理的 `instructions`、也没有载入非空角色卡时，Core 才使用
 `assistant`。角色卡存在时，通用助手提示词会被省略；若策略允许显式请求级
@@ -66,15 +73,20 @@ DELETE /v1/prompt-spaces/assistant
 
 ## 与宿主配置的边界
 
-宿主可以用任意格式承载面向用户的配置。例如 mobot 可以读取自己的 TOML 提示词设置，
-完成宿主侧校验后，在启动或配置协调阶段逐项发送 `PUT`：
+宿主可以用任意格式承载面向用户的配置，校验期望的提示词内容后，在启动或配置协调阶段
+通过类型化 Rust API 或 HTTP API 逐项更新槽位：
 
 ```text
-用户配置 -> 宿主校验 -> HTTP PUT /v1/prompt-spaces/:id -> MOMO
+用户配置 -> 宿主校验 -> PromptSpaces::replace 或 HTTP PUT -> MOMO
 ```
 
-转换逻辑属于 mobot。MOMO 不解析 mobot 配置、不接收其中的提示词文件路径，也不恢复过去
-把提示词正文塞回 TOML 的方式。这样所有宿主都能使用同一套 API，mobot 不会成为协议依赖。
+转换逻辑和本地文件读取属于宿主。MOMO 通过资源 API 接收提示词正文，不规定宿主产品、
+配置文件名或提示词文件布局。
+
+从宿主配置文件省略某个提示词，并不会删除已保存的覆盖值。把文件当作权威配置的宿主需要
+显式调用 `PromptSpaces::reset` 或 HTTP `DELETE`，让相应槽位恢复默认值。
+运行时设置也持久化，并支持 PUT 完整替换、PATCH 与 Space 覆盖；提示词仍按槽位管理。详见
+[运行时设置](runtime_config_0_1.md)与[领域及配置边界](domain_and_configuration_boundaries.zh-CN.md)。
 
 ## 源码与验证
 

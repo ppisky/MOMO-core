@@ -25,15 +25,17 @@ pub enum PromptSpaceId {
     RoleplayDirector,
     MemoryDistillation,
     SemanticGraphGovernance,
+    DdmProfileGeneration,
 }
 
 impl PromptSpaceId {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Assistant,
         Self::VisionFallback,
         Self::RoleplayDirector,
         Self::MemoryDistillation,
         Self::SemanticGraphGovernance,
+        Self::DdmProfileGeneration,
     ];
 
     #[must_use]
@@ -44,6 +46,7 @@ impl PromptSpaceId {
             Self::RoleplayDirector => "roleplay_director",
             Self::MemoryDistillation => "memory_distillation",
             Self::SemanticGraphGovernance => "semantic_graph_governance",
+            Self::DdmProfileGeneration => "ddm_profile_generation",
         }
     }
 
@@ -55,6 +58,7 @@ impl PromptSpaceId {
             Self::RoleplayDirector => product_prompts::ROLEPLAY_DIRECTOR,
             Self::MemoryDistillation => product_prompts::MEMORY_DISTILLATION,
             Self::SemanticGraphGovernance => product_prompts::SEMANTIC_GRAPH_GOVERNANCE,
+            Self::DdmProfileGeneration => product_prompts::DDM_PROFILE_GENERATION,
         }
     }
 }
@@ -105,7 +109,8 @@ struct PromptSpacesInner {
     overrides: crate::OwnedState<BTreeMap<PromptSpaceId, String>>,
 }
 
-/// Process-wide prompt registry. Clones share one atomically updated set of overrides.
+/// Runtime-owned prompt registry. Clones share its overrides; separately
+/// constructed registries do not share an in-memory owner.
 #[derive(Debug, Clone)]
 pub struct PromptSpaces {
     inner: Arc<PromptSpacesInner>,

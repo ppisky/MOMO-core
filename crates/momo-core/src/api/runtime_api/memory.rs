@@ -79,11 +79,12 @@ async fn prepare_dmw_scope(
     space: uuid::Uuid,
     identity: &momo_domain::provenance::MemoryIdentity,
 ) -> RuntimeApiResult<momo_memory::MemoryRetrievalScope> {
-    let workspace = core
-        .memory_for_space(space)
-        .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+    let workspace_core = core.clone();
     let identity_copy = identity.clone();
     let (mut current, mut items) = run_blocking("prepare scoped recall", move || {
+        let workspace = workspace_core
+            .memory_for_space(space)
+            .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
         let current = workspace
             .scoped_current(&identity_copy)
             .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
@@ -299,12 +300,7 @@ pub(crate) async fn retrieve_scoped_memory_snapshot(
                 observed_spaces
                     .into_iter()
                     .map(|(space_id, parsed_space_id)| {
-                        let mut source = core
-                            .memory_for_space(parsed_space_id)
-                            .map_err(|error| RuntimeApiError::internal(error.to_string()))?
-                            .mo_state_source_fingerprint()
-                            .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-                        if let Some(identity) = &observation_identity {
+                        let source = if let Some(identity) = &observation_identity {
                             use sha2::{Digest, Sha256};
                             let records: Vec<_> = qualified_sources
                                 .iter()
@@ -317,9 +313,6 @@ pub(crate) async fn retrieve_scoped_memory_snapshot(
                             let encoded = serde_json::to_vec(&(identity, &records))
                                 .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
                             let hash = hex::encode(Sha256::digest(encoded));
-                            source.dmw = hash.clone();
-                            source.nsg = hash.clone();
-                            source.scene = hash.clone();
                             let body = |path: &str| {
                                 records
                                     .iter()
@@ -327,12 +320,22 @@ pub(crate) async fn retrieve_scoped_memory_snapshot(
                                     .and_then(|item| item["body"].as_str())
                                     .unwrap_or_default()
                             };
-                            source.scene_snapshot = momo_memory::scene::parse_scene(
-                                body("current/scene.md"),
-                                body("current/active_threads.md"),
-                                &hash,
-                            );
-                        }
+                            momo_memory::MoStateSourceFingerprint {
+                                dmw: hash.clone(),
+                                nsg: hash.clone(),
+                                scene: hash.clone(),
+                                scene_snapshot: momo_memory::scene::parse_scene(
+                                    body("current/scene.md"),
+                                    body("current/active_threads.md"),
+                                    &hash,
+                                ),
+                            }
+                        } else {
+                            core.memory_for_space(parsed_space_id)
+                                .map_err(|error| RuntimeApiError::internal(error.to_string()))?
+                                .mo_state_source_fingerprint()
+                                .map_err(|error| RuntimeApiError::internal(error.to_string()))?
+                        };
                         Ok(momo_storage::MoStateSourceObservation {
                             space_id,
                             dmw_fingerprint: source.dmw,

@@ -155,8 +155,9 @@ impl MomoApiService {
 
     pub(super) async fn gateway_response_budget(
         &self,
+        model: &str,
     ) -> Result<GatewayGenerationCapability, String> {
-        self.gateway_generation_capability("conversation").await
+        self.gateway_generation_capability(model).await
     }
 
     pub(super) async fn gateway_generation_capability(

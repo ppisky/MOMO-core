@@ -19,10 +19,21 @@ use uuid::Uuid;
 
 const MAX_WORKERS: usize = 128;
 type Job = Box<dyn FnOnce(&mut SpaceWorker) + Send>;
-type Lookup = (
-    Uuid,
-    mpsc::SyncSender<Result<Arc<SpaceHandle>, MemoryError>>,
-);
+type LookupReply = mpsc::SyncSender<Result<LookupResult, MemoryError>>;
+#[cfg(test)]
+type StartupGate = (Uuid, mpsc::SyncSender<()>, mpsc::Receiver<()>);
+enum LookupResult {
+    Ready(Arc<SpaceHandle>),
+    Initialize,
+}
+enum SupervisorRequest {
+    Lookup(Uuid, LookupReply),
+    Initialized(Uuid, Result<Arc<SpaceHandle>, String>),
+}
+enum WorkerEntry {
+    Starting(Vec<LookupReply>),
+    Ready(Arc<SpaceHandle>),
+}
 
 fn unavailable(message: impl std::fmt::Display) -> MemoryError {
     MemoryError::InvalidPatch(format!("Space worker unavailable: {message}"))
@@ -36,8 +47,12 @@ pub(crate) struct SpaceSupervisor {
 
 #[derive(Debug)]
 struct SupervisorOwner {
-    sender: Option<mpsc::SyncSender<Lookup>>,
+    sender: Option<mpsc::SyncSender<SupervisorRequest>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    root: PathBuf,
+    instance_lock: Arc<std::fs::File>,
+    #[cfg(test)]
+    startup_gate: std::sync::Mutex<Option<StartupGate>>,
 }
 impl Drop for SupervisorOwner {
     fn drop(&mut self) {
@@ -63,47 +78,77 @@ impl SpaceSupervisor {
     ) -> Result<Self, MemoryError> {
         let failures: Arc<crate::OwnedState<std::collections::BTreeMap<Uuid, String>>> =
             Arc::default();
-        let worker_failures = Arc::clone(&failures);
-        let (sender, receiver) = mpsc::sync_channel::<Lookup>(64);
+        let (sender, receiver) = mpsc::sync_channel::<SupervisorRequest>(64);
         let thread = std::thread::Builder::new()
             .name("space-supervisor".into())
             .spawn(move || {
-                let mut workers: HashMap<Uuid, Arc<SpaceHandle>> = HashMap::new();
-                while let Ok((id, reply)) = receiver.recv() {
+                let mut workers: HashMap<Uuid, WorkerEntry> = HashMap::new();
+                while let Ok(request) = receiver.recv() {
+                    let (id, reply) = match request {
+                        SupervisorRequest::Lookup(id, reply) => (id, reply),
+                        SupervisorRequest::Initialized(id, result) => {
+                            let Some(WorkerEntry::Starting(waiters)) = workers.remove(&id) else {
+                                continue;
+                            };
+                            match result {
+                                Ok(handle) => {
+                                    for reply in waiters {
+                                        let _ = reply.send(Ok(LookupResult::Ready(Arc::clone(&handle))));
+                                    }
+                                    workers.insert(id, WorkerEntry::Ready(handle));
+                                }
+                                Err(error) => {
+                                    for reply in waiters {
+                                        let _ = reply.send(Err(unavailable(&error)));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    };
                     if !workers.contains_key(&id) && workers.len() >= limit {
                         // Only evict addresses that no caller or admitted command owns.
                         if let Some(idle) = workers
                             .iter()
-                            .find(|(_, h)| Arc::strong_count(h) == 1)
+                            .find(|(_, entry)| matches!(entry, WorkerEntry::Ready(h) if Arc::strong_count(h) == 1))
                             .map(|(id, _)| *id)
                         {
                             workers.remove(&idle);
                         }
                     }
-                    let result = if let Some(handle) = workers.get(&id) {
-                        Ok(Arc::clone(handle))
+                    let result = if let Some(entry) = workers.get_mut(&id) {
+                        match entry {
+                            WorkerEntry::Ready(handle) => Ok(LookupResult::Ready(Arc::clone(handle))),
+                            WorkerEntry::Starting(waiters) => {
+                                if waiters.len() >= 64 {
+                                    Err(unavailable("Space initialization queue full"))
+                                } else {
+                                    waiters.push(reply);
+                                    continue;
+                                }
+                            }
+                        }
                     } else if workers.len() >= limit {
                         Err(MemoryError::WorkspaceCapacity { limit })
                     } else {
-                        SpaceHandle::start(
-                            root.join(id.to_string()).join("memory"),
-                            Arc::clone(&instance_lock),
-                            id,
-                            Arc::clone(&worker_failures),
-                        )
-                        .map(|handle| {
-                            let handle = Arc::new(handle);
-                            workers.insert(id, Arc::clone(&handle));
-                            handle
-                        })
+                        workers.insert(id, WorkerEntry::Starting(Vec::new()));
+                        Ok(LookupResult::Initialize)
                     };
-                    let _ = reply.send(result);
+                    if reply.send(result).is_err()
+                        && matches!(workers.get(&id), Some(WorkerEntry::Starting(waiters)) if waiters.is_empty())
+                    {
+                        workers.remove(&id);
+                    }
                 }
             })?;
         Ok(Self {
             owner: Arc::new(SupervisorOwner {
                 sender: Some(sender),
                 thread: Some(thread),
+                root,
+                instance_lock,
+                #[cfg(test)]
+                startup_gate: std::sync::Mutex::new(None),
             }),
             failures,
         })
@@ -119,9 +164,48 @@ impl SpaceSupervisor {
             .sender
             .as_ref()
             .expect("live supervisor")
-            .send((id, reply))
+            .send(SupervisorRequest::Lookup(id, reply))
             .map_err(unavailable)?;
-        result.recv().map_err(unavailable)?
+        match result.recv().map_err(unavailable)?? {
+            LookupResult::Ready(handle) => Ok(handle),
+            LookupResult::Initialize => {
+                // Capacity and identity are reserved by the registry, but disk
+                // recovery runs outside it. Other addresses remain available.
+                #[cfg(test)]
+                {
+                    let gate = {
+                        let mut gate = self.owner.startup_gate.lock().unwrap();
+                        if gate.as_ref().is_some_and(|(target, _, _)| *target == id) {
+                            gate.take()
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((_, started, resume)) = gate {
+                        started.send(()).unwrap();
+                        resume.recv().unwrap();
+                    }
+                }
+                let initialized = SpaceHandle::start(
+                    self.owner.root.join(id.to_string()).join("memory"),
+                    Arc::clone(&self.owner.instance_lock),
+                    id,
+                    Arc::clone(&self.failures),
+                )
+                .map(Arc::new);
+                let announcement = initialized
+                    .as_ref()
+                    .map(Arc::clone)
+                    .map_err(ToString::to_string);
+                self.owner
+                    .sender
+                    .as_ref()
+                    .expect("live supervisor")
+                    .send(SupervisorRequest::Initialized(id, announcement))
+                    .map_err(unavailable)?;
+                initialized
+            }
+        }
     }
 }
 
@@ -197,6 +281,25 @@ impl SpaceHandle {
         self.submit(move |worker| worker.execute(operation))
     }
 
+    /// Only operations that cannot mutate workspace files use this path.
+    /// Reads still run in the owned worker and obey pending-clear isolation.
+    pub(crate) fn call_read<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&MemoryWorkspace) -> Result<T, MemoryError> + Send + 'static,
+    ) -> Result<T, MemoryError> {
+        self.submit(move |worker| {
+            worker.require_available()?;
+            operation(&worker.cache)
+        })
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<MemorySnapshot, MemoryError> {
+        self.submit(|worker| {
+            worker.require_available()?;
+            Ok(worker.cached_snapshot.clone())
+        })
+    }
+
     fn submit<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&mut SpaceWorker) -> Result<T, MemoryError> + Send + 'static,
@@ -245,6 +348,12 @@ struct SpaceWorker {
 }
 
 impl SpaceWorker {
+    fn require_available(&mut self) -> Result<(), MemoryError> {
+        if self.pending_clear()?.is_some() {
+            return Err(unavailable("memory clear awaiting database cleanup"));
+        }
+        Ok(())
+    }
     fn open(root: &Path) -> Result<Self, MemoryError> {
         catch_unwind(AssertUnwindSafe(|| Self::restore(root)))
             .map_err(|_| unavailable("panic while rebuilding from journal"))?
@@ -304,6 +413,7 @@ impl SpaceWorker {
         for row in pending {
             let snapshot: MemorySnapshot =
                 serde_json::from_str(row.get("snapshot")).map_err(unavailable)?;
+            Self::preserve_materialized_changes(&workspace, &snapshot)?;
             workspace.import_snapshot(&snapshot)?;
             runtime
                 .block_on(
@@ -361,9 +471,7 @@ impl SpaceWorker {
         operation: impl FnOnce(&MemoryWorkspace) -> Result<T, MemoryError>,
         clear: Option<(bool, bool)>,
     ) -> Result<T, MemoryError> {
-        if self.pending_clear()?.is_some() {
-            return Err(unavailable("memory clear awaiting database cleanup"));
-        }
+        self.require_available()?;
         let before = self.cached_snapshot.clone();
         let result = match operation(&self.cache) {
             Ok(result) => result,
@@ -413,6 +521,9 @@ impl SpaceWorker {
         if before.files == after.files && self.checkpointed && clear.is_none() {
             return Ok(());
         }
+        // Preserve edits to the materialized copy before any durable mutation
+        // or recovery can replace them. Backup failure must stop the write.
+        Self::preserve_materialized_changes(&self.workspace, before)?;
         #[cfg(test)]
         self.crash_at(0);
         let encoded = serde_json::to_string(after).map_err(unavailable)?;
@@ -471,6 +582,41 @@ impl SpaceWorker {
                     .execute(&mut self.journal),
             )
             .map_err(unavailable)?;
+        Ok(())
+    }
+
+    fn preserve_materialized_changes(
+        workspace: &MemoryWorkspace,
+        expected: &MemorySnapshot,
+    ) -> Result<(), MemoryError> {
+        use std::io::Write;
+        let current = workspace.export_snapshot()?;
+        if current.files == expected.files {
+            return Ok(());
+        }
+        let directory = workspace
+            .root()
+            .parent()
+            .expect("Space directory")
+            .join("memory-recovery-backups");
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(MemoryError::UnsafePath(directory));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&directory)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let path = directory.join(format!("{}.json", Uuid::now_v7()));
+        let mut backup = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        backup.write_all(&serde_json::to_vec(&current).map_err(unavailable)?)?;
+        backup.sync_all()?;
+        tracing::warn!(path = %path.display(), "preserved divergent memory files before journal materialization");
         Ok(())
     }
 }

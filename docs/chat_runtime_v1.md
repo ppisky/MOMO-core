@@ -112,21 +112,26 @@ prompt. Otherwise, the gateway's optional `vision` route must advertise the
 image bytes. A pending operation stores its resolved input and vision usage, so
 a crash/retry does not repeat visual inference.
 
-For a direct multimodal turn, persisted text history contains the user's text
-and an image-count marker, not image bytes or a generated description. The
-original image is therefore available to the conversation model only on that
-turn. The text-only fallback path persists its bounded visual description, so
-that description remains available later. Hosts that need durable visual recall
-with a multimodal main model must explicitly supply safe text or store an
-authorized memory; Core does not retain remote image URLs as chat history.
+For a direct multimodal turn, text history retains the user's text and an
+image-count marker; typed message context stores the original references/data
+URLs atomically with the user message. Remote images are not downloaded and
+their continued availability depends on the source. Retained history restores
+original image blocks when vision is enabled and the current route supports
+images. The current request takes priority within the eight-image limit, then
+the newest complete historical image groups are admitted. Unsupported or excess
+groups are omitted with `request_audit.history_context.omitted_blocks` recorded.
+The text-only fallback path continues to persist its bounded description.
 
 A tool continuation must identify an existing conversation and include exactly
 one preceding `function_call` for each `function_call_output`, paired by
 `call_id`. It is a new idempotent response operation in the same conversation,
 not a resume of the original response request ID. Tool-only JSON participates
 in the current model call and is classified as a `tool_result`, but it is not
-persisted as a user-authored chat message. The completed textual assistant
-answer is persisted normally. Durable paused-run state and Core-enforced
+persisted as a user-authored chat message. Its completed call/result pairs are
+stored atomically with the assistant anchor, including an empty anchor if needed,
+and replayed as native assistant/tool messages in later retained history. Message
+contexts are scoped, survive restart/deletion restore, and travel in the optional
+MOC conversation `message-context.json`. Durable paused-run state and Core-enforced
 multi-step tool-loop limits are outside `momo.responses/1.0`.
 
 ## Context and budget
@@ -137,6 +142,12 @@ effective context window and output reserve come from capability discovery and
 portable request governance. If optional embedding, retrieval, or MO State
 work fails, the response continues with a warning; failure of the selected
 conversation or vision model route fails the operation.
+When history-window eviction is enabled, SQL locates the complete-turn cutoff
+using role/timestamp metadata before loading retained message bodies and their
+typed contexts. Tool evidence is budgeted as one complete block and expands only
+if the whole block survives preparation. Omitted or truncated blocks are audited;
+no dangling tool result is sent. Historical image tokens remain excluded from
+the text estimate and this is explicitly flagged in `history_context`.
 
 When the system content exceeds its available budget, Core allocates capped
 weighted shares to runtime instructions / character / user / memory / state /

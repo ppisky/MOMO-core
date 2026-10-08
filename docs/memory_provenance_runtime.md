@@ -11,6 +11,9 @@
 完成响应时，SQLite 在同一事务写入助手消息、维护轮、请求重放和 `response_evidence`。
 证据记录当时的个人 Space、原始对话 Space、对话、角色、实际消息 ID、助手/角色配置版本。
 工具续接标为 `tool`，不会虚构用户消息。角色切换和提示词变化不回填旧证据。
+响应应用直接捕获类型化 `ResponseEvidenceCapture`；存储在完成事务中校验会话身份并绑定
+实际持久化的消息 ID，不从响应审计 JSON 反向推导证据。配置指纹描述当时捕获的输入，
+不代表全程固定的运行时配置版本；设置和提示词的更新限制见[运行时设置](runtime_config_0_1.md)。
 默认助手使用已有角色资源：本机为个人 Space 选择一个 `character_id`；未显式选角色的新会话
 使用该映射，未配置映射时仍拒绝无角色的新会话。改变默认选择不修改既有会话身份。
 
@@ -23,7 +26,8 @@ DMW 使用 `config/provenance.json`，NSG 使用 `rules/provenance.json`。文�
 实际维护提示词与配置。原始证据集合在修订中保留；审批追加动作，不把模型提案改成用户原创。
 NSG 候选的历史在批准/拒绝后继续保留。手工编辑没有对话出处时保持未知，不制造消息引用。
 内容与来源一起进入现有 prepared commit；后台维护和 Patch Review 使用已有 SQL 持久恢复。
-普通手工写入仍采用已有文件事务/回滚边界，不宣称所有管理操作已经具备进程崩溃原子性。
+普通手工写入也经过 Space worker 的 after-image journal；完整多模块导入仍不是一个跨存储
+原子事务，恢复与提交边界见[当前架构](architecture_1_0.md)。
 
 DMW/NSG 的每个 Patch item 可增加 `evidence_refs: [<captured response evidence ID>]`。
 运行时验证引用属于本批可信证据；模型不能签发来源或批准。明确引用只是可追踪的支持声明，

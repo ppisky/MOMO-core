@@ -189,6 +189,142 @@ async fn unrelated_space_is_not_blocked_by_a_busy_worker() {
     task.join().unwrap().unwrap();
 }
 
+#[test]
+fn cold_space_initialization_does_not_block_existing_addresses() {
+    let directory = tempfile::tempdir().unwrap();
+    let lock = Arc::new(crate::acquire_instance_lock(directory.path()).unwrap());
+    let supervisor = Arc::new(
+        SpaceSupervisor::start_with_limit(directory.path().join("spaces"), lock, 2).unwrap(),
+    );
+    let hot_id = Uuid::now_v7();
+    let hot = supervisor.space(hot_id).unwrap();
+    let cold_id = Uuid::now_v7();
+    let (started, waiting) = mpsc::sync_channel(1);
+    let (release, resume) = mpsc::sync_channel(1);
+    *supervisor.owner.startup_gate.lock().unwrap() = Some((cold_id, started, resume));
+    let cold_supervisor = Arc::clone(&supervisor);
+    let cold = std::thread::spawn(move || cold_supervisor.space(cold_id));
+    waiting
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .unwrap();
+    let hot_supervisor = Arc::clone(&supervisor);
+    let (reply, result) = mpsc::sync_channel(1);
+    let lookup = std::thread::spawn(move || {
+        reply.send(hot_supervisor.space(hot_id)).unwrap();
+    });
+    let outcome = result.recv_timeout(std::time::Duration::from_secs(3));
+    release.send(()).unwrap();
+    cold.join().unwrap().unwrap();
+    lookup.join().unwrap();
+    assert!(Arc::ptr_eq(&hot, &outcome.unwrap().unwrap()));
+}
+
+#[tokio::test]
+async fn provenance_reads_do_not_enter_the_snapshot_commit_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = crate::MomoCore::initialize(directory.path()).await.unwrap();
+    let worker = core.memory_for_space(Uuid::now_v7()).unwrap();
+    worker.apply_patch(PATCH).unwrap();
+    fault(&worker, 0);
+    let ledger = worker.provenance(false).unwrap();
+    assert_eq!(
+        worker
+            .record_revisions_match_in_ledger(
+                Arc::new(ledger),
+                vec![("owned_event".into(), "events/owned.md".into())],
+            )
+            .unwrap(),
+        vec![true]
+    );
+    worker.export_snapshot().unwrap();
+    assert!(
+        worker
+            .replace_document_body("owned_event", "New body")
+            .is_err()
+    );
+    assert_eq!(
+        worker.read_document_by_id("owned_event").unwrap().body,
+        "Durable worker event."
+    );
+}
+
+#[tokio::test]
+async fn divergent_materialized_edits_are_preserved_before_recovery_and_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = Uuid::now_v7();
+    let space = directory.path().join("spaces").join(id.to_string());
+    {
+        let core = crate::MomoCore::initialize(directory.path()).await.unwrap();
+        let worker = core.memory_for_space(id).unwrap();
+        worker.apply_patch(PATCH).unwrap();
+        std::fs::write(worker.root().join("events/owned.md"), "Live external edit").unwrap();
+        worker
+            .replace_document_body("owned_event", "Authorized change")
+            .unwrap();
+    }
+    std::fs::write(
+        space.join("memory/events/owned.md"),
+        "Offline external edit",
+    )
+    .unwrap();
+    let core = crate::MomoCore::initialize(directory.path()).await.unwrap();
+    let worker = core.memory_for_space(id).unwrap();
+    assert_eq!(
+        worker.read_document_by_id("owned_event").unwrap().body,
+        "Authorized change\n"
+    );
+    let preserved: Vec<_> = std::fs::read_dir(space.join("memory-recovery-backups"))
+        .unwrap()
+        .map(|entry| {
+            let snapshot: MemorySnapshot =
+                serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+            snapshot.files["events/owned.md"].clone()
+        })
+        .collect();
+    assert!(preserved.contains(&"Live external edit".into()));
+    assert!(preserved.contains(&"Offline external edit".into()));
+}
+
+#[tokio::test]
+async fn backup_failure_prevents_overwriting_external_edits_or_committing_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = Uuid::now_v7();
+    let space = directory.path().join("spaces").join(id.to_string());
+    let core = crate::MomoCore::initialize(directory.path()).await.unwrap();
+    let worker = core.memory_for_space(id).unwrap();
+    worker.apply_patch(PATCH).unwrap();
+    let expected = worker.export_snapshot().unwrap();
+    std::fs::write(
+        space.join("memory-recovery-backups"),
+        "blocked backup directory",
+    )
+    .unwrap();
+    std::fs::write(
+        worker.root().join("events/owned.md"),
+        "External edit must survive",
+    )
+    .unwrap();
+    assert!(
+        worker
+            .replace_document_body("owned_event", "Must not commit")
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(worker.root().join("events/owned.md")).unwrap(),
+        "External edit must survive"
+    );
+    // Repair the backup destination; recovery must restore the last durable
+    // revision, never the rejected private after-image.
+    std::fs::remove_file(space.join("memory-recovery-backups")).unwrap();
+    assert_eq!(worker.export_snapshot().unwrap().files, expected.files);
+    assert_eq!(
+        std::fs::read_dir(space.join("memory-recovery-backups"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
 // Invoked in a child test process by the test below. exit(91) deliberately
 // skips unwinding, destructors, SQLite close and supervisor shutdown.
 #[tokio::test]

@@ -1,4 +1,5 @@
-//! TOML-based runtime configuration loading without freezing a product schema.
+//! TOML document utilities for portable assets, without a fixed product schema.
+//! This crate does not discover or apply MOMO runtime settings.
 
 use std::{
     fs,

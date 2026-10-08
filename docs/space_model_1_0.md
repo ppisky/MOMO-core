@@ -14,7 +14,7 @@ one owner.
 A MOMO Space is a logical, persistent ownership boundary identified by an
 opaque UUID. The host creates or deterministically derives Space IDs after it
 authenticates a platform principal or shared context. Core enforces the Space
-IDs supplied by that trusted host; Core does not infer Discord users, groups,
+IDs supplied by that trusted host; Core does not infer platform users, groups,
 channels, projects, or permissions from raw platform identifiers.
 
 Typical host mappings are:
@@ -72,7 +72,7 @@ on an ordinary response MUST NOT silently mutate the conversation.
 Editing the same character's prompt/card changes its configuration, not its
 `character_id`. A host's default-assistant selection is distinct from that
 assistant's stable identity. Selecting B as the new default does not transfer
-A's experiences to B. The process-wide `assistant` Prompt Space is a prompt
+A's experiences to B. The runtime-owned `assistant` Prompt Space is a prompt
 resource, not an assistant identity or a memory Space.
 
 The working tree implements [provenance Profile 1](memory_provenance_runtime.md):

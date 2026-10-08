@@ -13,10 +13,28 @@ pub async fn execute_control(
 ) -> Result<serde_json::Value, RuntimeApiError> {
     request.validate().map_err(RuntimeApiError::invalid)?;
     let resource_key = control_resource_key(&request.action);
-    let _guard = runtime.lock_control_resource(&resource_key).await;
+    let guard = runtime.lock_control_resource(&resource_key).await;
     let operation_key = control_operation_key(&request);
     let request_fingerprint = control_request_fingerprint(&request)?;
-    let store = runtime.core().store();
+    let core = runtime.core_handle();
+    runtime
+        .finish_commit(async move {
+            // Own the resource lock and the entire durable claim lifecycle so
+            // transport cancellation cannot strand an unfinished operation.
+            let _guard = guard;
+            execute_control_owned(&core, request, operation_key, request_fingerprint).await
+        })
+        .await
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?
+}
+
+async fn execute_control_owned(
+    core: &Arc<MomoCore>,
+    request: crate::MomoControlRequest,
+    operation_key: String,
+    request_fingerprint: String,
+) -> Result<serde_json::Value, RuntimeApiError> {
+    let store = core.store();
     if let Some(existing) = store
         .control_operation(&operation_key)
         .await
@@ -44,7 +62,7 @@ pub async fn execute_control(
             "control request is already in progress",
         ));
     }
-    let result = match execute_control_action(runtime, &request.action).await {
+    let result = match execute_control_action(core, &request.action).await {
         Ok(result) => result,
         Err(error) => {
             store
@@ -76,7 +94,7 @@ pub async fn execute_control(
 }
 
 async fn execute_control_action(
-    runtime: &MomoRuntime,
+    core: &Arc<MomoCore>,
     action: &crate::MomoControlAction,
 ) -> Result<serde_json::Value, RuntimeApiError> {
     let result = match action {
@@ -84,7 +102,7 @@ async fn execute_control_action(
             conversation_space_id,
             conversation_id,
         } => {
-            let store = runtime.core().store();
+            let store = core.store();
             if store
                 .conversation_for_scope(*conversation_space_id, *conversation_id)
                 .await
@@ -115,18 +133,18 @@ async fn execute_control_action(
             memory,
             semantic_graph,
         } => {
-            let state_guard = runtime
-                .reserve_space(*target_space_id)
+            let state_guards = core
+                .reserve_spaces([*target_space_id])
                 .await
                 .map_err(RuntimeApiError::recovery)?;
-            let core = runtime.core_handle();
+            let commit_core = Arc::clone(core);
             let target_space_id = *target_space_id;
             let memory = *memory;
             let semantic_graph = *semantic_graph;
-            let removed_files = runtime
+            let removed_files = core
                 .finish_commit(async move {
-                    let _state_guard = state_guard;
-                    let removed_files = core
+                    let _state_guards = state_guards;
+                    let removed_files = commit_core
                         .clear_space_memory(target_space_id, memory, semantic_graph)
                         .await
                         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
@@ -147,7 +165,7 @@ async fn execute_control_action(
             conversation_id,
             character_id,
         } => {
-            let store = runtime.core().store();
+            let store = core.store();
             if store
                 .character_by_id(*character_id)
                 .await

@@ -13,9 +13,8 @@ only when its public contract, implementation, negative cases, and docs agree.
   LSB codecs.
 - `momo-server` transports MomoApi over local HTTP/SSE. Its high-level route is
   `POST /v1/momo/responses`.
-- CLI, Discord, OpenAI Chat Completions, OpenAI Responses, Anthropic Messages,
-  model providers, and future visual description are adapters. They do not own
-  Core conversation orchestration.
+- Application ingress, model protocols and future visual description use
+  adapters. They do not own Core conversation orchestration.
 - `config.toml` is host-local adapter wiring. `momo.toml` is portable behaviour
   and contains request/vision governance. Credentials never enter either a MOC
   or a request audit.
@@ -43,7 +42,7 @@ fields, and forwarded named parameters are returned in `momo.request_audit`.
 
 Visual input is not enabled in 0.5. The dedicated prompt and override policy are
 frozen now so a future vision adapter can be added without moving this concern
-into Discord, CLI, or a model-provider implementation.
+into an application adapter or a model-provider implementation.
 
 ## Implemented release gates
 
@@ -66,12 +65,12 @@ into Discord, CLI, or a model-provider implementation.
 - [x] Split Core orchestration, response HTTP/SSE transport, stream encoding,
   and HTTP errors without changing the frozen MomoApi wire contract.
 - [x] Regenerate and checksum shared 0.5 fixtures after the route/event changes.
-- [x] Verify both repositories with fmt, clippy `-D warnings`, full tests, and
-  rustdoc; run the cross-repository contract tests using the Rust test suites.
+- [x] Verify the MOMO workspace with fmt, clippy `-D warnings`, full tests and
+  rustdoc; run the contract tests using the Rust test suites.
 - [x] Produce the requirement-by-requirement completion report and remove stale
   APNG, MOC migration, ambiguous config, and native/OpenAI route claims.
 
-The remaining pre-release checks require real provider and Discord credentials;
+The remaining pre-release checks require real provider credentials;
 they are deployment smoke tests, not missing product implementations. See the
 [English review](review_0_5_0.en.md) or [简体中文 review](review_0_5_0.zh-CN.md).
 

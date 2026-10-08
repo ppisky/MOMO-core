@@ -48,7 +48,7 @@ async fn cancelled_clear_finishes_database_cleanup_before_releasing_space() {
     let task_runtime = Arc::clone(&runtime);
     let caller = tokio::spawn(async move {
         execute_control_action(
-            &task_runtime,
+            &task_runtime.core_handle(),
             &crate::MomoControlAction::ClearMemory {
                 target_space_id: space,
                 memory: true,

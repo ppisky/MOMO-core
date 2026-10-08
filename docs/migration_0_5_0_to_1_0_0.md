@@ -64,14 +64,10 @@ Portable configuration never contains provider URLs or credentials.
 The fallback prompt body is managed with `PUT /v1/prompt-spaces/vision_fallback`,
 not `momo.toml`.
 
-In `mobot`, every `[[models]]` entry declares `modalities`; `[model_use].vision`
-optionally selects the fallback model profile while the provider URL, real
-model ID, and credential environment variable remain in host-local
-`config.toml`. The gateway converts OpenAI Chat `image_url` blocks to
-Responses `input_image` blocks or Anthropic `image` sources. Anthropic URL
-sources are preserved as URLs; supported base64 data URLs are split into
-`media_type` and `data`. Anthropic has no direct equivalent of OpenAI's image
-`detail` hint, so that hint is not forwarded on the Anthropic path.
+The host or gateway owns upstream provider URLs, real model IDs, credentials
+and protocol translation. Core consumes the gateway's discovered modalities
+and sends the documented multimodal content. MOMO does not define the host's
+model-profile schema or require a particular configuration file layout.
 
 ## Local storage
 
@@ -90,8 +86,8 @@ retried.
 ## Spaces replace the withdrawn request scopes
 
 `momo-server` no longer compiles, reads, or silently selects a product-wide
-default scope UUID. `MOMO_SCOPE_ID` and mobot's former `core.scope_id` are
-removed rather than made mandatory: a process-level value still mixes users.
+default scope UUID. `MOMO_SCOPE_ID` is removed rather than made mandatory:
+a process-level value still mixes users.
 
 Every stateful request supplies the UUID that owns the affected resource. A
 native response supplies `personal_space_id`, `conversation_space_id`, zero or
@@ -106,12 +102,12 @@ silently reused. A host may deliberately convert data into explicit Spaces
 through an offline tool or MOC v3 `space_map`; otherwise the old data is
 discarded.
 
-mobot's historical `discord_sessions.json` stored only a platform session key
-and a `conversation_id`, so it cannot prove which conversation Space owns the
-referenced conversation. It is not a supported 1.0 migration source. The new
-host rejects that schema and creates a fresh versioned session store after the
-obsolete file is discarded. There is no ID-only compatibility decoder or
-ownership guessing path.
+A session mapping with only a platform session key and `conversation_id`
+cannot establish the conversation's owning Space. Hosts must retain or
+explicitly resolve the `conversation_space_id` before making stateful requests.
+Core does not guess ownership or reinterpret an old ID-only mapping. The host
+owns any migration of its session store; MOMO does not define that store's
+filename or schema.
 
 ## Host-owned MOC modules
 
@@ -132,14 +128,14 @@ can be deleted to restore its embedded default. MOMO does not read prompt paths
 or `momo.toml`; a host may translate its user configuration into these HTTP
 operations. Prompt values are not carried by MOC.
 
-Process-wide behavior follows the same ownership boundary through the typed
+Runtime-instance behavior follows the same ownership boundary through the typed
 `GET/PUT /v1/runtime-settings` resource. MOMO no longer reads a configuration
 file or `MOMO_CONFIG_PATH`.
 
 ## Wire compatibility
 
-Core and mobot keep only byte-identical `contracts/1.0` fixtures, including a
-structured multimodal request, and the native request schema is
-`momo.responses/1.0`. Core package metadata is set to `1.0.0`; mobot is an
-independent `0.1.0` host that requires Core `>=1.0.0, <2.0.0`. Local tags may
-exist, but neither repository has been pushed or published as a GitHub release.
+MOMO maintains frozen `contracts/1.0` fixtures, including a structured
+multimodal request. The native request schema is `momo.responses/1.0`; Core
+package metadata is set to `1.0.0`. Integrations validate against these
+contracts and choose their own supported Core version range. External
+application versions and release artifacts are outside this migration guide.

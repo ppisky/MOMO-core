@@ -1,4 +1,147 @@
 use super::super::*;
+use axum::http::{HeaderMap, HeaderValue, header};
+
+fn settings_revision(headers: &HeaderMap) -> Result<Option<u64>, ApiError> {
+    headers
+        .get(header::IF_MATCH)
+        .map(|value| {
+            let value = value
+                .to_str()
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            value
+                .trim_matches('"')
+                .parse()
+                .map_err(|_| ApiError::bad_request("If-Match must contain a settings revision"))
+        })
+        .transpose()
+}
+
+fn settings_error(error: momo_core::GovernanceError) -> ApiError {
+    match error {
+        momo_core::GovernanceError::Conflict { .. } => ApiError::new(
+            StatusCode::CONFLICT,
+            "revision_conflict",
+            error.to_string(),
+            false,
+        ),
+        momo_core::GovernanceError::Persistence(_) => ApiError::internal(error.to_string()),
+        _ => ApiError::bad_request(error.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReplaceStateContractRequest {
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ManagedDdmQuery {
+    space_id: uuid::Uuid,
+    character_id: uuid::Uuid,
+}
+
+pub(crate) async fn get_managed_ddm_profile(
+    State(state): State<AppState>,
+    Query(query): Query<ManagedDdmQuery>,
+) -> Result<Json<Value>, ApiError> {
+    scoped_json_result(
+        runtime_api::managed_ddm_profile(
+            state.runtime.as_ref(),
+            query.space_id,
+            query.character_id,
+        )
+        .await,
+    )
+}
+
+pub(crate) async fn reset_managed_ddm_profile(
+    State(state): State<AppState>,
+    Query(query): Query<ManagedDdmQuery>,
+) -> Result<Json<Value>, ApiError> {
+    runtime_api::reset_managed_ddm_profile(
+        state.runtime.as_ref(),
+        query.space_id,
+        query.character_id,
+    )
+    .await
+    .map_err(scoped_api_error)?;
+    Ok(Json(json!({"ok":true})))
+}
+
+fn contract_revision(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    headers
+        .get(header::IF_MATCH)
+        .map(|value| {
+            value
+                .to_str()
+                .map(|v| v.trim_matches('"').to_owned())
+                .map_err(|e| ApiError::bad_request(e.to_string()))
+        })
+        .transpose()
+}
+
+pub(crate) async fn get_state_contract(
+    State(state): State<AppState>,
+    Query(query): Query<SpaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let id = uuid::Uuid::parse_str(&validate_space_id(query.space_id)?)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    scoped_json_result(runtime_api::mo_state_contract(state.runtime.as_ref(), id).await)
+}
+
+pub(crate) async fn replace_state_contract(
+    State(state): State<AppState>,
+    Query(query): Query<SpaceRequest>,
+    headers: HeaderMap,
+    Json(request): Json<ReplaceStateContractRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let id = uuid::Uuid::parse_str(&validate_space_id(query.space_id)?)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    scoped_json_result(
+        runtime_api::replace_mo_state_contract(
+            state.runtime.as_ref(),
+            id,
+            Some(request.content),
+            contract_revision(&headers)?,
+        )
+        .await,
+    )
+}
+
+pub(crate) async fn reset_state_contract(
+    State(state): State<AppState>,
+    Query(query): Query<SpaceRequest>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let id = uuid::Uuid::parse_str(&validate_space_id(query.space_id)?)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    scoped_json_result(
+        runtime_api::replace_mo_state_contract(
+            state.runtime.as_ref(),
+            id,
+            None,
+            contract_revision(&headers)?,
+        )
+        .await,
+    )
+}
+
+fn settings_response(
+    resource: momo_core::RuntimeSettingsResource,
+) -> (HeaderMap, Json<MomoRuntimeSettings>) {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{}\"", resource.revision)).expect("revision"),
+    );
+    headers.insert(
+        "x-momo-settings-source",
+        HeaderValue::from_str(&resource.source).expect("source"),
+    );
+    (headers, Json(resource.settings))
+}
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -15,19 +158,94 @@ pub(crate) async fn list_prompt_spaces(State(state): State<AppState>) -> Json<Ve
 
 pub(crate) async fn get_runtime_settings(
     State(state): State<AppState>,
-) -> Json<MomoRuntimeSettings> {
-    Json(state.runtime.runtime_settings())
+) -> (HeaderMap, Json<MomoRuntimeSettings>) {
+    settings_response(state.runtime.runtime_settings_resource(None))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SettingsMetadataQuery {
+    space_id: Option<uuid::Uuid>,
+}
+
+pub(crate) async fn get_settings_description() -> Json<Value> {
+    Json(momo_core::runtime_settings_description())
+}
+
+pub(crate) async fn get_settings_metadata(
+    State(state): State<AppState>,
+    Query(query): Query<SettingsMetadataQuery>,
+) -> Json<momo_core::RuntimeSettingsResource> {
+    Json(state.runtime.runtime_settings_resource(query.space_id))
 }
 
 pub(crate) async fn replace_runtime_settings(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(settings): Json<MomoRuntimeSettings>,
-) -> Result<Json<MomoRuntimeSettings>, ApiError> {
+) -> Result<(HeaderMap, Json<MomoRuntimeSettings>), ApiError> {
     state
         .runtime
-        .update_runtime_settings(settings)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    Ok(Json(state.runtime.runtime_settings()))
+        .replace_runtime_settings(None, settings, settings_revision(&headers)?)
+        .map(settings_response)
+        .map_err(settings_error)
+}
+
+pub(crate) async fn patch_runtime_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(patch): Json<Value>,
+) -> Result<(HeaderMap, Json<MomoRuntimeSettings>), ApiError> {
+    state
+        .runtime
+        .patch_runtime_settings(None, patch, settings_revision(&headers)?)
+        .map(settings_response)
+        .map_err(settings_error)
+}
+
+pub(crate) async fn get_space_runtime_settings(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> (HeaderMap, Json<MomoRuntimeSettings>) {
+    settings_response(state.runtime.runtime_settings_resource(Some(id)))
+}
+
+pub(crate) async fn replace_space_runtime_settings(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(settings): Json<MomoRuntimeSettings>,
+) -> Result<(HeaderMap, Json<MomoRuntimeSettings>), ApiError> {
+    state
+        .runtime
+        .replace_runtime_settings(Some(id), settings, settings_revision(&headers)?)
+        .map(settings_response)
+        .map_err(settings_error)
+}
+
+pub(crate) async fn patch_space_runtime_settings(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(patch): Json<Value>,
+) -> Result<(HeaderMap, Json<MomoRuntimeSettings>), ApiError> {
+    state
+        .runtime
+        .patch_runtime_settings(Some(id), patch, settings_revision(&headers)?)
+        .map(settings_response)
+        .map_err(settings_error)
+}
+
+pub(crate) async fn reset_space_runtime_settings(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Json<MomoRuntimeSettings>), ApiError> {
+    state
+        .runtime
+        .reset_runtime_settings(Some(id), settings_revision(&headers)?)
+        .map(settings_response)
+        .map_err(settings_error)
 }
 
 pub(crate) async fn get_prompt_space(

@@ -4,6 +4,83 @@ use serde_json::json;
 
 use super::*;
 
+pub async fn managed_ddm_profile(
+    runtime: &MomoRuntime,
+    space_id: uuid::Uuid,
+    character_id: uuid::Uuid,
+) -> RuntimeApiResult<Option<serde_json::Value>> {
+    runtime
+        .core()
+        .store()
+        .portable_metadata(
+            crate::orchestration::ddm::MANAGED_DDM_KIND,
+            &format!("{space_id}:{character_id}"),
+        )
+        .await
+        .map_err(|e| RuntimeApiError::internal(e.to_string()))?
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|e| RuntimeApiError::internal(e.to_string()))
+        })
+        .transpose()
+}
+
+pub async fn reset_managed_ddm_profile(
+    runtime: &MomoRuntime,
+    space_id: uuid::Uuid,
+    character_id: uuid::Uuid,
+) -> RuntimeApiResult<()> {
+    let key = format!("{space_id}:{character_id}");
+    let _guard = runtime.lock_control_resource(&format!("ddm:{key}")).await;
+    runtime
+        .core()
+        .store()
+        .delete_portable_metadata(crate::orchestration::ddm::MANAGED_DDM_KIND, &key)
+        .await
+        .map_err(|e| RuntimeApiError::internal(e.to_string()))
+}
+
+fn contract_error(error: momo_memory::MemoryError) -> RuntimeApiError {
+    match error {
+        momo_memory::MemoryError::RevisionConflict { .. } => {
+            RuntimeApiError::conflict(error.to_string())
+        }
+        momo_memory::MemoryError::InvalidAccess(_) | momo_memory::MemoryError::Yaml(_) => {
+            RuntimeApiError::invalid(error.to_string())
+        }
+        _ => RuntimeApiError::internal(error.to_string()),
+    }
+}
+
+pub async fn mo_state_contract(
+    runtime: &MomoRuntime,
+    space_id: uuid::Uuid,
+) -> RuntimeApiResult<momo_memory::StateContractResource> {
+    let core = runtime.core_handle();
+    run_blocking("read state contract", move || {
+        core.memory_for_space(space_id)
+            .map_err(contract_error)?
+            .state_contract_resource()
+            .map_err(contract_error)
+    })
+    .await
+}
+
+pub async fn replace_mo_state_contract(
+    runtime: &MomoRuntime,
+    space_id: uuid::Uuid,
+    content: Option<String>,
+    expected_revision: Option<String>,
+) -> RuntimeApiResult<momo_memory::StateContractResource> {
+    let core = runtime.core_handle();
+    run_space_write(runtime, space_id, "replace state contract", move || {
+        core.memory_for_space(space_id)
+            .map_err(contract_error)?
+            .replace_state_contract(content, expected_revision)
+            .map_err(contract_error)
+    })
+    .await
+}
+
 pub async fn ddm_projection_state(
     runtime: &MomoRuntime,
     managed_space_id: String,
@@ -64,9 +141,16 @@ pub async fn mo_state_runtime_status(
         .lifecycle_status(&space_id)
         .await
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    lifecycle["settings"] =
-        serde_json::to_value(runtime.runtime_settings().mo_state.memory_lifecycle)
-            .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+    lifecycle["settings"] = serde_json::to_value(
+        runtime
+            .runtime_settings_for_space(
+                uuid::Uuid::parse_str(&space_id)
+                    .map_err(|e| RuntimeApiError::invalid(e.to_string()))?,
+            )
+            .mo_state
+            .memory_lifecycle,
+    )
+    .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     value["memory_lifecycle"] = lifecycle;
     Ok(value)
 }

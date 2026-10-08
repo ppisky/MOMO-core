@@ -48,6 +48,10 @@ Linux/macOS 可使用
 [`contracts/1.0/response_request.json`](contracts/1.0/response_request.json)，部署信任边界见
 [`docs/http_api_1_0.md`](docs/http_api_1_0.md)。
 
+运行时设置与 Prompt Spaces 覆盖值保存在实例数据目录，重启恢复；运行策略支持 Space 覆盖、PATCH 和 revision/CAS。
+宿主需要显式协调自己的期望配置。当前是模块化单体，已有部分领域规则；职责、配置寿命与
+仍未实现的能力见[领域与配置边界](docs/domain_and_configuration_boundaries.zh-CN.md)。
+
 `momo-server` 提供 API，不内置图形界面。
 
 `crates/` 下的 crate 是 MOMO Core 的内部实现模块，不是彼此独立的产品，也不会作为
@@ -56,6 +60,7 @@ Linux/macOS 可使用
 使用 Rust API，但这些 API 没有独立的 crates.io SemVer 承诺。详见
 [HTTP 边界](docs/http_api_1_0.md)与[规范索引](docs/spec_index.md)。`momo-server` 通过仅限
 本机的 HTTP/SSE 接口提供同一组 Core 能力。
+当前不提供通用 FFI 或 C ABI；具体宿主确有进程内跨语言接入需求时，再设计对应绑定。
 
 ## 角色卡格式边界
 
@@ -80,7 +85,7 @@ CCv2/CCv3 JSON 与 CHARX 导出；APNG 明确不支持。CHARX 的资产、`x_me
 [1.0 架构说明](docs/architecture_1_0.md)。
 
 - `momo-core`：编排与面向调用方的 Rust API
-- `momo-domain`：共享领域类型
+- `momo-domain`：领域记录与有效性规则
 - `momo-storage`：SQLite 业务持久化与 Turso 向量存储
 - `momo-memory`：DMW、NSG、检索、场景解析与 MO State 投影
 - `momo-moc`：MOC 容器
@@ -98,8 +103,11 @@ Core 明确使用两个独立数据库，而不是把全部数据放进同一个
 - `character-packages/<character_id>/source.charx` 保存导入 CHARX 的原始容器，使二进制
   资产和应用扩展能够随 MOC 往返。
 
-DMW 与 NSG 的 YAML/Markdown 源文档位于 `spaces/<space_id>/memory`，是记忆与语义图
-的可移植事实来源。Turso 中的向量按来源哈希和向量空间校验，是可从源文档重新生成的
+DMW 与 NSG 的 YAML/Markdown 文档位于 `spaces/<space_id>/memory`，是每个 Space 的
+权威 `memory-journal.sqlite3` 的可移植物化副本。持久修改应通过 Core 编辑或导入 API。
+恢复或写入覆盖有差异的物化文件前，Core 会将完整 JSON 快照保存到
+`spaces/<space_id>/memory-recovery-backups`；备份失败则停止覆盖。恢复备份不进入 MOC。
+Turso 中的向量按来源哈希和向量空间校验，是可从源文档重新生成的
 缓存，不进入 MOC。`NsgVectorStore` 只是隔离 Turso 实现细节的内部接口，不代表第三套
 数据库。升级到 0.3.2 时，旧 SQLite `nsg_vectors` 表会被删除，宿主应按需重建向量缓存。
 
@@ -118,7 +126,10 @@ DMW/NSG 检索、MO State、上下文预算、逻辑路由和助手持久化，�
 
 本地 1.0 候选现已接入完整图片输入链路：单次最多八张用户图片；主对话模型声明
 `image` 时直接接收原图，纯文本主模型才使用可选的逻辑 `vision` 描述路由。解析结果与
-usage 会持久化，保持 request ID 重放的确定性。两仓 `momo.responses/1.0` fixture 已冻结。
+usage 会持久化，保持 request ID 重放的确定性。MOMO 的 `momo.responses/1.0` fixture 已冻结。
+直接图片的引用/data URL 与已完成的工具调用结果现随消息持久化，可经过重启、删除恢复
+和 MOC 导入导出。历史图片受模型能力和图片配额约束；工具证据经过历史文本预算整组
+保留或丢弃，丢弃会记录在审计中。远程图片 URL 的后续可用性仍由来源服务决定。
 `v1.0.0-rc.3` 加入可选实验性 DDM 投影的完整实现，包括角色所有的 MOC profile、类型化
 信号、确定性选择、持久化迟滞和原子审计状态；更广的凭据测试与 MORP 覆盖仍是稳定版
 `v1.0.0` 发布门槛。详见
@@ -132,7 +143,7 @@ Release 为准。变更见 [rc.5 说明](docs/release_notes_1_0_0_rc5.md)。历�
 DDM 的实现边界与剩余实验性限制见 [DDM 状态报告](docs/ddm_implementation_status.zh-CN.md)。
 
 Prompt Spaces 是具名运行时资源，仓库中通过 `include_str!` 编译的 Markdown 只提供
-受审查的默认值；当前值可通过原生 HTTP API 替换。MOMO 自身不读取 `momo.toml`，
+受审查的默认值；当前值可通过类型化 Rust API 或原生 HTTP API 替换。MOMO 自身不读取 `momo.toml`，
 也不通过 MOC 携带提示词。详见[简体中文 Prompt Spaces 说明](docs/maintenance_prompts.zh-CN.md)或
 [English guide](docs/maintenance_prompts.en.md)。
 
@@ -151,13 +162,13 @@ Prompt Spaces 是具名运行时资源，仓库中通过 `include_str!` 编译�
 人物一致性、情绪与关系延续、用户主导权、场景具身、主动性、叙事连贯和角色视角。
 记忆、检索与压力套件只作为需要显式选择的旧版诊断。Windows 运行
 `./scripts/test-morp.ps1`，Linux/macOS 运行 `bash scripts/test-morp.sh`；默认全程离线，
-需要模型的候选生成脚本只有显式 `--allow-ai` 才执行。rc.3 推荐只部署一个千问模型
+需要模型的候选生成脚本只有显式 `--allow-ai` 才执行。评测部署可复用一个对话模型
 （同时承担 conversation、DMW 提炼与 NSG 治理）和一个向量化模型，三场景 core 矩阵
 复用这两个部署。需要先检查调用计划时，可用
 `bash scripts/run-morp-model.sh --config <配置文件>`；它默认只生成数据、验证并打印预计调用数，
 不访问模型。该入口支持按角色、维度、场景族或 case ID 生成轻量计划。全部主观题需要
-一份身份绑定、带候选原文和理由的可审计 reviewer 评审；Codex 可以直接承担该评审，
-不再要求两个外部裁判模型。未完成时总分保持 `null`，不冒充零分。真实运行可记录到
+一份身份绑定、带候选原文和理由的可审计 reviewer 评审；自动评审者必须标明自己的身份，
+不能冒充人工评审。未完成时总分保持 `null`，不冒充零分。真实运行可记录到
 [结果表模板](benchmarks/morp/RESULTS_TEMPLATE.md)。Windows PowerShell 也保留对应的 `.ps1` 入口。
 
 ```bash

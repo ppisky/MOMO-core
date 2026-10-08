@@ -1,6 +1,239 @@
 use super::*;
 
 #[tokio::test]
+async fn history_window_loads_recent_complete_turns_and_pending_user_only() {
+    let store = LocalStore::in_memory().await.expect("store");
+    let now = Utc::now();
+    let conversation = Conversation {
+        id: new_id(),
+        scope_id: new_id(),
+        character_id: None,
+        title: "Long session".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.save_conversation(&conversation).await.unwrap();
+    for index in 0..120 {
+        for (offset, role) in [
+            MessageRole::User,
+            MessageRole::System,
+            MessageRole::Assistant,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store
+                .append_message(&Message {
+                    id: new_id(),
+                    conversation_id: conversation.id,
+                    role,
+                    content: format!("turn-{index}-{offset}"),
+                    created_at: now + chrono::Duration::seconds(index * 3 + offset as i64),
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let pending = Message {
+        id: new_id(),
+        conversation_id: conversation.id,
+        role: MessageRole::User,
+        content: "pending".into(),
+        created_at: now + chrono::Duration::seconds(361),
+    };
+    store.append_message(&pending).await.unwrap();
+    let window = store
+        .list_message_window_for_scope(conversation.scope_id, conversation.id, Some((12, 2)))
+        .await
+        .unwrap();
+    assert_eq!(window.evicted_messages, 330);
+    assert_eq!(window.messages.len(), 31);
+    assert_eq!(window.messages[0].content, "turn-110-0");
+    assert_eq!(window.messages.last().unwrap().id, pending.id);
+    assert!(
+        store
+            .list_message_window_for_scope(new_id(), conversation.id, Some((12, 2)))
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .list_message_window_for_scope(conversation.scope_id, conversation.id, None)
+            .await
+            .unwrap()
+            .messages
+            .len(),
+        361
+    );
+}
+
+#[tokio::test]
+async fn history_window_evicts_assistant_continuations_with_their_user_turn() {
+    let store = LocalStore::in_memory().await.unwrap();
+    let now = Utc::now();
+    let conversation = Conversation {
+        id: new_id(),
+        scope_id: new_id(),
+        character_id: None,
+        title: "Tool continuations".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.save_conversation(&conversation).await.unwrap();
+    for (index, (role, content)) in [
+        (MessageRole::Assistant, "orphan assistant"),
+        (MessageRole::User, "old user"),
+        (MessageRole::Assistant, "old initial answer"),
+        (MessageRole::Assistant, "old tool continuation"),
+        (MessageRole::System, "old turn metadata"),
+        (MessageRole::User, "new user"),
+        (MessageRole::Assistant, "new answer"),
+        (MessageRole::User, "pending user"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .append_message(&Message {
+                id: new_id(),
+                conversation_id: conversation.id,
+                role,
+                content: content.into(),
+                created_at: now + chrono::Duration::seconds(index as i64),
+            })
+            .await
+            .unwrap();
+    }
+    let window = store
+        .list_message_window_for_scope(conversation.scope_id, conversation.id, Some((2, 1)))
+        .await
+        .unwrap();
+    assert_eq!(window.evicted_messages, 5);
+    assert_eq!(
+        window
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        ["new user", "new answer", "pending user"]
+    );
+    assert_eq!(store.list_messages(conversation.id).await.unwrap().len(), 8);
+}
+
+#[tokio::test]
+async fn message_context_survives_delete_restore_and_invalid_replace_rolls_back() {
+    use momo_domain::conversation::{MessageContextPayload, StoredImage};
+    let store = LocalStore::in_memory().await.unwrap();
+    let now = Utc::now();
+    let conversation = Conversation {
+        id: new_id(),
+        scope_id: new_id(),
+        character_id: None,
+        title: "Evidence".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.save_conversation(&conversation).await.unwrap();
+    let message = Message {
+        id: new_id(),
+        conversation_id: conversation.id,
+        role: MessageRole::User,
+        content: "original".into(),
+        created_at: now,
+    };
+    let context = MessageContextPayload::UserImages {
+        images: vec![StoredImage {
+            image_url: "data:image/png;base64,evidence".into(),
+            detail: Some("low".into()),
+        }],
+    };
+    store
+        .save_message_with_context(&message, Some(&context))
+        .await
+        .unwrap();
+    let invalid = MessageContextPayload::UserImages { images: vec![] };
+    let edited = Message {
+        content: "should roll back".into(),
+        ..message.clone()
+    };
+    assert!(
+        store
+            .save_message_with_context(&edited, Some(&invalid))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .message_by_id(message.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "original"
+    );
+    assert!(
+        store
+            .message_contexts_for_scope(new_id(), &[message.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    store.stage_message_delete(message.id).await.unwrap();
+    assert!(
+        store
+            .message_contexts_for_scope(conversation.scope_id, &[message.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .restore_recently_deleted("message", message.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .message_contexts_for_scope(conversation.scope_id, &[message.id])
+            .await
+            .unwrap()[0]
+            .payload,
+        context
+    );
+    store
+        .stage_conversation_delete(conversation.id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .restore_recently_deleted("conversation", conversation.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .message_contexts_for_scope(conversation.scope_id, &[message.id])
+            .await
+            .unwrap()[0]
+            .payload,
+        context
+    );
+    store
+        .save_message_with_context(&message, None)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .message_contexts_for_scope(conversation.scope_id, &[message.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn vector_cache_survives_disk_reopen_replacement_and_deletion() {
     let directory = tempfile::tempdir().expect("temporary cache");
     let path = directory.path().join("vectors.db");
@@ -747,6 +980,7 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
                 memory_enabled: true,
                 nsg_enabled: true,
                 mo_state_operation_id: Some("request-completion"),
+                evidence: None,
                 response_json: r#"{"status":"completed"}"#,
             })
             .await
@@ -803,6 +1037,7 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
                 memory_enabled: false,
                 nsg_enabled: false,
                 mo_state_operation_id: None,
+                evidence: None,
                 response_json: r#"{"status":"different"}"#,
             })
             .await
@@ -825,6 +1060,125 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
             .expect("unchanged messages")
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn response_evidence_uses_typed_capture_and_rolls_back_identity_mismatch() {
+    use momo_domain::provenance::{EvidenceKind, MemoryIdentity, ResponseEvidenceCapture};
+
+    let store = LocalStore::in_memory().await.expect("store");
+    let space = Uuid::now_v7();
+    let conversation = Uuid::now_v7();
+    let now = Utc::now();
+    store
+        .save_conversation(&Conversation {
+            id: conversation,
+            scope_id: space,
+            character_id: None,
+            title: "typed evidence".into(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    store
+        .begin_response_operation("typed", "fp", &conversation.to_string(), "{}")
+        .await
+        .unwrap();
+    let user = Message {
+        id: Uuid::now_v7(),
+        conversation_id: conversation,
+        role: MessageRole::User,
+        content: "question".into(),
+        created_at: now,
+    };
+    store
+        .append_response_user_message("typed", space, &user)
+        .await
+        .unwrap();
+    let assistant = Message {
+        id: Uuid::now_v7(),
+        role: MessageRole::Assistant,
+        content: "answer".into(),
+        ..user.clone()
+    };
+    let maintenance = MaintenanceTurn {
+        request_id: "typed".into(),
+        scope_id: space.to_string(),
+        user_content: user.content.clone(),
+        assistant_content: assistant.content.clone(),
+    };
+    let mut capture = ResponseEvidenceCapture {
+        identity: MemoryIdentity {
+            personal_space_id: space,
+            conversation_id: Uuid::now_v7(),
+            character_id: Uuid::now_v7(),
+            continuity_id: conversation,
+            function_id: None,
+        },
+        kind: EvidenceKind::Tool,
+        configuration: BTreeMap::from([("assistant_revision".into(), "captured".into())]),
+    };
+    // Deliberately contradictory metadata must never control persisted evidence.
+    let replay = r#"{"momo":{"request_audit":{"memory_identity":"invalid","evidence_kind":"conversation","evidence_configuration":{"assistant_revision":"wrong"}}}}"#;
+    for expected in [false, true] {
+        let completion = ResponseCompletion {
+            lifecycle_activity_json: None,
+            request_id: "typed",
+            conversation_scope_id: space,
+            assistant_message: Some(&assistant),
+            maintenance_turn: Some(&maintenance),
+            memory_enabled: true,
+            nsg_enabled: false,
+            mo_state_operation_id: None,
+            evidence: Some(&capture),
+            response_json: replay,
+        };
+        let result = store.commit_response_completion(completion).await;
+        if expected {
+            assert!(result.unwrap());
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                store.list_messages(conversation).await.unwrap(),
+                vec![user.clone()]
+            );
+            assert!(
+                store
+                    .pending_maintenance_turns(&space.to_string(), MaintenanceKind::Memory, 10)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(store.response_evidence("typed").await.unwrap().is_none());
+            assert!(
+                store
+                    .response_operation("typed")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .response_json
+                    .is_none()
+            );
+            capture.identity.conversation_id = conversation;
+        }
+    }
+    let (evidence, identity) = store.response_evidence("typed").await.unwrap().unwrap();
+    assert_eq!(identity, capture.identity);
+    assert_eq!(evidence.kind, EvidenceKind::Tool);
+    assert_eq!(evidence.configuration, capture.configuration);
+    assert_eq!(evidence.message_ids, vec![user.id, assistant.id]);
+    assert_eq!(evidence.original_space_id, space);
+    assert_eq!(
+        store
+            .response_operation("typed")
+            .await
+            .unwrap()
+            .unwrap()
+            .response_json
+            .as_deref(),
+        Some(replay)
     );
 }
 
@@ -1165,6 +1519,21 @@ async fn message_edits_deletes_and_restores_are_local_only() {
     };
     store.stage_message(&message).await.expect("stage create");
 
+    let wrong_scope = store
+        .stage_message_update_for_scope(new_id(), &message)
+        .await;
+    assert!(matches!(wrong_scope, Err(StorageError::MessageNotFound(_))));
+    let changed_role = Message {
+        role: MessageRole::Assistant,
+        ..message.clone()
+    };
+    assert!(matches!(
+        store
+            .stage_message_update_for_scope(conversation.scope_id, &changed_role)
+            .await,
+        Err(StorageError::ImmutableMessageConflict(_))
+    ));
+
     let edited = Message {
         content: "edited".to_owned(),
         ..message.clone()
@@ -1186,6 +1555,20 @@ async fn message_edits_deletes_and_restores_are_local_only() {
         .stage_message_delete(message.id)
         .await
         .expect("stage delete");
+    for result in [
+        store.stage_message_update(&edited).await,
+        store
+            .stage_message_update_for_scope(conversation.scope_id, &edited)
+            .await,
+    ] {
+        assert!(matches!(result, Err(StorageError::MessageNotFound(_))));
+    }
+    assert!(
+        store
+            .is_tombstoned("message", message.id)
+            .await
+            .expect("tombstone")
+    );
     assert!(
         store
             .list_messages(conversation.id)

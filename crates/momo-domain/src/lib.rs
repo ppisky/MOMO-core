@@ -1,5 +1,7 @@
-//! Shared MOMO domain types without storage, network, or UI dependencies.
+//! MOMO domain records and validity rules without storage, network, or UI dependencies.
 
+mod character;
+pub mod conversation;
 pub mod provenance;
 
 use chrono::{DateTime, Utc};

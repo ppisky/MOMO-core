@@ -105,7 +105,7 @@ pub use response::{
     ResponseContractError, ResponseError, ResponseImageInput, ResponseInput, ResponseInputItem,
     ResponseMessageContent, ResponseOutputContent, ResponseOutputItem, ResponseTool, ResponseUsage,
 };
-pub use runtime::MomoRuntime;
+pub use runtime::{MomoRuntime, RuntimeSettingsResource, runtime_settings_description};
 pub use vision::{
     DEFAULT_VISION_ROUTE, GatewayVisionAdapter, MAX_VISUAL_DESCRIPTION_BYTES,
     VisionDescriptionAdapter, VisionDescriptionBatch, VisionDescriptionRequest, VisionError,
@@ -113,6 +113,8 @@ pub use vision::{
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error(transparent)]
+    Settings(#[from] GovernanceError),
     #[error(transparent)]
     Prompts(#[from] PromptSpacesError),
     #[error("Space {space_id} requires memory recovery: {message}")]

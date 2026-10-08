@@ -29,6 +29,15 @@ pub enum EvidenceKind {
     Unknown,
 }
 
+/// Application-captured response provenance. Storage binds the operation,
+/// conversation Space and actual persisted message anchors at commit time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseEvidenceCapture {
+    pub identity: MemoryIdentity,
+    pub kind: EvidenceKind,
+    pub configuration: BTreeMap<String, String>,
+}
+
 /// A host-selected continuity. Omitting a mapping uses the conversation UUID,
 /// so parallel conversations never share a scene merely by sharing a Space.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

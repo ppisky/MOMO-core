@@ -289,21 +289,15 @@ pub async fn stage_message_update(
     let scope_id = uuid::Uuid::parse_str(&scope_id)
         .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
     let core = runtime.core();
-    if core
-        .store()
-        .message_for_scope(scope_id, message.id)
-        .await
-        .map_err(|error| RuntimeApiError::internal(error.to_string()))?
-        .is_none()
-    {
-        return Err(RuntimeApiError::not_found(
-            "message does not belong to scope",
-        ));
-    }
     core.store()
-        .save_message(&message)
+        .stage_message_update_for_scope(scope_id, &message)
         .await
-        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
+        .map_err(|error| match error {
+            momo_storage::StorageError::MessageNotFound(_) => {
+                RuntimeApiError::not_found("message does not belong to scope")
+            }
+            error => RuntimeApiError::internal(error.to_string()),
+        })?;
     Ok(message)
 }
 
@@ -401,47 +395,7 @@ pub async fn stage_character_update(
 }
 
 fn validate_runtime_character(card: &momo_domain::CharacterCard) -> Result<(), RuntimeApiError> {
-    if card.name.trim().is_empty() || card.name.chars().count() > 120 {
-        return Err(RuntimeApiError::invalid(
-            "character name must contain between 1 and 120 characters",
-        ));
-    }
-    semver::Version::parse(&card.version).map_err(|error| {
-        RuntimeApiError::invalid(format!("character version is not SemVer: {error}"))
-    })?;
-    if card.author_name.trim().is_empty() || card.author_name.chars().count() > 200 {
-        return Err(RuntimeApiError::invalid(
-            "character author name must contain between 1 and 200 characters",
-        ));
-    }
-    if let Some(url) = card.author_url.as_deref() {
-        url::Url::parse(url).map_err(|error| {
-            RuntimeApiError::invalid(format!("character author URL is invalid: {error}"))
-        })?;
-    }
-    for (name, markdown) in [
-        ("character_markdown", Some(card.character_markdown.as_str())),
-        ("user_markdown", Some(card.user_markdown.as_str())),
-        ("opening_markdown", card.opening_markdown.as_deref()),
-    ] {
-        let Some(markdown) = markdown else {
-            continue;
-        };
-        if markdown.len() > 200_000 {
-            return Err(RuntimeApiError::invalid(format!(
-                "{name} exceeds 200000 bytes"
-            )));
-        }
-        let mut lines = markdown.lines();
-        if let Some(marker @ ("---" | "+++")) = lines.next().map(str::trim)
-            && lines.any(|line| line.trim() == marker)
-        {
-            return Err(RuntimeApiError::invalid(format!(
-                "{name} must not contain frontmatter"
-            )));
-        }
-    }
-    Ok(())
+    card.validate().map_err(RuntimeApiError::invalid)
 }
 
 pub async fn stage_character_delete(

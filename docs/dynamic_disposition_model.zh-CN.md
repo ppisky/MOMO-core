@@ -56,8 +56,18 @@ E_i(t) = sigmoid(logit(B_i) + delta_context_i(t) + delta_state_i(t))
 实现证据与剩余限制单独记录在
 [DDM 实现状态](ddm_implementation_status.zh-CN.md)。
 
-全局启用开关位于 `PUT /v1/runtime-settings` 的 `mo_state.ddm.enabled`。若 mobot
-继续向用户提供 `momo.toml`，由 mobot 将该值翻译成上述 JSON 请求；MOMO 本身不读取
-配置文件。角色 profile 由管理 API 维护，并随角色在 MOC 的
+实例/Space 启用开关位于 `PUT/PATCH /v1/runtime-settings[/{space_id}]` 的 `mo_state.ddm.enabled`。宿主将自己的
+配置转换为类型化运行时设置或上述 HTTP 请求；MOMO 本身不读取宿主配置文件。
+角色 profile 由管理 API 维护，并随角色在 MOC 的
 `extensions/momo-ddm/profile.yaml` 固定路径传输；它不进入 Character Card v2 核心
 元数据，也不新增 DDM Space。实现符合性不改变规范的实验状态。
+
+## 2026-10-02 自治建立补齐
+
+开启 `mo_state.ddm.enabled` 后，若角色没有作者 profile，MO State 使用固定的
+`ddm_profile_generation` 提示词，通过既有记忆提炼模型路由起草规则。输入只含本次
+响应捕获的角色名称和角色描写，不含 `user.md` 或会话；提案经过有界重试和类型校验。
+缓存按管理 Space/角色以及角色内容、提示词指纹保存，重启复用，输入变化时重建。
+生成失败只记录明确降级，不装入无效规则，不改写角色卡，也不进入 MOC 作者资产。
+`extensions/momo-ddm/profile.yaml` 继续用于可选作者覆盖，不再是开启 DDM 的前置条件。
+管理入口及完整限制见[运行时设置](runtime_config_0_1.md)。

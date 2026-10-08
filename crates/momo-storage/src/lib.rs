@@ -67,7 +67,14 @@ pub struct ResponseCompletion<'a> {
     pub memory_enabled: bool,
     pub nsg_enabled: bool,
     pub mo_state_operation_id: Option<&'a str>,
+    pub evidence: Option<&'a momo_domain::provenance::ResponseEvidenceCapture>,
     pub response_json: &'a str,
+}
+
+#[derive(Debug)]
+pub struct MessageWindow {
+    pub messages: Vec<Message>,
+    pub evicted_messages: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -385,6 +392,16 @@ fn recently_deleted_from_row(row: &SqliteRow) -> Result<RecentlyDeletedItem, Sto
 struct DeletedConversationSnapshot {
     conversation: Conversation,
     messages: Vec<Message>,
+    #[serde(default)]
+    contexts: Vec<momo_domain::conversation::MessageContext>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DeletedMessageSnapshot {
+    #[serde(flatten)]
+    message: Message,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context: Option<momo_domain::conversation::MessageContextPayload>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

@@ -1,4 +1,4 @@
-//! Typed process-wide runtime settings and request governance.
+//! Typed instance-scoped runtime settings and request governance.
 
 use std::collections::BTreeSet;
 
@@ -223,11 +223,11 @@ impl Default for MomoRuntimeSettings {
 
 impl MomoRuntimeSettings {
     pub fn validate(&self) -> Result<(), GovernanceError> {
-        self.validate_portable_fields()?;
+        self.validate_fields()?;
         Ok(())
     }
 
-    fn validate_portable_fields(&self) -> Result<(), GovernanceError> {
+    fn validate_fields(&self) -> Result<(), GovernanceError> {
         if !(2..=1000).contains(&self.history_window.trigger_turns)
             || self.history_window.evict_turns == 0
             || self.history_window.evict_turns >= self.history_window.trigger_turns
@@ -530,6 +530,10 @@ const fn schema_version() -> u32 {
 
 #[derive(Debug, Error)]
 pub enum GovernanceError {
+    #[error("runtime settings persistence failed: {0}")]
+    Persistence(String),
+    #[error("runtime settings revision conflict: expected {expected}, actual {actual}")]
+    Conflict { expected: u64, actual: u64 },
     #[error("unsupported runtime settings schema_version {0}")]
     UnsupportedSchema(u32),
     #[error("request override {0} is rejected by policy")]

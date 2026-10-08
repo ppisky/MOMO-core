@@ -30,7 +30,8 @@ cargo doc --workspace --all-features --no-deps
 
 - `momo-core` assembles storage, memory, context, model access, portable data,
   and client-facing APIs.
-- `momo-domain` defines shared local domain objects.
+- `momo-domain` defines domain records and validity rules, including native
+  character validation and memory identity/provenance vocabulary.
 - `momo-storage` owns SQLite application persistence and the Turso-backed
   `NsgVectorStore`.
 - `momo-memory` implements DMW, NSG, retrieval, lifecycle maintenance, patch
@@ -39,6 +40,17 @@ cargo doc --workspace --all-features --no-deps
 - `momo-crypto` implements private-container encryption.
 - `momo-config` parses and serializes TOML documents used by portable assets.
 - `momo-server` exposes Core over a loopback HTTP/SSE interface.
+
+Keep transport error mapping and workflow orchestration in Core/server, and
+domain validity rules independent of SQL or HTTP. Pass typed response evidence
+to storage; do not reconstruct it from replay/audit JSON. Preserve the single
+response-completion transaction when reorganizing persistence modules.
+This is a modular monolith with some domain rules, not a claim of complete DDD.
+See [concept and configuration boundaries](domain_and_configuration_boundaries.zh-CN.md).
+Runtime settings persist with instance defaults, sparse Space overrides and
+revision checks; normally loaded Prompt Spaces also persist their overrides.
+Their typed Rust APIs and HTTP routes are the
+current integration paths; there is no general FFI layer.
 
 ## Storage layout
 
@@ -50,7 +62,9 @@ before DMW/NSG files are changed. `spaces/<space_id>/memory` is its materialized
 checkpoint; `.memory-worker-cache` beside it is disposable private working state.
 Only Space worker messages may mutate these workspaces. Every worker start
 restores the latest journal snapshot, including snapshots already marked applied;
-external file edits are not ingested. Clearing also journals pending SQL/vector
+external file edits are preserved in `memory-recovery-backups` before replacement,
+but are not automatically ingested. Backup failure prevents replacement.
+Clearing also journals pending SQL/vector
 cleanup and blocks that Space until cleanup is acknowledged. Journals and working
 copies are excluded from portable MOC modules. See the architecture document for
 panic isolation, startup recovery and the current complete-snapshot I/O cost.
@@ -62,7 +76,7 @@ content.
 `NsgVectorStore` isolates Turso persistence and exact cosine ranking from the
 rest of Core. Its observable contract covers scope identity, vector space,
 dimensions, source hashes, and stable ordering. The index is disposable: the
-filesystem source documents are authoritative and MOC exports do not include
+the Space journal is authoritative and MOC exports its document snapshot, excluding
 the Turso database.
 
 `NsgVectorStore` remains the persistence and ranking boundary rather than an
@@ -98,6 +112,19 @@ and must not be summed as exclusive time. Whole-run reports include warm-up and
 fixture/index construction. The examples separately print repeated warm-query
 percentiles. Lifecycle timing covers file-plan preparation/application, not the
 full Core/Space-worker journals, provenance eligibility or mailbox contention.
+The native pipeline example exercises those retrieval boundaries, including
+identity qualification and revision checks (explicit legacy bindings, synthetic
+DMW records, no model calls):
+
+```bash
+cargo run --locked -p momo_core --example retrieval_pipeline_benchmark -- 50 100 200 1000
+```
+
+It asserts the expected record before timing and reports three warm samples per
+scope mode. Use the same build profile for before/after comparisons; this is not
+a model-quality experiment or a production SLA.
+The measured native-path change and scenario/fault verification are recorded in
+[the 2026-10-02 architecture fix report](architecture_fixes_2026_10_02.zh-CN.md).
 The vector benchmark uses an in-memory cache and exact ranking. Run without
 `hotpath` for uninstrumented latency; use full native workloads before making
 product SLA claims. SQL/HTTP tracing, lock wrappers, allocation tracing and CPU

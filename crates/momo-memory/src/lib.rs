@@ -35,7 +35,7 @@ pub use ddm::{
 };
 pub use momo_domain::SCHEMA_GENERATION;
 pub use scene::{MoStateSourceFingerprint, SceneSnapshot, SceneStatus};
-pub use state::{DdmRuntimeInput, MoStateAudit, MoStateContext};
+pub use state::{DdmRuntimeInput, MoStateAudit, MoStateContext, StateContractResource};
 
 use filesystem::*;
 use patch::*;
@@ -84,6 +84,8 @@ const HIT_REFRESH_LIMIT: usize = 5;
 
 #[derive(Debug, Error)]
 pub enum MemoryError {
+    #[error("state contract revision conflict: expected {expected}, actual {actual}")]
+    RevisionConflict { expected: String, actual: String },
     #[error("memory I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error("invalid memory YAML: {0}")]

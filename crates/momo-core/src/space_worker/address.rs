@@ -5,6 +5,18 @@ use momo_memory::*;
 use momo_memory::{lifecycle::*, nsg::*, provenance::*};
 use std::path::PathBuf;
 impl SpaceHandle {
+    pub(crate) fn state_contract_resource(&self) -> Result<StateContractResource, MemoryError> {
+        self.call_read(|workspace| workspace.state_contract_resource())
+    }
+    pub(crate) fn replace_state_contract(
+        &self,
+        content: Option<String>,
+        expected: Option<String>,
+    ) -> Result<StateContractResource, MemoryError> {
+        self.call(move |workspace| {
+            workspace.replace_state_contract(content.as_deref(), expected.as_deref())
+        })
+    }
     #[cfg(test)]
     pub(crate) fn read(&self, path: &str) -> Result<MemoryDocument, MemoryError> {
         let path = path.to_owned();
@@ -23,7 +35,7 @@ impl SpaceHandle {
     }
 
     pub(crate) fn export_snapshot(&self) -> Result<MemorySnapshot, MemoryError> {
-        self.call(move |w| w.export_snapshot())
+        self.snapshot()
     }
     pub(crate) fn retrieve_in_scope(
         &self,
@@ -95,7 +107,12 @@ impl SpaceHandle {
     pub(crate) fn mo_state_source_fingerprint(
         &self,
     ) -> Result<MoStateSourceFingerprint, MemoryError> {
-        self.call(move |w| w.mo_state_source_fingerprint())
+        self.submit(|worker| {
+            worker.require_available()?;
+            worker.cache.read("current/scene.md")?;
+            worker.cache.read("current/active_threads.md")?;
+            momo_memory::scene::source_fingerprint(&worker.cached_snapshot)
+        })
     }
     pub(crate) fn compile_mo_state_with_ddm(
         &self,
@@ -111,7 +128,7 @@ impl SpaceHandle {
         let counter = counter.clone();
         let ddm_profile = ddm_profile.cloned();
         let ddm_runtime = ddm_runtime.cloned();
-        self.call(move |w| {
+        self.call_read(move |w| {
             w.compile_mo_state_with_ddm(
                 &retrieved_memory,
                 &retrieved_nsg,
@@ -122,19 +139,20 @@ impl SpaceHandle {
             )
         })
     }
-    pub(crate) fn record_revision_matches_in_ledger(
+    pub(crate) fn record_revisions_match_in_ledger(
         &self,
-        ledger: &ProvenanceLedger,
-        id: &str,
-        path: &str,
-    ) -> Result<bool, MemoryError> {
-        let ledger = ledger.clone();
-        let id = id.to_owned();
-        let path = path.to_owned();
-        self.call(move |w| w.record_revision_matches_in_ledger(&ledger, &id, &path))
+        ledger: std::sync::Arc<ProvenanceLedger>,
+        records: Vec<(String, String)>,
+    ) -> Result<Vec<bool>, MemoryError> {
+        self.call_read(move |w| {
+            records
+                .into_iter()
+                .map(|(id, path)| w.record_revision_matches_in_ledger(&ledger, &id, &path))
+                .collect()
+        })
     }
     pub(crate) fn provenance(&self, semantic_graph: bool) -> Result<ProvenanceLedger, MemoryError> {
-        self.call(move |w| w.provenance(semantic_graph))
+        self.call_read(move |w| w.provenance(semantic_graph))
     }
     pub(crate) fn trace_commit(
         &self,
@@ -159,7 +177,7 @@ impl SpaceHandle {
         identity: &MemoryIdentity,
     ) -> Result<Vec<RetrievedMemory>, MemoryError> {
         let identity = identity.clone();
-        self.call(move |w| w.scoped_current(&identity))
+        self.call_read(move |w| w.scoped_current(&identity))
     }
     pub(crate) fn prepare_lifecycle_activity(
         &self,

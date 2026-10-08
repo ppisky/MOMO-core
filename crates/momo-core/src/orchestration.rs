@@ -1,8 +1,10 @@
 //! Client-independent implementation of the native high-level MomoApi response pipeline.
 
 pub(crate) mod coordination;
+pub(crate) mod ddm;
 mod execution;
 mod generation;
+mod history;
 mod maintenance;
 mod response;
 mod state;
@@ -41,6 +43,7 @@ pub enum MomoApiErrorKind {
     BadRequest,
     Conflict,
     Cancelled,
+    Timeout,
     Model,
     Internal,
 }
@@ -53,6 +56,12 @@ pub struct MomoApiError {
 }
 
 impl MomoApiError {
+    fn timeout(message: impl ToString) -> Self {
+        Self {
+            kind: MomoApiErrorKind::Timeout,
+            message: message.to_string(),
+        }
+    }
     fn bad_request(message: impl ToString) -> Self {
         Self {
             kind: MomoApiErrorKind::BadRequest,
@@ -152,10 +161,11 @@ enum ImageInputHandling {
 }
 
 struct GovernedResponseAttempt<'a> {
+    config: &'a MomoRuntimeSettings,
+    supports_images: bool,
     request_id: &'a str,
     operation_key: &'a str,
     request_fingerprint: &'a str,
-    persisted: Option<&'a momo_storage::ResponseOperation>,
     resolved_input: &'a ResolvedResponseInput,
     governed: GovernedOverrides,
     warnings: Vec<String>,
@@ -201,6 +211,24 @@ impl MomoApiService {
 
     fn config_snapshot(&self) -> MomoRuntimeSettings {
         self.runtime.runtime_settings()
+    }
+
+    fn config_for_space(&self, space_id: &str) -> MomoRuntimeSettings {
+        uuid::Uuid::parse_str(space_id)
+            .map(|id| self.runtime.runtime_settings_for_space(id))
+            .unwrap_or_else(|_| self.config_snapshot())
+    }
+
+    pub fn maintenance_batch_limit_for_space(
+        &self,
+        space_id: &str,
+        kind: MaintenanceKind,
+    ) -> usize {
+        let config = self.config_for_space(space_id);
+        match kind {
+            MaintenanceKind::Memory => config.runtime.memory_distill_every_turns,
+            MaintenanceKind::SemanticGraph => config.runtime.nsg_govern_every_turns,
+        }
     }
 
     /// Maximum number of pending turns supplied to one maintenance-model call.

@@ -26,7 +26,7 @@ MO State 协调维护不意味着它是原始事实作者；派生投影不能�
 
 MO State v2 将 MO State 从“读取 DMW 与 NSG 后生成 `[STATE_CONTEXT]` 的只读编译器”扩展为一个长期存在的**自治状态运行时**（MO State Runtime）。它位于宿主与 DMW/NSG 之间，接收用户消息、模型结果、工具结果和维护事件，统一管理场景生命周期、动态记忆、语义网治理、状态一致性与面向模型的状态快照。
 
-MO State v2 的目标产品形态是一个封闭的用户侧系统，例如只向用户暴露聊天界面的 `mobot`：用户只需要开启 MO State 并进行对话，不需要理解或日常操作 DMW、NSG、状态契约、场景文件、权重、索引或修订候选。系统在既定权限和作者权威边界内自行观察、更新、校验、修复和维护。
+MO State v2 的目标产品形态是一个封闭的用户侧系统，例如只向用户暴露聊天界面的宿主应用：用户只需要开启 MO State 并进行对话，不需要理解或日常操作 DMW、NSG、状态契约、场景文件、权重、索引或修订候选。系统在既定权限和作者权威边界内自行观察、更新、校验、修复和维护。
 
 “自治”不表示让语言模型直接修改文件，也不表示取消用户最终权威。MO State Runtime 拥有的是**协调权和生命周期管理权**；DMW 与 NSG 仍拥有各自的数据语义、校验规则和写入约束。所有模型输出均为不可信提案，只有通过运行时验证的命令才能落盘。
 
@@ -91,24 +91,28 @@ v2 将这个缺失主体定义为 **MO State Runtime**。
 
 对于 v2-native 封闭宿主，原生请求设置 `momo.mo_state = true` 时，宿主 MUST 默认采用：
 
-```toml
-[mo_state]
-profile = "closed_autonomous"
-scene_management = true
+```json
+{"mo_state": {"profile": "closed_autonomous", "scene_management": true}}
 ```
 
 其余运行参数采用以下默认值：
 
-```toml
-[mo_state]
-profile = "closed_autonomous"
-scene_management = true
-max_reconcile_steps = 4
-max_agent_steps = 8
-operation_timeout_ms = 30000
+```json
+{
+  "mo_state": {
+    "profile": "closed_autonomous",
+    "scene_management": true,
+    "max_reconcile_steps": 4,
+    "max_agent_steps": 8,
+    "operation_timeout_ms": 30000
+  }
+}
 ```
 
-DMW 与 NSG 自治开关沿用 `[runtime] memory_distillation_enabled` 与 `semantic_graph_enabled`；默认均开启。状态契约使用内置默认契约，Canon 权威沿用 NSG v2 的 protected 边界，不额外暴露重复配置项。
+上述值由类型化 API 或 `PUT/PATCH /v1/runtime-settings[/{space_id}]` 设置，Core 不读取
+宿主 TOML。DMW 与 NSG 自治开关位于 JSON `runtime.memory_distillation_enabled` 与
+`runtime.semantic_graph_enabled`，默认均开启。状态契约默认使用内置值，Canon 权威
+沿用 NSG v2 的 protected 边界，不额外暴露重复配置项。
 
 启用后，系统 MUST：
 
@@ -439,11 +443,11 @@ v1 的确定性规则匹配、显式冲突声明、优先级、Token 预算、�
 
 ---
 
-## 8. 与 AI Harness 和 mobot 的关系
+## 8. 与宿主及工具执行器的关系
 
 ### 8.1 宿主边界
 
-封闭 `mobot` SHOULD 每个普通用户轮次只提交一次高层请求。MO State Runtime 在 Core 内部完成：
+封闭聊天宿主 SHOULD 每个普通用户轮次只提交一次高层请求。MO State Runtime 在 Core 内部完成：
 
 ```text
 user input
@@ -457,7 +461,7 @@ user input
   -> return/stream result
 ```
 
-`mobot` 不需要分别调用 DMW、NSG 或场景接口，也不需要知道它们的文件布局。
+宿主不需要分别调用 DMW、NSG 或场景接口，也不需要知道它们的文件布局。
 
 ### 8.2 工具循环
 
@@ -475,7 +479,7 @@ user input
 
 ### 8.3 外部宿主工具
 
-若工具实现只能存在于 `mobot` 或平台侧，Core MAY 返回 `requires_action` 并持久化暂停点。宿主提交 `function_call_output` 后 MUST 恢复同一 `run_id`，而不是创建一个无法关联的新用户轮次。
+若工具实现只能存在于宿主或外部平台侧，Core MAY 返回 `requires_action` 并持久化暂停点。宿主提交 `function_call_output` 后 MUST 恢复同一 `run_id`，而不是创建一个无法关联的新用户轮次。
 
 ---
 
@@ -556,17 +560,23 @@ MO State Runtime MUST 遵守：
 
 ## 12. 推荐配置
 
-```toml
-[mo_state]
-profile = "closed_autonomous"
-scene_management = true
-max_reconcile_steps = 4
-max_agent_steps = 8
-operation_timeout_ms = 30000
+使用 `PATCH /v1/runtime-settings` 或对应 Space 路径；DDM 可另将 `ddm.enabled` 改为 true。
 
-[runtime]
-memory_distillation_enabled = true
-semantic_graph_enabled = true
+```json
+{
+  "mo_state": {
+    "profile": "closed_autonomous",
+    "scene_management": true,
+    "max_reconcile_steps": 4,
+    "max_agent_steps": 8,
+    "operation_timeout_ms": 30000,
+    "ddm": {"enabled": false}
+  },
+  "runtime": {
+    "memory_distillation_enabled": true,
+    "semantic_graph_enabled": true
+  }
+}
 ```
 
 `mo_state_enabled` 不是 Core `momo.toml` 字段；每轮是否启用由原生响应请求的
@@ -576,12 +586,12 @@ semantic_graph_enabled = true
 
 | 参数 | 默认值 | 说明 |
 | --- | ---: | --- |
-| `max_reconcile_steps` | 4 | 单事件最大一致性处理步骤 |
-| `max_agent_steps` | 8 | 存在工具调用时的单轮 Harness 步数上限 |
-| `operation_timeout_ms` | 30000 | 前台状态操作软超时 |
+| `max_reconcile_steps` | 4 | 每次 DDM 或维护模型提案的验证/修复尝试上限 |
+| `max_agent_steps` | 8 | 同一普通用户轮次的初始响应与工具续跑步骤上限 |
+| `operation_timeout_ms` | 30000 | 状态操作与每个维护批次的截止时间；超时返回 504 |
 | `scene_management` | `true` | 自动维护当前场景 |
 
-`max_agent_steps` 是宿主工具续跑的治理上限；工具 Executor 仍由 AI Harness / mobot 持有。当前 1.0 wire 把成对的 `function_call` / `function_call_output` 作为同一会话中的新响应操作接收并分类为 `tool_result`，尚未实现持久化暂停点或同一 `run_id` 恢复。
+`max_agent_steps` 是宿主工具续跑的治理上限；工具 Executor 仍由 宿主工具运行器 持有。当前 1.0 wire 把成对的 `function_call` / `function_call_output` 作为同一会话中的新响应操作接收并分类为 `tool_result`，尚未实现持久化暂停点或同一 `run_id` 恢复。
 
 ---
 
@@ -618,11 +628,11 @@ mo_state_runtime_audit:
 
 为避免升级后静默获得新的写入行为，现有 v1 配置迁移到 v2 时 MUST 显式固定：
 
-```toml
-[mo_state]
-enabled = true
-profile = "v1_projection"
+```json
+{"mo_state": {"profile": "v1_projection"}}
 ```
+
+该策略通过运行时设置 API 提交；对应响应请求仍设置 `momo.mo_state = true`。
 
 只有新建 v2-native 封闭宿主，或用户/宿主明确迁移后，才能采用 `closed_autonomous`。
 
@@ -655,9 +665,9 @@ MOMO Core 1.0 当前实现了：
 
 ### 14.4 明确保留给宿主的边界
 
-- Core 不执行平台或业务工具；AI Harness / mobot 负责受信任 Executor 与外部副作用幂等；
+- Core 不执行平台或业务工具；宿主工具运行器 负责受信任 Executor 与外部副作用幂等；
 - Core 接收与先前调用成对的 `function_call_output`，把它作为新响应操作中的 `tool_result`；原请求 ID 不可用不同 payload 续跑；
-- `max_agent_steps` 与 `operation_timeout_ms` 当前作为治理和审计配置，完整的宿主 `requires_action` 多步调度协议仍属于后续 wire 版本；
+- `max_agent_steps` 已限制初始响应及连续工具续跑的模型步骤，`operation_timeout_ms` 已限制状态操作与维护批次；完整的宿主 `requires_action` 暂停/恢复协议仍属于后续 wire 版本；
 - DMW 与 NSG 各自的维护批次可幂等恢复，但跨两套文件系统共享一个 Saga `operation_id` 的验收场景尚未实现。
 - Canon 的最终批准权仍由 NSG v2 与用户控制面持有，不因自治档而放开。
 
@@ -685,7 +695,7 @@ DMW 更新成功而 NSG 候选尚未写入时进程退出。重启后 Manager �
 
 ### 15.5 无事件空闲
 
-用户数日没有打开 `mobot`。系统可以执行衰减、归档与索引维护，但不得自行声称角色完成了行动或场景发生了剧情变化。
+用户数日没有使用宿主应用。系统可以执行衰减、归档与索引维护，但不得自行声称角色完成了行动或场景发生了剧情变化。
 
 ---
 
@@ -699,4 +709,7 @@ MO State Runtime 是负责两个系统共同生命周期的管理者；
 State Projector 只是这个管理者内部生成模型状态的一步。
 ```
 
-对封闭的用户侧 `mobot`，开启 MO State 应当意味着系统进入受治理的自治运行：用户只需要对话，Runtime 自行维护场景、记忆、语义网、一致性和状态快照，同时保留权限、审计、回滚和作者权威边界。
+对封闭的用户侧聊天应用，开启 MO State 应当意味着系统进入受治理的自治运行：用户只需要对话，Runtime 自行维护场景、记忆、语义网、一致性和状态快照，同时保留权限、审计、回滚和作者权威边界。
+
+
+2026-10-02 实现补齐：开启 DDM 可由 MO State 自行建立经过校验的派生 profile 缓存；运行策略可持久化、按 Space 覆盖、PATCH 与 revision/CAS 更新，状态契约经所属 Space 日志提交。`max_reconcile_steps` 约束每次模型提案/修复的验证尝试次数。完整控制见[配置与控制清单](docs/configuration_controls.zh-CN.md)。

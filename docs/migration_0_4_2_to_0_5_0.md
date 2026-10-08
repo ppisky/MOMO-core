@@ -6,9 +6,9 @@ a MOC v1 migrator. Rebuild the application and create new 0.5 development data
 when an old development snapshot conflicts with the frozen contract.
 
 The native high-level entry point is `POST /v1/momo/responses`; it is part of
-`MomoApi`, not an OpenAI-compatible Responses endpoint. OpenAI Responses,
-Chat Completions, Anthropic Messages, Discord, CLI, model providers, and future
-vision components are adapters around the native contract.
+`MomoApi`. External application protocols, model-provider protocols and future
+vision components are adapters around the native contract; they do not define
+MOMO's native request shape.
 
 MOMO 0.5 reads and writes MOC format version 2 snapshots only. It rejects MOC
 v1, incremental/deletion package fields, APNG, animated WebP, AVIF, and
@@ -18,7 +18,7 @@ with Zstandard; its extension is `.moc`.
 Deployment uses two files:
 
 - `config.toml` contains host-local adapter wiring, endpoints, listener policy,
-  executable/data paths, Discord settings, and credential environment names.
+  executable/data paths, platform settings, and credential environment names.
 - `momo.toml` contains portable behaviour, logical model use, memory/state
   policy, request-override governance, and the future visual-description prompt.
 

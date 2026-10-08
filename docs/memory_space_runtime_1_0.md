@@ -75,7 +75,8 @@ requires `character_scope_id`.
 
 ## Host policy
 
-Core stores and validates Spaces. It does not decide that a UUID means a
-Discord user, channel, guild, tenant, or company. mobot currently derives a
-personal Space per platform user and a conversation Space per session. Group
-sessions may retrieve both with independent weights.
+Core stores and validates Spaces. The host maps its user, session, group or
+tenant identities to explicit Space UUIDs and authorizes access before calling
+Core. A host may assign a stable personal Space to a user and a conversation
+Space to a session. Group sessions may retrieve both with independent weights;
+Core does not prescribe a platform-specific mapping.
