@@ -363,6 +363,7 @@ impl MomoApiService {
             identity: None,
             parent_records: Vec::new(),
         };
+        let mut routed = self.clone();
         for turn in &turns {
             if let Some((evidence, identity)) = self
                 .runtime()
@@ -380,6 +381,10 @@ impl MomoApiService {
                     return Err(MomoApiError::internal("maintenance batch mixes identities"));
                 }
                 provenance.identity = Some(identity);
+                if let Some(routes) = evidence.configuration.get("model_routes") {
+                    routed.model_routes =
+                        serde_json::from_str(routes).map_err(MomoApiError::internal)?;
+                }
                 provenance.evidence.push(evidence);
             }
         }
@@ -500,6 +505,17 @@ impl MomoApiService {
                 ),
             };
             let prompt = self.runtime.prompt_spaces().get(prompt_space_id);
+            routed.validate_model_routes()?;
+            let connection = routed
+                .configured_connection(route)
+                .map_err(MomoApiError::bad_request)?;
+            let selected_route = routed
+                .model_routes
+                .get(route)
+                .map_or(route, |r| r.model.as_str());
+            provenance
+                .configuration
+                .insert("model_reference".into(), selected_route.to_owned());
             provenance
                 .configuration
                 .insert("prompt_revision".into(), prompt.revision);
@@ -508,7 +524,7 @@ impl MomoApiService {
                 serde_json::to_string(&config).map_err(MomoApiError::internal)?,
             );
             let system = prompt.content;
-            let maintenance_max_tokens = self
+            let maintenance_max_tokens = routed
                 .gateway_generation_capability(route)
                 .await
                 .ok()
@@ -557,24 +573,31 @@ impl MomoApiService {
                         tool_calls: Vec::new(),
                     },
                 ];
-                let completion = OpenAiGateway::default()
-                    .complete_messages(
-                        &ProviderEndpoint {
-                            base_url: self.gateway_origin.clone(),
-                            api_key: self.gateway_api_key.clone(),
-                            model: route.to_owned(),
-                        },
-                        &messages,
-                        ChatParameters {
-                            temperature: None,
-                            request_parameters: maintenance_parameters
-                                .as_object()
-                                .cloned()
-                                .expect("maintenance parameters are an object"),
-                        },
-                    )
-                    .await
-                    .map_err(MomoApiError::model)?;
+                let parameters = routed
+                    .route_parameters(route, scope_id)?
+                    .unwrap_or_else(|| ChatParameters {
+                        temperature: None,
+                        request_parameters: maintenance_parameters
+                            .as_object()
+                            .cloned()
+                            .expect("object"),
+                    });
+                let completion = if let Some(connection) = &connection {
+                    connection.complete(&messages, parameters).await
+                } else {
+                    OpenAiGateway::default()
+                        .complete_messages(
+                            &ProviderEndpoint {
+                                base_url: self.gateway_origin.clone(),
+                                api_key: self.gateway_api_key.clone(),
+                                model: selected_route.to_owned(),
+                            },
+                            &messages,
+                            parameters,
+                        )
+                        .await
+                }
+                .map_err(MomoApiError::model)?;
                 drop(generation_permit);
                 let completion =
                     serde_json::to_value(completion).map_err(MomoApiError::internal)?;

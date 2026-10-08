@@ -611,7 +611,19 @@ pub struct MemorySpaceSource {
     pub semantic_graph: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestModelRoute {
+    pub model: String,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MomoResponseExtension {
     pub schema: String,
@@ -635,6 +647,8 @@ pub struct MomoResponseExtension {
     pub title: Option<String>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_routes: std::collections::BTreeMap<String, RequestModelRoute>,
 }
 
 impl Default for MomoResponseExtension {
@@ -651,6 +665,7 @@ impl Default for MomoResponseExtension {
             title: None,
             mo_state: true,
             stream: false,
+            model_routes: Default::default(),
         }
     }
 }
@@ -787,10 +802,8 @@ impl MomoResponseRequest {
         if let Some(value) = self.momo.conversation_id.as_deref() {
             validate_uuid(value, "conversation ID")?;
         }
-        for (value, field) in [(self.momo.character_id.as_deref(), "character ID")] {
-            if let Some(value) = value {
-                validate_uuid(value, field)?;
-            }
+        if let Some(value) = self.momo.character_id.as_deref() {
+            validate_uuid(value, "character ID")?;
         }
         for (value, field) in [
             (self.momo.personal_space_id.as_deref(), "personal space ID"),

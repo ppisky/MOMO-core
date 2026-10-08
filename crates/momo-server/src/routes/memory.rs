@@ -116,6 +116,45 @@ pub(crate) async fn put_default_memory_assistant(
     )
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DefaultAssistantQuery {
+    personal_space_id: uuid::Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EnsureDefaultAssistantRequest {
+    personal_space_id: uuid::Uuid,
+    name: String,
+    author_name: String,
+}
+
+pub(crate) async fn get_default_memory_assistant(
+    State(state): State<AppState>,
+    Query(query): Query<DefaultAssistantQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let id = runtime_api::default_memory_assistant(&state.runtime, query.personal_space_id)
+        .await
+        .map_err(scoped_api_error)?;
+    Ok(Json(json!({"character_id": id})))
+}
+
+pub(crate) async fn ensure_default_memory_assistant(
+    State(state): State<AppState>,
+    Json(request): Json<EnsureDefaultAssistantRequest>,
+) -> Result<Json<Value>, ApiError> {
+    scoped_json_result(
+        runtime_api::ensure_default_memory_assistant(
+            &state.runtime,
+            request.personal_space_id,
+            request.name,
+            request.author_name,
+        )
+        .await,
+    )
+}
+
 pub(crate) async fn memory_recovery_status(State(state): State<AppState>) -> Json<Value> {
     Json(json!(runtime_api::memory_recovery_status(
         state.runtime.as_ref()

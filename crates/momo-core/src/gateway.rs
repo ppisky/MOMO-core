@@ -250,6 +250,7 @@ pub enum SseDecodeError {
 #[derive(Debug, Clone)]
 pub struct OpenAiGateway {
     client: Client,
+    completion_endpoint: Option<String>,
 }
 
 impl Default for OpenAiGateway {
@@ -262,12 +263,20 @@ impl OpenAiGateway {
     pub fn new(timeout: Duration) -> Result<Self, GatewayError> {
         Ok(Self {
             client: Client::builder().timeout(timeout).build()?,
+            completion_endpoint: None,
         })
     }
 
     #[must_use]
     pub const fn from_client(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            completion_endpoint: None,
+        }
+    }
+    pub fn with_completion_endpoint(mut self, endpoint: String) -> Self {
+        self.completion_endpoint = Some(endpoint);
+        self
     }
 
     pub async fn complete(
@@ -291,7 +300,10 @@ impl OpenAiGateway {
         parameters: ChatParameters,
     ) -> Result<ChatCompletion, GatewayError> {
         validate_gateway_messages(messages)?;
-        let url = completion_url(&endpoint.base_url)?;
+        let url = match &self.completion_endpoint {
+            Some(url) => Url::parse(url)?,
+            None => completion_url(&endpoint.base_url)?,
+        };
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(api_key) = endpoint.api_key.as_deref() {
@@ -362,7 +374,10 @@ impl OpenAiGateway {
         F: FnMut(ChatStreamDelta) -> bool,
     {
         validate_gateway_messages(messages)?;
-        let url = completion_url(&endpoint.base_url)?;
+        let url = match &self.completion_endpoint {
+            Some(url) => Url::parse(url)?,
+            None => completion_url(&endpoint.base_url)?,
+        };
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(api_key) = endpoint.api_key.as_deref() {
@@ -479,7 +494,7 @@ impl OpenAiGateway {
     }
 }
 
-fn validate_gateway_messages(messages: &[GatewayMessage]) -> Result<(), GatewayError> {
+pub(crate) fn validate_gateway_messages(messages: &[GatewayMessage]) -> Result<(), GatewayError> {
     if messages.is_empty() {
         return Err(GatewayError::InvalidMessage(
             "at least one message is required".to_owned(),

@@ -319,6 +319,12 @@ impl MomoApiService {
             .await
             .map_err(MomoApiError::internal)?;
         let evidence_configuration = std::collections::BTreeMap::from([
+            (
+                "model_routes".to_owned(),
+                serde_json::to_string(&request.momo.model_routes)
+                    .map_err(MomoApiError::internal)?,
+            ),
+            ("model_reference".to_owned(), request.model.clone()),
             ("character_sha256".to_owned(), character_revision),
             (
                 "assistant_revision".to_owned(),

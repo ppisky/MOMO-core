@@ -96,7 +96,9 @@ state contract GET/PUT/DELETE 按 Space 管理 YAML 覆盖，经校验、CAS 和
 | `PUT` | `/v1/memory/record-policy` | 本机管理/发现 |
 | `PUT` | `/v1/memory/identity-binding` | 本机管理/发现 |
 | `POST` | `/v1/memory/evidence/control` | 本机管理/发现 |
-| `PUT` | `/v1/memory/default-assistant` | 本机管理/发现 |
+| `GET/POST/PUT` | `/v1/memory/default-assistant` | 查询、原子建立或显式修改默认助手映射 |
+| `GET/PUT` | `/v1/model-configuration` | 服务商与模型配置；读取密钥脱敏，版本比较更新，见 [模型连接](model_connections.md) |
+| `GET` | `/v1/model-configuration/providers/:id/models` | 用保存的凭据获取模型列表；不自动写入配置 |
 | `GET,PUT,DELETE` | `/v1/memory/documents/{id}` | 本机管理/发现 |
 | `POST` | `/v1/memory/documents/{id}/archive` | 本机管理/发现 |
 | `POST` | `/v1/memory/documents/{id}/restore` | 本机管理/发现 |

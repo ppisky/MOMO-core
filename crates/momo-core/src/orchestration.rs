@@ -125,6 +125,7 @@ pub struct MomoApiService {
     gateway_client: reqwest::Client,
     vision_adapter: Arc<dyn VisionDescriptionAdapter>,
     coordination: Arc<coordination::ResponseCoordination>,
+    model_routes: std::collections::BTreeMap<String, crate::response::RequestModelRoute>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,6 +195,7 @@ impl MomoApiService {
             gateway_api_key,
             gateway_client,
             vision_adapter,
+            model_routes: Default::default(),
         }
     }
 

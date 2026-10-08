@@ -48,7 +48,41 @@ impl MomoApiService {
         let _operation = self
             .coordination
             .enter_operation(&operation_key, personal_space_id);
-        self.execute_active(request, request_id, &operation_key, stream)
+        let mut routed = self.clone();
+        routed.model_routes = request.momo.model_routes.clone();
+        routed.validate_model_routes()?;
+        // Validate configured foreground references before writing an operation or user turn.
+        if let Some(connection) = self
+            .runtime
+            .model_connection(&request.model)
+            .map_err(MomoApiError::bad_request)?
+            && connection.model.kind == crate::ModelKind::Embedding
+        {
+            return Err(MomoApiError::bad_request(
+                "embedding models cannot generate responses",
+            ));
+        }
+        if let Some(connection) = routed
+            .configured_connection(DEFAULT_VISION_ROUTE)
+            .map_err(MomoApiError::bad_request)?
+        {
+            let parameters = routed
+                .route_parameters(DEFAULT_VISION_ROUTE, personal_space_id)?
+                .unwrap_or_default();
+            routed.vision_adapter = Arc::new(crate::model_registry::ConfiguredVisionAdapter {
+                connection,
+                parameters,
+            });
+        } else if let Some(route) = routed.model_routes.get(DEFAULT_VISION_ROUTE) {
+            routed.vision_adapter = Arc::new(crate::GatewayVisionAdapter::new(
+                self.gateway_client.clone(),
+                self.gateway_origin.clone(),
+                self.gateway_api_key.clone(),
+                &route.model,
+            ));
+        }
+        routed
+            .execute_active(request, request_id, &operation_key, stream)
             .await
     }
 

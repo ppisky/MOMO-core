@@ -276,6 +276,59 @@ pub async fn set_default_memory_assistant(
         .map_err(|e| RuntimeApiError::internal(e.to_string()))
 }
 
+pub async fn default_memory_assistant(
+    runtime: &MomoRuntime,
+    personal_space_id: uuid::Uuid,
+) -> RuntimeApiResult<Option<uuid::Uuid>> {
+    runtime
+        .core()
+        .store()
+        .default_assistant(personal_space_id)
+        .await
+        .map_err(|e| RuntimeApiError::internal(e.to_string()))
+}
+
+/// Bootstrap a normal, empty-persona assistant identity without replacing an
+/// existing mapping. Prompt Spaces remain instance configuration, not card data.
+pub async fn ensure_default_memory_assistant(
+    runtime: &MomoRuntime,
+    personal_space_id: uuid::Uuid,
+    name: String,
+    author_name: String,
+) -> RuntimeApiResult<momo_domain::CharacterCard> {
+    let now = chrono::Utc::now();
+    let card = momo_domain::CharacterCard {
+        id: momo_domain::new_id(),
+        scope_id: personal_space_id,
+        name,
+        version: "2.0.0".into(),
+        author_name,
+        author_url: None,
+        character_markdown: String::new(),
+        user_markdown: String::new(),
+        opening_markdown: None,
+        created_at: now,
+        updated_at: now,
+    };
+    card.validate().map_err(RuntimeApiError::invalid)?;
+    let guards = runtime
+        .core()
+        .reserve_spaces([personal_space_id])
+        .await
+        .map_err(RuntimeApiError::recovery)?;
+    let core = runtime.core_handle();
+    runtime
+        .finish_commit(async move {
+            let _guards = guards;
+            core.store()
+                .ensure_default_assistant(&card)
+                .await
+                .map_err(|e| RuntimeApiError::internal(e.to_string()))
+        })
+        .await
+        .map_err(|e| RuntimeApiError::internal(e.to_string()))?
+}
+
 pub async fn control_memory_evidence(
     runtime: &MomoRuntime,
     conversation_id: uuid::Uuid,

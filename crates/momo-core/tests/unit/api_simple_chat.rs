@@ -120,6 +120,7 @@ async fn cancellation_drops_a_stalled_upstream_stream_immediately() {
                 api_key: None,
                 model: "test-model".to_owned(),
             },
+            None,
             &[GatewayMessage {
                 role: crate::GatewayMessageRole::User,
                 content: Some(crate::GatewayMessageContent::Text("wait".to_owned())),

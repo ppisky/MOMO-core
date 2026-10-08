@@ -49,6 +49,93 @@ struct GatewayEmbeddingProfile {
 }
 
 impl MomoApiService {
+    pub(super) fn configured_connection(
+        &self,
+        alias: &str,
+    ) -> Result<Option<crate::model_registry::ModelConnection>, String> {
+        self.runtime.model_connection(
+            self.model_routes
+                .get(alias)
+                .map_or(alias, |r| r.model.as_str()),
+        )
+    }
+    pub(super) fn validate_model_routes(&self) -> Result<(), MomoApiError> {
+        for (alias, route) in &self.model_routes {
+            if !matches!(
+                alias.as_str(),
+                "vision" | "memory_distillation" | "semantic_graph_governance"
+            ) || route
+                .temperature
+                .is_some_and(|v| !v.is_finite() || !(0.0..=2.0).contains(&v))
+                || route
+                    .top_p
+                    .is_some_and(|v| !v.is_finite() || !(0.0..=1.0).contains(&v))
+                || route.max_output_tokens == Some(0)
+            {
+                return Err(MomoApiError::bad_request("invalid model route"));
+            }
+            if let Some(connection) = self
+                .runtime
+                .model_connection(&route.model)
+                .map_err(MomoApiError::bad_request)?
+            {
+                if connection.model.kind == crate::ModelKind::Embedding {
+                    return Err(MomoApiError::bad_request(
+                        "model kind is incompatible with route",
+                    ));
+                }
+            } else if route.model != *alias && route.model != "conversation" {
+                return Err(MomoApiError::bad_request(
+                    "model route requires a configured reference or conversation",
+                ));
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn route_parameters(
+        &self,
+        alias: &str,
+        scope: &str,
+    ) -> Result<Option<ChatParameters>, MomoApiError> {
+        let Some(route) = self.model_routes.get(alias) else {
+            return Ok(None);
+        };
+        let connection = self
+            .configured_connection(alias)
+            .map_err(MomoApiError::bad_request)?;
+        let (context, output) = connection.as_ref().map_or((8192, 1024), |c| {
+            (
+                c.model.context_window,
+                c.model.max_output_tokens.unwrap_or(1024),
+            )
+        });
+        let mut values = serde_json::Map::new();
+        if let Some(p) = route.top_p {
+            values.insert("top_p".into(), json!(p));
+        }
+        let governed = self
+            .config_for_space(scope)
+            .govern(
+                context,
+                output,
+                crate::RequestedOverrides {
+                    context_window: None,
+                    max_output_tokens: route.max_output_tokens,
+                    temperature: route.temperature,
+                    instructions: None,
+                    visual_description_prompt: None,
+                    parameters: &values,
+                    tool_configuration_requested: false,
+                },
+            )
+            .map_err(MomoApiError::bad_request)?;
+        let mut parameters = governed.parameters;
+        parameters.insert("max_tokens".into(), json!(governed.max_output_tokens));
+        Ok(Some(ChatParameters {
+            temperature: governed.temperature,
+            request_parameters: parameters,
+        }))
+    }
     pub(super) async fn generate_response_completion(
         &self,
         attempt: GatewayResponseAttempt<'_>,
@@ -77,12 +164,33 @@ impl MomoApiService {
         let endpoint = ProviderEndpoint {
             base_url: self.gateway_origin.clone(),
             api_key: self.gateway_api_key.clone(),
-            model: model.to_owned(),
+            model: self
+                .model_routes
+                .get(model)
+                .map_or(model, |r| r.model.as_str())
+                .to_owned(),
         };
-        let parameters = ChatParameters {
+        let connection = self
+            .configured_connection(model)
+            .map_err(MomoApiError::bad_request)?;
+        if connection
+            .as_ref()
+            .is_some_and(|c| c.model.kind == crate::ModelKind::Embedding)
+        {
+            return Err(MomoApiError::bad_request(
+                "embedding models cannot generate responses",
+            ));
+        }
+        let mut parameters = ChatParameters {
             temperature,
             request_parameters,
         };
+        if let Some(route) = self.route_parameters(model, personal_space_id)? {
+            parameters.temperature = route.temperature;
+            parameters
+                .request_parameters
+                .extend(route.request_parameters);
+        }
 
         let generation_gate = self
             .coordination
@@ -119,6 +227,7 @@ impl MomoApiService {
                 self.runtime(),
                 operation_key,
                 &endpoint,
+                connection.as_ref(),
                 &messages,
                 parameters,
                 |event| {
@@ -144,8 +253,17 @@ impl MomoApiService {
                 .register_cancellation(operation_key.to_owned());
             self.coordination.ensure_active(operation_key)?;
             let gateway = OpenAiGateway::default();
+            let completion = async {
+                if let Some(connection) = connection {
+                    connection.complete(&messages, parameters).await
+                } else {
+                    gateway
+                        .complete_messages(&endpoint, &messages, parameters)
+                        .await
+                }
+            };
             tokio::select! {
-                result = gateway.complete_messages(&endpoint, &messages, parameters) => result.map_err(MomoApiError::model)?,
+                result = completion => result.map_err(MomoApiError::model)?,
                 () = registration.notified() => return Err(MomoApiError::cancelled()),
             }
         };
@@ -164,6 +282,20 @@ impl MomoApiService {
         &self,
         alias: &str,
     ) -> Result<GatewayGenerationCapability, String> {
+        if let Some(connection) = self.configured_connection(alias)? {
+            if connection.model.kind == crate::ModelKind::Embedding {
+                return Err("embedding models cannot generate responses".into());
+            }
+            return Ok(GatewayGenerationCapability {
+                context_window: connection.model.context_window,
+                max_output_tokens: connection
+                    .model
+                    .max_output_tokens
+                    .unwrap_or(1024)
+                    .min(connection.model.context_window - 1),
+                supports_images: connection.model.kind == crate::ModelKind::Vision,
+            });
+        }
         let discovery = self.gateway_model_detail(alias).await?;
         let context_window = discovery
             .pointer("/momo/context_window")
@@ -196,6 +328,10 @@ impl MomoApiService {
     }
 
     async fn gateway_model_detail(&self, alias: &str) -> Result<Value, String> {
+        let alias = self
+            .model_routes
+            .get(alias)
+            .map_or(alias, |r| r.model.as_str());
         let url = format!(
             "{}/models/{alias}",
             self.gateway_origin.trim_end_matches('/')
@@ -274,6 +410,7 @@ async fn stream_gateway_completion<F>(
     runtime: &crate::MomoRuntime,
     operation_key: &str,
     endpoint: &ProviderEndpoint,
+    connection: Option<&crate::model_registry::ModelConnection>,
     messages: &[GatewayMessage],
     parameters: ChatParameters,
     on_delta: F,
@@ -287,7 +424,15 @@ where
         .ensure_active(operation_key)
         .map_err(|_| GatewayError::Cancelled)?;
     let gateway = OpenAiGateway::default();
-    let stream_request = gateway.stream_messages(endpoint, messages, parameters, on_delta);
+    let stream_request = async {
+        if let Some(connection) = connection {
+            connection.stream(messages, parameters, on_delta).await
+        } else {
+            gateway
+                .stream_messages(endpoint, messages, parameters, on_delta)
+                .await
+        }
+    };
     tokio::pin!(stream_request);
     let cancellation = cancelled.notified();
     tokio::pin!(cancellation);

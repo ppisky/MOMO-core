@@ -81,6 +81,7 @@ impl CancellationSignal {
 /// lifecycle and no runtime resource is stored in process-global state.
 #[derive(Debug)]
 pub struct MomoRuntime {
+    pub(crate) models: OwnedState<crate::model_registry::ModelRegistry>,
     core: Arc<MomoCore>,
     settings: Arc<OwnedState<settings::SettingsStore>>,
     prompt_spaces: crate::PromptSpaces,
@@ -112,7 +113,11 @@ impl MomoRuntime {
             crate::PromptSpaces::load_or_default(core.data_dir().join("prompt-spaces.json"))?;
         let settings =
             settings::SettingsStore::load(&core.data_dir().join("runtime-settings.json"))?;
+        let models = crate::model_registry::ModelRegistry::load(
+            core.data_dir().join("model-connections.json"),
+        )?;
         Ok(Self {
+            models: OwnedState::new(models),
             core,
             settings: Arc::new(OwnedState::new(settings)),
             prompt_spaces,

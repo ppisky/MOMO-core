@@ -7,6 +7,10 @@ mod context;
 mod control;
 mod embedding;
 mod gateway;
+mod model_registry;
+pub use model_registry::{
+    ConfiguredModel, ModelConfiguration, ModelKind, ModelProvider, ProviderProtocol,
+};
 mod governance;
 mod lsb;
 mod orchestration;
@@ -105,9 +109,10 @@ pub use response::{
     MAX_RESPONSE_REQUEST_BYTES, MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES,
     MAX_RESPONSE_TOOL_ARGUMENT_BYTES, MAX_RESPONSE_TOOL_OUTPUT_BYTES,
     MAX_RESPONSE_TOOL_SCHEMA_BYTES, MAX_RESPONSE_TOOLS, MOMO_RESPONSE_SCHEMA, MomoResponse,
-    MomoResponseExtension, MomoResponseMetadata, MomoResponseRequest, ResponseContentBlock,
-    ResponseContractError, ResponseError, ResponseImageInput, ResponseInput, ResponseInputItem,
-    ResponseMessageContent, ResponseOutputContent, ResponseOutputItem, ResponseTool, ResponseUsage,
+    MomoResponseExtension, MomoResponseMetadata, MomoResponseRequest, RequestModelRoute,
+    ResponseContentBlock, ResponseContractError, ResponseError, ResponseImageInput, ResponseInput,
+    ResponseInputItem, ResponseMessageContent, ResponseOutputContent, ResponseOutputItem,
+    ResponseTool, ResponseUsage,
 };
 pub use runtime::{MomoRuntime, RuntimeSettingsResource, runtime_settings_description};
 pub use vision::{

@@ -1,0 +1,180 @@
+use super::*;
+use crate::{ChatParameters, GatewayMessage, GatewayMessageRole};
+use axum::{
+    Json, Router,
+    http::{HeaderMap, header},
+    response::IntoResponse,
+    routing::post,
+};
+use std::sync::{Arc, Mutex};
+
+fn connection(protocol: ProviderProtocol, base_url: String) -> ModelConnection {
+    let provider = ModelProvider {
+        id: uuid::Uuid::now_v7(),
+        name: "Fixture".into(),
+        protocol,
+        base_url,
+        api_path: String::new(),
+        api_key: Some("fixture-secret".into()),
+    };
+    let model = ConfiguredModel {
+        id: uuid::Uuid::now_v7(),
+        provider_id: provider.id,
+        model_id: "example".into(),
+        name: "Example".into(),
+        kind: ModelKind::Chat,
+        context_window: 8192,
+        max_output_tokens: None,
+    };
+    ModelConnection { provider, model }
+}
+#[test]
+fn persistence_redacts_secrets_uses_cas_and_keeps_frozen_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.json");
+    let mut registry = ModelRegistry::load(path.clone()).unwrap();
+    let c = connection(ProviderProtocol::Openai, "http://127.0.0.1/v1".into());
+    let reference = reference(&c);
+    let config = ModelConfiguration {
+        revision: 0,
+        providers: vec![c.provider.clone()],
+        models: vec![c.model.clone()],
+    };
+    let public = registry.update(config.clone()).unwrap();
+    assert!(!public.to_string().contains("fixture-secret"));
+    assert_eq!(public["providers"][0]["has_api_key"], true);
+    assert!(matches!(
+        registry.update(config.clone()),
+        Err(GovernanceError::Conflict { .. })
+    ));
+    let mut next = config;
+    next.revision = 1;
+    next.providers[0].api_key = None;
+    next.models[0].model_id = "next".into();
+    registry.update(next).unwrap();
+    let reopened = ModelRegistry::load(path).unwrap();
+    assert_eq!(
+        reopened.stored.current.providers[0].api_key.as_deref(),
+        Some("fixture-secret")
+    );
+    assert_eq!(
+        reopened.stored.snapshots[&reference].model.model_id,
+        "example"
+    );
+    assert_eq!(reopened.stored.snapshots.len(), 2);
+}
+#[tokio::test]
+async fn native_protocols_convert_requests_and_stream_text_with_terminal_checks() {
+    for protocol in [
+        ProviderProtocol::Openai,
+        ProviderProtocol::OpenaiResponses,
+        ProviderProtocol::Anthropic,
+        ProviderProtocol::Gemini,
+    ] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app=Router::new().route("/*path",post(move|headers:HeaderMap,Json(body):Json<Value>|{
+            captured.lock().unwrap().push((headers,body.clone()));async move {
+                let stream=protocol==ProviderProtocol::Gemini || body["stream"]==true;
+                let final_value=match protocol{
+                    ProviderProtocol::Openai=>json!({"id":"upstream","choices":[{"message":{"content":"你好"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}),
+                    ProviderProtocol::OpenaiResponses=>json!({"id":"upstream","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"你好"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}),
+                    ProviderProtocol::Anthropic=>json!({"id":"upstream","content":[{"type":"text","text":"你好"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}),
+                    ProviderProtocol::Gemini=>json!({"responseId":"upstream","candidates":[{"content":{"parts":[{"text":"你好"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}})
+                };
+                if !stream{return Json(final_value).into_response();}
+                let values=match protocol{
+                    ProviderProtocol::Openai=>vec![json!({"id":"upstream","choices":[{"delta":{"content":"你"}}]}),json!({"choices":[{"delta":{"content":"好"},"finish_reason":"stop"}]}),json!({"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}})],
+                    ProviderProtocol::OpenaiResponses=>vec![json!({"type":"response.output_text.delta","delta":"你"}),json!({"type":"response.output_text.delta","delta":"好"}),json!({"type":"response.completed","response":final_value})],
+                    ProviderProtocol::Anthropic=>vec![json!({"type":"message_start","message":{"id":"upstream","content":[],"usage":{"input_tokens":3}}}),json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你"}}),json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}),json!({"type":"content_block_stop","index":0}),json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),json!({"type":"message_stop"})],
+                    ProviderProtocol::Gemini=>vec![json!({"candidates":[{"content":{"parts":[{"text":"你"}]}}]}),json!({"responseId":"upstream","candidates":[{"content":{"parts":[{"text":"好"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}})]
+                };
+                let mut data=values.iter().map(|v|format!("data: {v}\n\n")).collect::<String>();if protocol==ProviderProtocol::Openai{data.push_str("data: [DONE]\n\n");}
+                ([(header::CONTENT_TYPE,"text/event-stream")],data).into_response()
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let c = connection(protocol, format!("http://{address}/v1"));
+        let messages = [
+            GatewayMessage {
+                role: GatewayMessageRole::System,
+                content: Some("system".into()),
+                tool_call_id: None,
+                tool_calls: vec![],
+            },
+            GatewayMessage {
+                role: GatewayMessageRole::User,
+                content: Some("hello".into()),
+                tool_call_id: None,
+                tool_calls: vec![],
+            },
+        ];
+        let parameters = ChatParameters {
+            temperature: None,
+            request_parameters: serde_json::Map::from_iter([
+                ("max_tokens".into(), json!(300)),
+                ("top_p".into(), json!(0.7)),
+            ]),
+        };
+        let mut deltas = String::new();
+        let completed = c
+            .stream(&messages, parameters, |event| {
+                deltas.push_str(&event.delta);
+                true
+            })
+            .await
+            .unwrap();
+        assert_eq!(deltas, "你好");
+        assert_eq!(completed.content, "你好");
+        assert_eq!(completed.usage.unwrap().total_tokens, 5);
+        let captured = seen.lock().unwrap();
+        let (headers, body) = &captured[0];
+        match protocol {
+            ProviderProtocol::Anthropic => {
+                assert_eq!(headers["x-api-key"], "fixture-secret");
+                assert_eq!(body["max_tokens"], 300);
+                assert_eq!(body["system"][0]["text"], "system");
+            }
+            ProviderProtocol::Gemini => {
+                assert_eq!(headers["x-goog-api-key"], "fixture-secret");
+                assert_eq!(body["generationConfig"]["maxOutputTokens"], 300);
+                assert_eq!(body["systemInstruction"]["parts"][0]["text"], "system");
+            }
+            _ => assert_eq!(headers["authorization"], "Bearer fixture-secret"),
+        }
+        assert!(body.get("temperature").is_none());
+        server.abort();
+    }
+}
+#[test]
+fn rejects_unterminated_or_inconsistent_native_streams_and_preserves_function_calls() {
+    let mut s = transport::StreamState::new(ProviderProtocol::OpenaiResponses);
+    s.accept(json!({"type":"response.output_text.delta","delta":"partial"}))
+        .unwrap();
+    assert!(!s.done);
+    assert!(s.accept(json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"changed"}]}]}})).is_err());
+    for (protocol, value) in [
+        (
+            ProviderProtocol::OpenaiResponses,
+            json!({"status":"completed","output":[{"type":"function_call","call_id":"call1","name":"weather","arguments":"{\"city\":\"Paris\"}"}]}),
+        ),
+        (
+            ProviderProtocol::Anthropic,
+            json!({"stop_reason":"tool_use","content":[{"type":"tool_use","id":"call1","name":"weather","input":{"city":"Paris"}}]}),
+        ),
+        (
+            ProviderProtocol::Gemini,
+            json!({"candidates":[{"finishReason":"STOP","content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Paris"}}}]}}]}),
+        ),
+    ] {
+        let result = protocol::completion(protocol, &value).unwrap();
+        assert_eq!(result.tool_calls[0].function.name, "weather");
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.tool_calls[0].function.arguments).unwrap()["city"],
+            "Paris"
+        );
+        assert_eq!(result.finish_reason.as_deref(), Some("tool_calls"));
+    }
+}

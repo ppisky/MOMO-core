@@ -179,6 +179,14 @@ fn api_routes() -> Router<AppState> {
             post(record_momo_maintenance_turn),
         )
         .route("/momo/maintenance/drain", post(drain_momo_maintenance))
+        .route(
+            "/model-configuration",
+            get(get_model_configuration).put(put_model_configuration),
+        )
+        .route(
+            "/model-configuration/providers/:id/models",
+            get(discover_provider_models),
+        )
         .route("/memory/documents", get(list_memory_documents))
         .route("/memory/provenance", get(get_memory_provenance))
         .route("/memory/record-policy", put(put_memory_record_policy))
@@ -186,7 +194,9 @@ fn api_routes() -> Router<AppState> {
         .route("/memory/evidence/control", post(control_memory_evidence))
         .route(
             "/memory/default-assistant",
-            put(put_default_memory_assistant),
+            get(get_default_memory_assistant)
+                .put(put_default_memory_assistant)
+                .post(ensure_default_memory_assistant),
         )
         .route(
             "/memory/documents/:id",

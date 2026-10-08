@@ -39,6 +39,12 @@ Prompt Space 不是 Space，没有用户级所有权，也不随 MOC 导入或�
 
 ## HTTP API
 
+2026-10-09：本机管理接口 `GET /v1/memory/default-assistant?personal_space_id=<UUID>`
+返回当前映射的 `character_id`（未配置为 null）。`POST /v1/memory/default-assistant`
+接收 `personal_space_id`、`name`、`author_name`，仅在没有映射时原子创建空人物设定的
+助手并绑定；并发和重开复用同一身份，已有映射原样返回。此操作不改变提示词槽位，
+也不覆盖用户选定的默认角色。原 `PUT` 仍用于显式改选已有角色。
+
 ```http
 GET /v1/prompt-spaces
 GET /v1/prompt-spaces/assistant

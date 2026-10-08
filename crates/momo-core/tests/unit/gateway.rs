@@ -232,6 +232,7 @@ async fn streams_openai_compatible_deltas_over_http() {
     });
 
     let gateway = OpenAiGateway {
+        completion_endpoint: None,
         client: Client::builder().no_proxy().build().expect("test client"),
     };
     let mut deltas = Vec::new();
@@ -283,6 +284,7 @@ async fn rejects_oversized_non_streaming_response_before_reading_body() {
             .expect("response");
     });
     let gateway = OpenAiGateway {
+        completion_endpoint: None,
         client: Client::builder().no_proxy().build().expect("client"),
     };
     let error = gateway
@@ -333,6 +335,7 @@ async fn streams_tool_calls_without_buffering_argument_deltas() {
     });
 
     let gateway = OpenAiGateway {
+        completion_endpoint: None,
         client: Client::builder().no_proxy().build().expect("test client"),
     };
     let mut argument_deltas = Vec::new();
@@ -400,6 +403,7 @@ async fn streams_when_http_body_arrives_one_byte_at_a_time() {
     });
 
     let gateway = OpenAiGateway {
+        completion_endpoint: None,
         client: Client::builder().no_proxy().build().expect("test client"),
     };
     let completion = gateway
@@ -444,6 +448,7 @@ async fn rejects_a_stream_that_closes_without_done() {
     });
 
     let gateway = OpenAiGateway {
+        completion_endpoint: None,
         client: Client::builder().no_proxy().build().expect("test client"),
     };
     let error = gateway
@@ -494,6 +499,7 @@ async fn stops_stream_when_consumer_rejects_more_deltas() {
     });
 
     let gateway = OpenAiGateway {
+        completion_endpoint: None,
         client: Client::builder().no_proxy().build().expect("test client"),
     };
     let mut accepted = 0_usize;
