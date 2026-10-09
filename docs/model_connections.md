@@ -20,6 +20,8 @@ Core applies the Space's request-override policy to proposals. DDM uses the memo
 
 Embedding definitions are catalog metadata and are rejected from generation; the existing dedicated embedding gateway/profile contract remains responsible for vector dimensions and index compatibility. This change does not silently switch an existing vector index to a new embedding model.
 
+2026-10-09 setting correction: `context_window` may be omitted or null to retain an undeclared capability; zero is rejected. Internal budgeting uses a protective estimate rather than storing that estimate as a declaration. Route entries also accept optional `parameters`, governed by the originating Space's allowed-parameter policy. Empty parameter maps are omitted from serialization so existing request fingerprints remain stable. See [optional model context](optional_model_context.md).
+
 ## Protocol coverage and verification
 
 OpenAI Chat Completions reuses the bounded Core gateway. Responses, Anthropic Messages and Gemini convert text/system/image/function messages and normalize completion/usage/stream text. Native streams require a successful terminal event; mismatch, truncation, upstream errors, argument/stream limits and cancellation fail explicitly. Function-call deltas for these three protocols are emitted after the provider completes the call, while text remains incremental. Gemini images currently require a base64 data URL. Provider-specific reasoning/signature extensions are not a general compatibility guarantee.

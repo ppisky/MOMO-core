@@ -50,13 +50,17 @@ pub struct ConfiguredModel {
     pub model_id: String,
     pub name: String,
     pub kind: ModelKind,
-    #[serde(default = "default_context")]
-    pub context_window: usize,
+    #[serde(default)]
+    pub context_window: Option<usize>,
     #[serde(default)]
     pub max_output_tokens: Option<usize>,
 }
-fn default_context() -> usize {
-    8192
+impl ConfiguredModel {
+    /// A protective budget for undeclared capabilities, never a persisted declaration.
+    pub fn effective_context_window(&self) -> usize {
+        self.context_window
+            .unwrap_or_else(|| 8192.max(self.max_output_tokens.unwrap_or(1024).saturating_add(1)))
+    }
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,9 +134,11 @@ fn validate(c: &ModelConfiguration) -> Result<(), GovernanceError> {
             || m.model_id.chars().any(char::is_control)
             || m.name.trim().is_empty()
             || m.name.len() > 200
-            || !(1024..=16_000_000).contains(&m.context_window)
-            || m.max_output_tokens
-                .is_some_and(|n| n == 0 || n >= m.context_window)
+            || m.context_window
+                .is_some_and(|n| !(1024..=16_000_000).contains(&n))
+            || m.max_output_tokens.is_some_and(|n| {
+                n == 0 || n >= 16_000_000 || m.context_window.is_some_and(|context| n >= context)
+            })
         {
             return Err(invalid("invalid model definition"));
         }

@@ -16,7 +16,7 @@ fn connection(protocol: ProviderProtocol, base_url: String) -> ModelConnection {
         model_id: "example".into(),
         name: "Example".into(),
         kind: ModelKind::Chat,
-        context_window: 8192,
+        context_window: Some(8192),
         max_output_tokens: None,
     };
     ModelConnection { provider, model }

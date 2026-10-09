@@ -195,7 +195,7 @@ async fn model_resolver_is_explicit_service_scoped_and_never_falls_back_for_unkn
             model_id: "host-model".into(),
             name: "Host model".into(),
             kind: crate::ModelKind::Chat,
-            context_window: 8192,
+            context_window: Some(8192),
             max_output_tokens: None,
         },
         provider,

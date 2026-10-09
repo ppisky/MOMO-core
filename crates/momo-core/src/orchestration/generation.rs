@@ -104,11 +104,11 @@ impl MomoApiService {
             .map_err(MomoApiError::bad_request)?;
         let (context, output) = connection.as_ref().map_or((8192, 1024), |c| {
             (
-                c.model.context_window,
+                c.model.effective_context_window(),
                 c.model.max_output_tokens.unwrap_or(1024),
             )
         });
-        let mut values = serde_json::Map::new();
+        let mut values = route.parameters.clone();
         if let Some(p) = route.top_p {
             values.insert("top_p".into(), json!(p));
         }
@@ -286,12 +286,12 @@ impl MomoApiService {
                 return Err("embedding models cannot generate responses".into());
             }
             return Ok(GatewayGenerationCapability {
-                context_window: connection.model.context_window,
+                context_window: connection.model.effective_context_window(),
                 max_output_tokens: connection
                     .model
                     .max_output_tokens
                     .unwrap_or(1024)
-                    .min(connection.model.context_window - 1),
+                    .min(connection.model.effective_context_window() - 1),
                 supports_images: connection.model.kind == crate::ModelKind::Vision,
             });
         }

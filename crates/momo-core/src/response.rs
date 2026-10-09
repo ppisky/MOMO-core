@@ -621,6 +621,8 @@ pub struct RequestModelRoute {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub max_output_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub parameters: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

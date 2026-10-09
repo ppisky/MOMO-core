@@ -24,10 +24,38 @@ fn connection(protocol: ProviderProtocol, base_url: String) -> ModelConnection {
         model_id: "example".into(),
         name: "Example".into(),
         kind: ModelKind::Chat,
-        context_window: 8192,
+        context_window: Some(8192),
         max_output_tokens: None,
     };
     ModelConnection { provider, model }
+}
+
+#[test]
+fn optional_context_is_preserved_without_accepting_zero_or_invalid_output() {
+    let mut connection = connection(ProviderProtocol::Openai, "http://127.0.0.1:9/v1".into());
+    connection.model.context_window = None;
+    let mut configuration = ModelConfiguration {
+        revision: 0,
+        providers: vec![connection.provider],
+        models: vec![connection.model],
+    };
+    configuration.validate().unwrap();
+    assert_eq!(configuration.models[0].effective_context_window(), 8192);
+    let encoded = serde_json::to_value(&configuration.models[0]).unwrap();
+    assert!(encoded["context_window"].is_null());
+    let mut omitted = encoded.clone();
+    omitted.as_object_mut().unwrap().remove("context_window");
+    let decoded: ConfiguredModel = serde_json::from_value(omitted).unwrap();
+    assert_eq!(decoded.context_window, None);
+    configuration.models[0].max_output_tokens = Some(10000);
+    configuration.validate().unwrap();
+    assert_eq!(configuration.models[0].effective_context_window(), 10001);
+    configuration.models[0].context_window = Some(0);
+    assert!(configuration.validate().is_err());
+    configuration.models[0].context_window = Some(8192);
+    assert!(configuration.validate().is_err());
+    configuration.models[0].max_output_tokens = Some(0);
+    assert!(configuration.validate().is_err());
 }
 #[tokio::test]
 async fn native_protocols_convert_requests_and_stream_text_with_terminal_checks() {
