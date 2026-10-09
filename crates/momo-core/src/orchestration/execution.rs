@@ -53,7 +53,6 @@ impl MomoApiService {
         routed.validate_model_routes()?;
         // Validate configured foreground references before writing an operation or user turn.
         if let Some(connection) = self
-            .runtime
             .model_connection(&request.model)
             .map_err(MomoApiError::bad_request)?
             && connection.model.kind == crate::ModelKind::Embedding

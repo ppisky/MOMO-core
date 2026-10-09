@@ -59,6 +59,8 @@ Core 不查找 `momo.toml` 或 `MOMO_CONFIG_PATH`。`momo-config` 是可移植�
 这两个连接参数保存在服务实例内存中，不是 `/v1/runtime-settings` 字段，也不写入 SQLite
 或 MOC。实际服务商账号、凭据和模型路由映射由宿主或网关管理，Core 不规定其存储格式。
 
+2026-10-09 接入增量：`momo-server` 提供可选的本机连接目录与管理接口，文件由 HTTP 宿主负责；通过 `MomoApiService::with_model_connections` 注入解析器。`MomoRuntime` 不加载账号文件，Rust 嵌入方可继续使用原网关注入，也可自行提供解析器与存储。详见 [宿主模型连接](model_connections.md)。
+
 ## 更新到底意味着什么
 
 `update_runtime_settings(settings)` 和 `PUT /v1/runtime-settings` 都是校验后完整替换。

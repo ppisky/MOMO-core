@@ -21,6 +21,7 @@ async fn provenance_management_routes_use_typed_records() {
     let _test_guard = TEST_LOCK.lock().await;
     initialize_test_core().await;
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -363,6 +364,7 @@ async fn prompt_spaces_can_be_listed_replaced_and_reset_over_http() {
     let _test_guard = TEST_LOCK.lock().await;
     let _initialized_dir = initialize_test_core().await;
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -458,6 +460,7 @@ async fn response_json_rejections_use_the_unified_error_envelope() {
     let _test_guard = TEST_LOCK.lock().await;
     let _initialized_dir = initialize_test_core().await;
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -491,6 +494,7 @@ async fn runtime_settings_api_updates_the_live_service_without_a_config_file() {
     let _initialized_dir = initialize_test_core().await;
     let momo_api = test_momo_api("http://127.0.0.1:9/v1");
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: Arc::clone(&momo_api),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -571,6 +575,7 @@ async fn http_core_contract_and_character_round_trip() {
     let _test_guard = TEST_LOCK.lock().await;
     let _initialized_dir = initialize_test_core().await;
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -1301,6 +1306,7 @@ async fn http_moc_host_modules_export_and_claim() {
     let output = TEST_DATA_DIR.path().join("host-module.moc");
     let claims = TEST_DATA_DIR.path().join("host-module-claims");
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -1426,6 +1432,7 @@ async fn conversation_and_messages_fail_closed_across_scopes() {
     let message_id = message["id"].as_str().expect("message ID").to_owned();
 
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -1699,6 +1706,7 @@ async fn responses_forwards_upstream_sse_deltas_before_completion() {
     let mut config = MomoRuntimeSettings::default();
     config.request_overrides.sampling = momo_core::OverrideMode::Allow;
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: Arc::new({
             let runtime = test_runtime_arc();
@@ -1928,6 +1936,7 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
     let mut config = MomoRuntimeSettings::default();
     config.mo_state.ddm.enabled = true;
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: Arc::new({
             let runtime = test_runtime_arc();
@@ -2077,6 +2086,7 @@ async fn responses_orchestrates_once_and_replays_by_request_id() {
 
     drop(app);
     let restarted_app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: Arc::new({
             let runtime = test_runtime_arc();
@@ -2242,6 +2252,7 @@ async fn multimodal_conversation_receives_original_image_and_roleplay_prompt() {
         )
     });
     let app = build_app(AppState {
+        model_connections: test_model_connections(),
         runtime,
         momo_api,
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -2397,6 +2408,7 @@ async fn successful_turns_drive_persistent_background_maintenance() {
         assert_eq!(memory_generations, 2);
     });
     let state = AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -2673,6 +2685,7 @@ async fn maintenance_repairs_invalid_memory_patch_before_staging() {
         }
     });
     let state = AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -2799,6 +2812,7 @@ async fn maintenance_repairs_invalid_semantic_graph_patch_before_staging() {
         }
     });
     let state = AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -2906,6 +2920,7 @@ async fn maintenance_rechecks_an_empty_first_pass_before_acknowledging_turns() {
         }
     });
     let state = AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -3023,6 +3038,7 @@ async fn maintenance_retries_a_length_truncated_patch_before_staging() {
         }
     });
     let state = AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -3074,6 +3090,7 @@ async fn maintenance_barrier_reports_upstream_failure_and_keeps_pending_work() {
     .await
     .expect("pending turn");
     let state = AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1"),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -3178,6 +3195,7 @@ async fn maintenance_barrier_keeps_memory_progress_when_nsg_fails() {
         }
     });
     let state = AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api(format!("http://{address}/v1")),
         response_concurrency: Arc::new(Semaphore::new(8)),
@@ -3263,6 +3281,7 @@ async fn structured_controls_switch_clear_and_delete_without_a_model() {
     .expect("conversation JSON");
     let conversation_id = conversation["id"].as_str().expect("conversation id");
     let state = AppState {
+        model_connections: test_model_connections(),
         runtime: test_runtime_arc(),
         momo_api: test_momo_api("http://127.0.0.1:9/v1".to_owned()),
         response_concurrency: Arc::new(Semaphore::new(1)),
@@ -3473,4 +3492,11 @@ async fn structured_controls_switch_clear_and_delete_without_a_model() {
     )
     .expect("conversations JSON");
     assert_eq!(conversations.as_array().map(Vec::len), Some(0));
+}
+
+fn test_model_connections() -> Arc<model_connections::ModelConnections> {
+    Arc::new(
+        model_connections::ModelConnections::load(TEST_DATA_DIR.path().join("host-models.json"))
+            .unwrap(),
+    )
 }

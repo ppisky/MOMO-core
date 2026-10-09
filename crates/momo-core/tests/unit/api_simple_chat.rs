@@ -154,3 +154,79 @@ async fn cancellation_drops_a_stalled_upstream_stream_immediately() {
         GatewayError::Cancelled
     ));
 }
+
+#[derive(Debug)]
+struct InjectedConnections(crate::ModelConnection);
+impl crate::ModelConnectionResolver for InjectedConnections {
+    fn resolve(&self, reference: &str) -> Result<Option<crate::ModelConnection>, String> {
+        Ok((reference == "configured_fixture").then(|| self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn model_resolver_is_explicit_service_scoped_and_never_falls_back_for_unknown_references() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(MomoRuntime::initialize(directory.path()).await.unwrap());
+    let service = MomoApiService::new(
+        runtime.clone(),
+        "http://127.0.0.1:9/v1",
+        None,
+        reqwest::Client::new(),
+    );
+    assert!(
+        service
+            .configured_connection("conversation")
+            .unwrap()
+            .is_none()
+    );
+    assert!(service.configured_connection("configured_fixture").is_err());
+    let provider = crate::ModelProvider {
+        id: uuid::Uuid::now_v7(),
+        name: "Injected".into(),
+        protocol: crate::ProviderProtocol::Openai,
+        base_url: "http://127.0.0.1:9/v1".into(),
+        api_path: String::new(),
+        api_key: None,
+    };
+    let connection = crate::ModelConnection {
+        model: crate::ConfiguredModel {
+            id: uuid::Uuid::now_v7(),
+            provider_id: provider.id,
+            model_id: "host-model".into(),
+            name: "Host model".into(),
+            kind: crate::ModelKind::Chat,
+            context_window: 8192,
+            max_output_tokens: None,
+        },
+        provider,
+    };
+    let injected = service
+        .clone()
+        .with_model_connections(Arc::new(InjectedConnections(connection.clone())));
+    assert_eq!(
+        injected
+            .configured_connection("configured_fixture")
+            .unwrap()
+            .unwrap()
+            .model
+            .model_id,
+        "host-model"
+    );
+    assert!(
+        injected
+            .configured_connection("configured_missing")
+            .is_err()
+    );
+    assert!(
+        injected
+            .configured_connection("conversation")
+            .unwrap()
+            .is_none()
+    );
+    assert!(service.configured_connection("configured_fixture").is_err());
+    let mut invalid = connection;
+    invalid.provider.base_url = "file:///private".into();
+    let bad = service.with_model_connections(Arc::new(InjectedConnections(invalid)));
+    assert!(bad.configured_connection("configured_fixture").is_err());
+    assert!(!directory.path().join("model-connections.json").exists());
+}

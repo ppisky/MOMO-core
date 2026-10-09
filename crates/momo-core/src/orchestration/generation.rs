@@ -53,7 +53,7 @@ impl MomoApiService {
         &self,
         alias: &str,
     ) -> Result<Option<crate::model_registry::ModelConnection>, String> {
-        self.runtime.model_connection(
+        self.model_connection(
             self.model_routes
                 .get(alias)
                 .map_or(alias, |r| r.model.as_str()),
@@ -75,7 +75,6 @@ impl MomoApiService {
                 return Err(MomoApiError::bad_request("invalid model route"));
             }
             if let Some(connection) = self
-                .runtime
                 .model_connection(&route.model)
                 .map_err(MomoApiError::bad_request)?
             {

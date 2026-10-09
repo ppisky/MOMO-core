@@ -1,16 +1,22 @@
 use super::super::*;
 use axum::http::{HeaderMap, HeaderValue, header};
 
-pub(crate) async fn get_model_configuration(State(state): State<AppState>) -> Json<Value> {
-    Json(state.runtime.model_configuration())
+pub(crate) async fn get_model_configuration(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    state
+        .model_connections
+        .public()
+        .map(Json)
+        .map_err(settings_error)
 }
 pub(crate) async fn discover_provider_models(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     state
-        .runtime
-        .discover_models(id)
+        .model_connections
+        .discover(id)
         .await
         .map(Json)
         .map_err(settings_error)
@@ -19,9 +25,9 @@ pub(crate) async fn put_model_configuration(
     State(state): State<AppState>,
     Json(value): Json<momo_core::ModelConfiguration>,
 ) -> Result<Json<Value>, ApiError> {
-    state
-        .runtime
-        .update_model_configuration(value)
+    tokio::task::spawn_blocking(move || state.model_connections.update(value))
+        .await
+        .map_err(|_| ApiError::internal("model configuration task failed"))?
         .map(Json)
         .map_err(settings_error)
 }

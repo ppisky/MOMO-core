@@ -416,3 +416,13 @@ async fn keyed_locks_serialize_only_matching_resources() {
     .await
     .expect("the resource lock must be released with its guard");
 }
+
+#[tokio::test]
+async fn embedded_runtime_does_not_load_or_rewrite_host_account_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("model-connections.json");
+    std::fs::write(&path, b"invalid host configuration").unwrap();
+    let runtime = MomoRuntime::initialize(directory.path()).await.unwrap();
+    assert_eq!(runtime.runtime_settings_resource(None).revision, 0);
+    assert_eq!(std::fs::read(&path).unwrap(), b"invalid host configuration");
+}

@@ -21,13 +21,21 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let gateway_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
-    let momo_api = Arc::new(MomoApiService::new(
-        Arc::clone(&runtime),
-        gateway_origin.clone(),
-        gateway_api_key.clone(),
-        gateway_client.clone(),
-    ));
+    let model_path = env::var_os("MOMO_MODEL_CONNECTIONS_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(&data_dir).join("model-connections.json"));
+    let model_connections = Arc::new(model_connections::ModelConnections::load(model_path)?);
+    let momo_api = Arc::new(
+        MomoApiService::new(
+            Arc::clone(&runtime),
+            gateway_origin.clone(),
+            gateway_api_key.clone(),
+            gateway_client.clone(),
+        )
+        .with_model_connections(model_connections.clone()),
+    );
     let state = AppState {
+        model_connections,
         runtime,
         momo_api,
         response_concurrency: Arc::new(Semaphore::new(env_usize(

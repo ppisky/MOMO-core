@@ -6,6 +6,7 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
+use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 fn connection(protocol: ProviderProtocol, base_url: String) -> ModelConnection {
@@ -27,41 +28,6 @@ fn connection(protocol: ProviderProtocol, base_url: String) -> ModelConnection {
         max_output_tokens: None,
     };
     ModelConnection { provider, model }
-}
-#[test]
-fn persistence_redacts_secrets_uses_cas_and_keeps_frozen_references() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("models.json");
-    let mut registry = ModelRegistry::load(path.clone()).unwrap();
-    let c = connection(ProviderProtocol::Openai, "http://127.0.0.1/v1".into());
-    let reference = reference(&c);
-    let config = ModelConfiguration {
-        revision: 0,
-        providers: vec![c.provider.clone()],
-        models: vec![c.model.clone()],
-    };
-    let public = registry.update(config.clone()).unwrap();
-    assert!(!public.to_string().contains("fixture-secret"));
-    assert_eq!(public["providers"][0]["has_api_key"], true);
-    assert!(matches!(
-        registry.update(config.clone()),
-        Err(GovernanceError::Conflict { .. })
-    ));
-    let mut next = config;
-    next.revision = 1;
-    next.providers[0].api_key = None;
-    next.models[0].model_id = "next".into();
-    registry.update(next).unwrap();
-    let reopened = ModelRegistry::load(path).unwrap();
-    assert_eq!(
-        reopened.stored.current.providers[0].api_key.as_deref(),
-        Some("fixture-secret")
-    );
-    assert_eq!(
-        reopened.stored.snapshots[&reference].model.model_id,
-        "example"
-    );
-    assert_eq!(reopened.stored.snapshots.len(), 2);
 }
 #[tokio::test]
 async fn native_protocols_convert_requests_and_stream_text_with_terminal_checks() {

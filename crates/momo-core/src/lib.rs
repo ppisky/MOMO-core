@@ -9,7 +9,8 @@ mod embedding;
 mod gateway;
 mod model_registry;
 pub use model_registry::{
-    ConfiguredModel, ModelConfiguration, ModelKind, ModelProvider, ProviderProtocol,
+    ConfiguredModel, ModelConfiguration, ModelConnection, ModelConnectionResolver, ModelKind,
+    ModelProvider, ProviderProtocol,
 };
 mod governance;
 mod lsb;

@@ -8,13 +8,18 @@ async fn isolated_app(origin: &str) -> (tempfile::TempDir, Arc<MomoRuntime>, Rou
 }
 
 fn app_for_runtime(runtime: Arc<MomoRuntime>, origin: &str) -> (Arc<MomoApiService>, Router) {
-    let api = Arc::new(MomoApiService::new(
-        runtime.clone(),
-        origin,
-        None,
-        reqwest::Client::new(),
-    ));
+    let model_connections = Arc::new(
+        model_connections::ModelConnections::load(
+            runtime.core().data_dir().join("test-host-models.json"),
+        )
+        .unwrap(),
+    );
+    let api = Arc::new(
+        MomoApiService::new(runtime.clone(), origin, None, reqwest::Client::new())
+            .with_model_connections(model_connections.clone()),
+    );
     let app = build_app(AppState {
+        model_connections,
         runtime: runtime.clone(),
         momo_api: api.clone(),
         response_concurrency: Arc::new(Semaphore::new(8)),

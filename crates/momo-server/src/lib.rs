@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
 
 mod dto;
+mod model_connections;
 mod routes;
 mod startup;
 
@@ -49,6 +50,7 @@ const MAX_PUBLIC_ERROR_BYTES: usize = 2 * 1024;
 
 #[derive(Clone)]
 struct AppState {
+    model_connections: Arc<model_connections::ModelConnections>,
     runtime: Arc<MomoRuntime>,
     momo_api: Arc<MomoApiService>,
     response_concurrency: Arc<Semaphore>,

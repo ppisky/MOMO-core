@@ -125,6 +125,7 @@ pub struct MomoApiService {
     gateway_client: reqwest::Client,
     vision_adapter: Arc<dyn VisionDescriptionAdapter>,
     coordination: Arc<coordination::ResponseCoordination>,
+    model_connections: Option<Arc<dyn crate::ModelConnectionResolver>>,
     model_routes: std::collections::BTreeMap<String, crate::response::RequestModelRoute>,
 }
 
@@ -196,7 +197,39 @@ impl MomoApiService {
             gateway_client,
             vision_adapter,
             model_routes: Default::default(),
+            model_connections: None,
         }
+    }
+
+    /// Install a host-owned resolver without giving the runtime account storage.
+    #[must_use]
+    pub fn with_model_connections(
+        mut self,
+        resolver: Arc<dyn crate::ModelConnectionResolver>,
+    ) -> Self {
+        self.model_connections = Some(resolver);
+        self
+    }
+
+    fn model_connection(&self, reference: &str) -> Result<Option<crate::ModelConnection>, String> {
+        let resolved = self
+            .model_connections
+            .as_ref()
+            .map(|resolver| resolver.resolve(reference))
+            .transpose()?
+            .flatten();
+        if let Some(connection) = &resolved {
+            crate::ModelConfiguration {
+                revision: 0,
+                providers: vec![connection.provider.clone()],
+                models: vec![connection.model.clone()],
+            }
+            .validate()
+            .map_err(|e| e.to_string())?;
+        } else if reference.starts_with("configured_") {
+            return Err("configured model reference does not exist".into());
+        }
+        Ok(resolved)
     }
 
     /// Returns the single runtime instance owned by this application service.

@@ -1,6 +1,6 @@
 # Local model connections
 
-2026-10-09. This is a local administration profile used by MOMO App. Core owns provider calls and connection persistence; the host owns parameter-group names and selection. No model parameters are bound to character cards or conversations.
+2026-10-09. This is a local administration profile used by MOMO App. Core owns provider protocol calls and request governance; the HTTP host owns connection persistence, while the application host owns parameter-group names and selection. No model parameters are bound to character cards or conversations.
 
 ## Administration
 
@@ -8,7 +8,7 @@
 - `PUT /v1/model-configuration`: complete replacement with the expected `revision`. Stale revisions return 409. Provider fields: UUID `id`, `name`, `protocol` (`openai`, `openai_responses`, `anthropic`, `gemini`), `base_url`, optional `api_path`, optional `api_key`. Omitting the key preserves it; an empty string clears the current key. Model fields: UUID `id`/`provider_id`, `model_id`, `name`, `kind` (`chat`, `vision`, `embedding`), `context_window`, nullable positive `max_output_tokens`.
 - `GET /v1/model-configuration/providers/:id/models`: authenticated discovery through the stored provider, bounded to 2 MiB/1024 entries; returns `{models:[{model_id,name}],has_more}`. It never automatically adds unknown models or infers their category. Further pages can be entered manually.
 
-The base URL includes the API version prefix. A custom path is appended to it. HTTP(S) endpoints reject URL credentials, queries and fragments; redirects are disabled. Limits: 64 providers, 1024 models, 4096 retained connection snapshots and 32 MiB of persisted configuration. Updates write/sync a temporary file, atomically replace `model-connections.json`, then publish the new state. This file belongs to the private Core data directory and contains credentials, including frozen credentials needed by older request references. Removing a current provider does not erase snapshots used for retries. Do not export it as public settings or include it in logs/source control.
+The base URL includes the API version prefix. A custom path is appended to it. HTTP(S) endpoints reject URL credentials, queries and fragments; redirects are disabled. Limits: 64 providers, 1024 models, 4096 retained connection snapshots and 32 MiB of persisted configuration. Updates write/sync a temporary file, atomically replace `model-connections.json`, then publish the new state. This is an HTTP-host file owned by `momo-server`, not an input or resource of `MomoRuntime`. The default location is `$MOMO_DATA_DIR/model-connections.json`; `MOMO_MODEL_CONNECTIONS_PATH` selects another private host path. It contains credentials, including frozen credentials needed by older request references. Removing a current provider does not erase snapshots used for retries. Do not export it as public settings or include it in logs/source control.
 
 ## Response routing
 
@@ -27,3 +27,11 @@ OpenAI Chat Completions reuses the bounded Core gateway. Responses, Anthropic Me
 Specification references: [OpenAI Responses events](https://developers.openai.com/api/reference/resources/responses/streaming-events), [Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [Gemini content generation](https://ai.google.dev/api/generate-content).
 
 Offline tests cover all four request/stream conversions, secret redaction, CAS, persistence, frozen references and function payloads. Real local HTTP integration from MOMO App covers configuration, model discovery, selected model/sampling/output, default-assistant response and idempotent replay against a fixture provider. These are not paid provider tests or ron desktop acceptance.
+
+## Ownership correction (2026-10-09)
+
+The first implementation loaded account storage from `MomoRuntime`; that contradicted the existing [domain/configuration boundary](domain_and_configuration_boundaries.zh-CN.md). Account persistence, revisions, redaction and discovery now live in `momo-server`. It injects a shared `ModelConnectionResolver` through `MomoApiService::with_model_connections`. Embedding users may supply their own resolver/storage, or keep `MomoApiService::new` and the existing gateway without any account file. Protocol validation remains in Core. An unresolved `configured_` reference fails rather than falling back to a different model.
+
+Default-assistant identity/mapping, purpose aliases, request override policies, Prompt Spaces, memory/NSG/DDM orchestration were already Core capabilities. The preceding feature commit added atomic default creation and host-selected connection/parameter transport, not replacements for those definitions. The earlier Space lifecycle work added asset disposition/recovery transactions, not another memory implementation.
+
+Verification of this ownership correction: Rust 1.99.0, `cargo test --locked -p momo_core -p momo-server --lib` (214 Core / 30 server tests), targeted all-target Clippy with `-D warnings`, locked server build and formatting passed. New tests prove embedded initialization ignores a malformed host file, resolver injection is service-scoped and validates its result, and an external host directory retains removed-model references after reopen. MOMO App's real HTTP fixture also passed with `MOMO_MODEL_CONNECTIONS_PATH` outside the Core data directory, including discovery, default-assistant streaming, parameters and replay. No paid provider or additional desktop acceptance is implied.
