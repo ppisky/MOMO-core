@@ -825,6 +825,7 @@ pub async fn read_memory_document(
     .await?;
     Ok(json!({
         "id": document.metadata.id,
+        "metadata": document.metadata,
         "type": document.metadata.kind,
         "importance": document.metadata.importance,
         "weight": document.metadata.weight,

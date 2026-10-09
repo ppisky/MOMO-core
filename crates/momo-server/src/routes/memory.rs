@@ -2,6 +2,27 @@ use super::super::*;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct IdentitiesQuery {
+    space_id: uuid::Uuid,
+    personal_space_id: Option<uuid::Uuid>,
+}
+
+pub(crate) async fn get_memory_identities(
+    State(state): State<AppState>,
+    Query(request): Query<IdentitiesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    scoped_json_result(
+        runtime_api::memory_identities(
+            &state.runtime,
+            request.space_id,
+            request.personal_space_id.unwrap_or(request.space_id),
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProvenanceQuery {
     space_id: uuid::Uuid,
     #[serde(default)]
@@ -396,6 +417,13 @@ pub(crate) async fn list_memory_documents(
         )
         .await,
     )
+}
+
+pub(crate) async fn configure_asset(
+    State(state): State<AppState>,
+    Json(request): Json<runtime_api::AssetEdit>,
+) -> Result<Json<Value>, ApiError> {
+    scoped_json_result(runtime_api::configure_asset(state.runtime.as_ref(), request).await)
 }
 
 pub(crate) async fn read_memory_document(

@@ -56,7 +56,7 @@ pub async fn mo_state_contract(
     space_id: uuid::Uuid,
 ) -> RuntimeApiResult<momo_memory::StateContractResource> {
     let core = runtime.core_handle();
-    run_blocking("read state contract", move || {
+    run_space_write(runtime, space_id, "read state contract", move || {
         core.memory_for_space(space_id)
             .map_err(contract_error)?
             .state_contract_resource()
@@ -64,6 +64,10 @@ pub async fn mo_state_contract(
     })
     .await
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/api_state_contract.rs"]
+mod tests;
 
 pub async fn replace_mo_state_contract(
     runtime: &MomoRuntime,

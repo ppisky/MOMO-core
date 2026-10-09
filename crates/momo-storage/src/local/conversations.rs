@@ -24,6 +24,39 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Initial assistant content and the new conversation publish together.
+    /// Repeating an existing identity leaves its history untouched.
+    pub async fn create_conversation_with_opening(
+        &self,
+        conversation: &Conversation,
+        opening: Option<&str>,
+    ) -> Result<(), StorageError> {
+        if self.is_tombstoned("conversation", conversation.id).await? {
+            return Ok(());
+        }
+        let mut transaction = self.pool.begin().await?;
+        let inserted = sqlx::query("INSERT OR IGNORE INTO conversations (id,scope_id,character_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+            .bind(conversation.id.to_string()).bind(conversation.scope_id.to_string())
+            .bind(conversation.character_id.map(|id| id.to_string())).bind(&conversation.title)
+            .bind(conversation.created_at.to_rfc3339()).bind(conversation.updated_at.to_rfc3339())
+            .execute(&mut *transaction).await?.rows_affected() == 1;
+        if inserted && let Some(content) = opening.filter(|value| !value.trim().is_empty()) {
+            insert_message_immutable(
+                &mut transaction,
+                &Message {
+                    id: momo_domain::new_id(),
+                    conversation_id: conversation.id,
+                    role: momo_domain::MessageRole::Assistant,
+                    content: content.to_owned(),
+                    created_at: conversation.created_at,
+                },
+            )
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn list_conversations(&self) -> Result<Vec<Conversation>, StorageError> {
         let rows = sqlx::query("SELECT * FROM conversations ORDER BY updated_at DESC, id")
             .fetch_all(&self.pool)

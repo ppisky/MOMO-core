@@ -1011,6 +1011,55 @@ impl MemoryWorkspace {
         self.read(PathBuf::from(&entry.path))
     }
 
+    /// Write a manual long-term document without synthesizing section patches.
+    /// Callers combine this with policy changes inside their managed Space transaction.
+    pub fn write_document(&self, mut document: MemoryDocument) -> Result<(), MemoryError> {
+        validate_metadata(&document.metadata)?;
+        if document.metadata.kind == "current" {
+            return Err(MemoryError::InvalidPatch(
+                "current scenes are runtime-managed".into(),
+            ));
+        }
+        let mut index = Arc::unwrap_or_clone(self.load_index()?);
+        let relative = if let Some(entry) = index.entries.get(&document.metadata.id) {
+            PathBuf::from(&entry.path)
+        } else {
+            let directory = ACTIVE_MEMORY_DIRECTORIES
+                .iter()
+                .find(|(_, kind)| *kind == document.metadata.kind)
+                .map(|(directory, _)| *directory)
+                .ok_or(MemoryError::InvalidFrontmatter)?;
+            PathBuf::from(format!("{directory}/{}.md", uuid::Uuid::now_v7()))
+        };
+        let kind = expected_kind_for_path(&relative)
+            .ok_or_else(|| MemoryError::UnsafePath(relative.clone()))?;
+        if kind != document.metadata.kind {
+            return Err(MemoryError::InvalidPatch(
+                "existing document type cannot change".into(),
+            ));
+        }
+        self.load_access()?.require_write(kind)?;
+        document.metadata.touch_at = Utc::now().timestamp();
+        document.body = document.body.replace("\r\n", "\n");
+        update_index_entry(&mut index, &relative, &document)?;
+        provenance::commit_traced(
+            &self.root,
+            &[
+                FileMutation::Write {
+                    path: self.resolve(&relative)?,
+                    content: document.encode()?.into_bytes(),
+                },
+                FileMutation::Write {
+                    path: self.checked_index_path()?,
+                    content: encode_index(&index)?.into_bytes(),
+                },
+            ],
+            &momo_domain::provenance::RevisionContext::manual("document_edit"),
+        )?;
+        self.store_cached_index(index)?;
+        Ok(())
+    }
+
     /// Replaces the complete Markdown body of one existing document. Manual
     /// editors operate on the whole body, so routing this through a synthetic
     /// section patch can accidentally target the document title or fail when

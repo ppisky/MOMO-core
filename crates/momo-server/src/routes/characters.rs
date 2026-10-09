@@ -15,14 +15,24 @@ pub(crate) async fn create_character(
     Json(request): Json<CreateCharacterRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let scope_id = validate_space_id(request.owner_space_id)?;
+    let now = chrono::Utc::now();
     json_result(
-        runtime_api::stage_character(
+        runtime_api::stage_character_card(
             state.runtime.as_ref(),
-            scope_id,
-            request.author_name,
-            request.name,
-            request.character_markdown,
-            request.user_markdown,
+            CharacterCard {
+                id: uuid::Uuid::now_v7(),
+                scope_id: uuid::Uuid::parse_str(&scope_id)
+                    .map_err(|error| ApiError::bad_request(error.to_string()))?,
+                name: request.name,
+                version: request.version.unwrap_or_else(|| "2.0.0".into()),
+                author_name: request.author_name,
+                author_url: request.author_url,
+                character_markdown: request.character_markdown,
+                user_markdown: request.user_markdown,
+                opening_markdown: request.opening_markdown,
+                created_at: now,
+                updated_at: now,
+            },
         )
         .await,
     )

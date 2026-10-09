@@ -351,7 +351,25 @@ pub async fn stage_character(
         created_at: now,
         updated_at: now,
     };
+    stage_character_card(runtime, card).await
+}
+
+/// Accept an already assembled native card in one validated creation.
+pub async fn stage_character_card(
+    runtime: &MomoRuntime,
+    card: momo_domain::CharacterCard,
+) -> Result<momo_domain::CharacterCard, RuntimeApiError> {
     validate_runtime_character(&card)?;
+    if runtime
+        .core()
+        .store()
+        .character_by_id(card.id)
+        .await
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?
+        .is_some()
+    {
+        return Err(RuntimeApiError::conflict("character already exists"));
+    }
     runtime
         .core()
         .store()
@@ -441,15 +459,12 @@ pub async fn stage_conversation(
     let character_id = uuid::Uuid::parse_str(&character_id)
         .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
     let core = runtime.core();
-    if core
+    let character = core
         .store()
         .character_by_id(character_id)
         .await
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?
-        .is_none()
-    {
-        return Err(RuntimeApiError::not_found("character does not exist"));
-    }
+        .ok_or_else(|| RuntimeApiError::not_found("character does not exist"))?;
     let now = chrono::Utc::now();
     let conversation = momo_domain::Conversation {
         id,
@@ -460,10 +475,21 @@ pub async fn stage_conversation(
         updated_at: now,
     };
     core.store()
-        .save_conversation(&conversation)
+        .create_conversation_with_opening(&conversation, character.opening_markdown.as_deref())
         .await
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    Ok(conversation)
+    let stored = core
+        .store()
+        .conversation_for_scope(scope_id, id)
+        .await
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?
+        .filter(|value| value.character_id == Some(character_id))
+        .ok_or_else(|| {
+            RuntimeApiError::conflict(
+                "conversation identity is unavailable or belongs to another context",
+            )
+        })?;
+    Ok(stored)
 }
 
 pub async fn stage_conversation_update(

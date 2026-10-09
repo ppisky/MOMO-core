@@ -34,6 +34,12 @@ pub(crate) struct CreateCharacterRequest {
     pub(crate) character_markdown: String,
     #[serde(default)]
     pub(crate) user_markdown: String,
+    #[serde(default)]
+    pub(crate) version: Option<String>,
+    #[serde(default)]
+    pub(crate) author_url: Option<String>,
+    #[serde(default)]
+    pub(crate) opening_markdown: Option<String>,
 }
 
 #[derive(Deserialize)]

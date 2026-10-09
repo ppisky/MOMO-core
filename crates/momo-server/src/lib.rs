@@ -190,9 +190,13 @@ fn api_routes() -> Router<AppState> {
             get(discover_provider_models),
         )
         .route("/memory/documents", get(list_memory_documents))
+        .route("/memory/assets/configure", put(configure_asset))
         .route("/memory/provenance", get(get_memory_provenance))
         .route("/memory/record-policy", put(put_memory_record_policy))
-        .route("/memory/identity-binding", put(put_memory_identity_binding))
+        .route(
+            "/memory/identity-binding",
+            get(get_memory_identities).put(put_memory_identity_binding),
+        )
         .route("/memory/evidence/control", post(control_memory_evidence))
         .route(
             "/memory/default-assistant",

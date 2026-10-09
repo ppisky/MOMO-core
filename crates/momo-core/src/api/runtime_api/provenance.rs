@@ -253,6 +253,31 @@ pub async fn set_memory_identity_binding(
         .map_err(|e| RuntimeApiError::internal(e.to_string()))
 }
 
+/// Resolve actual continuity mappings instead of guessing from conversation IDs.
+pub async fn memory_identities(
+    runtime: &MomoRuntime,
+    space: uuid::Uuid,
+    personal_space: uuid::Uuid,
+) -> RuntimeApiResult<Vec<momo_domain::provenance::MemoryIdentity>> {
+    let store = runtime.core().store();
+    let conversations = store
+        .list_conversations_for_scope(space)
+        .await
+        .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+    let mut identities = Vec::new();
+    for conversation in conversations {
+        if let Some(character) = conversation.character_id {
+            identities.push(
+                store
+                    .memory_identity(personal_space, conversation.id, character)
+                    .await
+                    .map_err(|e| RuntimeApiError::internal(e.to_string()))?,
+            );
+        }
+    }
+    Ok(identities)
+}
+
 pub async fn set_default_memory_assistant(
     runtime: &MomoRuntime,
     personal_space_id: uuid::Uuid,

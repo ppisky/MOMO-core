@@ -1,11 +1,22 @@
 use super::super::*;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListNsgRequest {
+    space_id: String,
+    #[serde(default)]
+    include_archived: bool,
+}
+
 pub(crate) async fn list_nsg_nodes(
     State(state): State<AppState>,
-    Json(request): Json<SpaceRequest>,
+    Json(request): Json<ListNsgRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let scope_id = validate_space_id(request.space_id)?;
-    json_result(runtime_api::list_nsg_nodes(state.runtime.as_ref(), scope_id, false).await)
+    json_result(
+        runtime_api::list_nsg_nodes(state.runtime.as_ref(), scope_id, request.include_archived)
+            .await,
+    )
 }
 
 pub(crate) async fn write_nsg_node(
