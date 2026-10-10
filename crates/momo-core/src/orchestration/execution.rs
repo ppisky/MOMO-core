@@ -55,6 +55,12 @@ impl MomoApiService {
             && let Some(config) = routed.resolve_embedding_selection(selection)?
         {
             routed.embedding_parameters = Some(crate::EmbeddingRequestParameters {
+                dimensions: if config.profile.send_dimensions {
+                    config.profile.dimension
+                } else {
+                    None
+                },
+                encoding_format: Some("float".into()),
                 normalization: Some(config.profile.normalization),
                 send_dimensions: Some(config.profile.send_dimensions),
                 query_prefix: Some(config.profile.query_prefix),

@@ -6,7 +6,7 @@ fn profile() -> EmbeddingProfile {
         provider_id: "openai-compatible".to_owned(),
         endpoint_id: "primary".to_owned(),
         model: "embedding-model".to_owned(),
-        dimension: 3,
+        dimension: Some(3),
         model_revision: Some("2026-08".to_owned()),
         normalization: EmbeddingNormalization::L2,
         send_dimensions: true,
@@ -23,8 +23,68 @@ fn vector_space_identity_is_deterministic_and_structured() {
     assert_eq!(first, second);
     assert!(first.starts_with("momo-embedding-v1:"));
     let mut changed = profile;
-    changed.dimension = 4;
+    changed.dimension = Some(4);
     assert_ne!(first, changed.vector_space_id().expect("changed space id"));
+}
+
+#[test]
+fn native_dimensions_are_discovered_and_cannot_mix_in_one_batch() {
+    let mut profile = profile();
+    profile.dimension = None;
+    profile.send_dimensions = false;
+    profile.validate().unwrap();
+    assert!(profile.vector_space_id().is_err());
+    let inputs = [
+        EmbeddingInput {
+            id: "one".into(),
+            text: "one".into(),
+            purpose: EmbeddingPurpose::Document,
+        },
+        EmbeddingInput {
+            id: "two".into(),
+            text: "two".into(),
+            purpose: EmbeddingPurpose::Query,
+        },
+    ];
+    let response = |dimension| EmbeddingResponse {
+        model: profile.model.clone(),
+        object: None,
+        usage: None,
+        data: vec![
+            EmbeddingResponseItem {
+                index: 0,
+                embedding: vec![1.0, 0.0, 0.0],
+                object: None,
+            },
+            EmbeddingResponseItem {
+                index: 1,
+                embedding: vec![1.0; dimension],
+                object: None,
+            },
+        ],
+    };
+    let batch = validate_response(&profile, &inputs, response(3)).unwrap();
+    assert_eq!(batch.dimension, 3);
+    let mut resolved = profile.clone();
+    resolved.dimension = Some(3);
+    assert_eq!(batch.vector_space_id, resolved.vector_space_id().unwrap());
+    assert!(validate_response(&profile, &inputs, response(4)).is_err());
+    resolved.dimension = Some(4);
+    assert_ne!(batch.vector_space_id, resolved.vector_space_id().unwrap());
+    profile.dimension = Some(0);
+    assert!(profile.validate().is_err());
+}
+
+#[test]
+fn generation_endpoint_urls_use_the_sibling_embedding_endpoint() {
+    for suffix in ["responses", "chat/completions", "embeddings"] {
+        assert_eq!(
+            embedding_url(&format!("https://example.invalid/v1/{suffix}"))
+                .unwrap()
+                .as_str(),
+            "https://example.invalid/v1/embeddings"
+        );
+    }
 }
 
 #[test]

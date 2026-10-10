@@ -17,18 +17,12 @@ fn text_parts(content: &Option<Content>) -> Vec<Part> {
         None => vec![],
     }
 }
-fn image_source(url: &str, gemini: bool) -> Result<Value, GatewayError> {
+fn image_source(url: &str) -> Result<Value, GatewayError> {
     if let Some(data) = url.strip_prefix("data:") {
         let (mime, bytes) = data
             .split_once(";base64,")
             .ok_or_else(|| invalid("image must use a base64 data URL"))?;
-        if gemini {
-            Ok(json!({"inlineData":{"mimeType":mime,"data":bytes}}))
-        } else {
-            Ok(json!({"type":"image","source":{"type":"base64","media_type":mime,"data":bytes}}))
-        }
-    } else if gemini {
-        Err(invalid("Gemini image input requires a base64 data URL"))
+        Ok(json!({"type":"image","source":{"type":"base64","media_type":mime,"data":bytes}}))
     } else {
         Ok(json!({"type":"image","source":{"type":"url","url":url}}))
     }
@@ -41,7 +35,7 @@ impl ModelConnection {
         stream: bool,
     ) -> Result<Value, GatewayError> {
         crate::gateway::validate_gateway_messages(messages)?;
-        let protocol = self.provider.protocol;
+        let protocol = self.effective_protocol();
         let mut body = json!({"model":self.model.model_id,"stream":stream});
         let mut items = Vec::new();
         let mut system = Vec::new();
@@ -61,18 +55,15 @@ impl ModelConnection {
                 items.push(match protocol {
                     Protocol::OpenaiResponses=>json!({"type":"function_call_output","call_id":id,"output":output}),
                     Protocol::Anthropic=>json!({"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":output}]}),
-                    Protocol::Gemini=> {
-                        let name=messages.iter().flat_map(|m|&m.tool_calls).find(|c|c.id==id).map(|c|c.function.name.as_str()).ok_or_else(||invalid("Gemini tool result has no matching function call"))?;
-                        json!({"role":"user","parts":[{"functionResponse":{"name":name,"response":{"result":output}}}]})
-                    },Protocol::Openai=>unreachable!()
+                    Protocol::Openai=>unreachable!()
                 });
                 continue;
             }
             let mut parts = Vec::new();
             for part in text_parts(&message.content) {
                 parts.push(match part {
-                    Part::Text{text}=>match protocol {Protocol::OpenaiResponses=>json!({"type":if role=="assistant"{"output_text"}else{"input_text"},"text":text}),Protocol::Gemini=>json!({"text":text}),_=>json!({"type":"text","text":text})},
-                    Part::ImageUrl{image_url}=>if protocol==Protocol::OpenaiResponses {json!({"type":"input_image","image_url":image_url.url,"detail":image_url.detail.unwrap_or_else(||"auto".into())})} else {image_source(&image_url.url,protocol==Protocol::Gemini)?}
+                    Part::Text{text}=>match protocol {Protocol::OpenaiResponses=>json!({"type":if role=="assistant"{"output_text"}else{"input_text"},"text":text}),_=>json!({"type":"text","text":text})},
+                    Part::ImageUrl{image_url}=>if protocol==Protocol::OpenaiResponses {json!({"type":"input_image","image_url":image_url.url,"detail":image_url.detail.unwrap_or_else(||"auto".into())})} else {image_source(&image_url.url)?}
                 });
             }
             let mut response_calls = Vec::new();
@@ -80,7 +71,6 @@ impl ModelConnection {
                 match protocol {
                     Protocol::OpenaiResponses=>response_calls.push(json!({"type":"function_call","call_id":call.id,"name":call.function.name,"arguments":call.function.arguments})),
                     Protocol::Anthropic=>parts.push(json!({"type":"tool_use","id":call.id,"name":call.function.name,"input":serde_json::from_str::<Value>(&call.function.arguments)?})),
-                    Protocol::Gemini=>parts.push(json!({"functionCall":{"name":call.function.name,"args":serde_json::from_str::<Value>(&call.function.arguments)?}})),
                     Protocol::Openai=>unreachable!()
                 }
             }
@@ -90,8 +80,6 @@ impl ModelConnection {
             }
             if role == "system" && protocol != Protocol::OpenaiResponses {
                 system.extend(parts);
-            } else if protocol == Protocol::Gemini {
-                items.push(json!({"role":if role=="assistant"{"model"}else{role},"parts":parts}));
             } else {
                 items.push(json!({"role":role,"content":parts}));
             }
@@ -108,20 +96,11 @@ impl ModelConnection {
                     body["system"] = json!(system);
                 }
             }
-            Protocol::Gemini => {
-                body = json!({"contents":items,"generationConfig":{}});
-                if !system.is_empty() {
-                    body["systemInstruction"] = json!({"parts":system});
-                }
-            }
+
             Protocol::Openai => unreachable!(),
         }
         if let Some(t) = parameters.temperature {
-            if protocol == Protocol::Gemini {
-                body["generationConfig"]["temperature"] = json!(t);
-            } else {
-                body["temperature"] = json!(t);
-            }
+            body["temperature"] = json!(t);
         }
         for (key, value) in parameters.request_parameters {
             // These are gateway control metadata, never provider payload fields.
@@ -144,7 +123,6 @@ impl ModelConnection {
             }
             if key == "max_tokens" || key == "max_completion_tokens" || key == "max_output_tokens" {
                 match protocol {
-                    Protocol::Gemini => body["generationConfig"]["maxOutputTokens"] = value,
                     Protocol::OpenaiResponses => body["max_output_tokens"] = value,
                     _ => body["max_tokens"] = value,
                 };
@@ -162,15 +140,11 @@ impl ModelConnection {
                 body["tools"]=match protocol {
                     Protocol::OpenaiResponses=>json!(functions.into_iter().map(|mut f|{f["type"]=json!("function");f}).collect::<Vec<_>>()),
                     Protocol::Anthropic=>json!(functions.into_iter().map(|f|json!({"name":f["name"],"description":f.get("description").unwrap_or(&json!("")),"input_schema":f["parameters"]})).collect::<Vec<_>>()),
-                    Protocol::Gemini=>json!([{"functionDeclarations":functions}]),Protocol::Openai=>unreachable!()
+                    Protocol::Openai=>unreachable!()
                 };
             } else if key == "tool_choice" {
                 let named = value.pointer("/function/name").and_then(Value::as_str);
-                body[if protocol == Protocol::Gemini {
-                    "toolConfig"
-                } else {
-                    "tool_choice"
-                }] = match protocol {
+                body["tool_choice"] = match protocol {
                     Protocol::OpenaiResponses => {
                         if let Some(name) = named {
                             json!({"type":"function","name":name})
@@ -185,22 +159,9 @@ impl ModelConnection {
                             json!({"type":match value.as_str(){Some("auto")=>"auto",Some("required")=>"any",Some("none")=>"none",_=>return Err(invalid("invalid tool choice"))}})
                         }
                     }
-                    Protocol::Gemini => {
-                        if let Some(name) = named {
-                            json!({"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":[name]}})
-                        } else {
-                            json!({"functionCallingConfig":{"mode":match value.as_str(){Some("auto")=>"AUTO",Some("required")=>"ANY",Some("none")=>"NONE",_=>return Err(invalid("invalid tool choice"))}}})
-                        }
-                    }
+
                     Protocol::Openai => unreachable!(),
                 };
-            } else if protocol == Protocol::Gemini {
-                body["generationConfig"][match key.as_str() {
-                    "top_p" => "topP",
-                    "top_k" => "topK",
-                    "stop" => "stopSequences",
-                    _ => return Err(invalid("unsupported Gemini generation parameter")),
-                }] = value;
             } else {
                 body[key] = value;
             }
@@ -302,50 +263,7 @@ pub(super) fn completion(
             );
             result.usage = Some(usage(&value["usage"], "input_tokens", "output_tokens"));
         }
-        Protocol::Gemini => {
-            let candidate = value["candidates"]
-                .get(0)
-                .ok_or(GatewayError::MissingChoice)?;
-            for (index, part) in candidate["content"]["parts"]
-                .as_array()
-                .ok_or(GatewayError::MissingChoice)?
-                .iter()
-                .enumerate()
-            {
-                if part["thought"] == true {
-                    continue;
-                }
-                if let Some(text) = part["text"].as_str() {
-                    result.content.push_str(text);
-                }
-                if let Some(f) = part.get("functionCall") {
-                    result.tool_calls.push(call(
-                        &format!("gemini_{}_{index}", uuid::Uuid::now_v7()),
-                        f["name"].as_str().unwrap_or_default(),
-                        f["args"].to_string(),
-                    ));
-                }
-            }
-            result.finish_reason = Some(
-                match candidate["finishReason"].as_str() {
-                    Some("STOP") => {
-                        if result.tool_calls.is_empty() {
-                            "stop"
-                        } else {
-                            "tool_calls"
-                        }
-                    }
-                    Some("MAX_TOKENS") => "length",
-                    _ => return Err(invalid("Gemini generation did not complete successfully")),
-                }
-                .into(),
-            );
-            result.usage = Some(usage(
-                &value["usageMetadata"],
-                "promptTokenCount",
-                "candidatesTokenCount",
-            ));
-        }
+
         Protocol::Openai => unreachable!(),
     }
     if result

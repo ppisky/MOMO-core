@@ -399,7 +399,7 @@ impl MomoApiService {
             provider_id: "mobot-gateway".to_owned(),
             endpoint_id: self.gateway_origin.clone(),
             model: "embedding".to_owned(),
-            dimension: metadata.dimension,
+            dimension: Some(metadata.dimension),
             model_revision: metadata.model_revision,
             normalization: metadata.normalization,
             send_dimensions: metadata.send_dimensions,
@@ -471,18 +471,35 @@ impl MomoApiService {
             .or(selection.parameters.as_ref())
             .cloned()
             .unwrap_or_default();
+        if parameters
+            .encoding_format
+            .as_deref()
+            .is_some_and(|v| v != "float")
+        {
+            return Err(MomoApiError::bad_request(
+                "embedding encoding_format must be float",
+            ));
+        }
+        if selection
+            .dimension
+            .zip(parameters.dimensions)
+            .is_some_and(|(a, b)| a != b)
+        {
+            return Err(MomoApiError::bad_request(
+                "embedding dimension and parameters.dimensions disagree",
+            ));
+        }
+        let dimension = selection.dimension.or(parameters.dimensions);
         let profile = EmbeddingProfile {
             provider_id: connection.provider.id.to_string(),
             endpoint_id: connection.provider.id.to_string(),
             model: connection.model.model_id,
-            dimension: selection
-                .dimension
-                .ok_or_else(|| MomoApiError::bad_request("embedding dimension is required"))?,
+            dimension,
             model_revision: None,
             normalization: parameters
                 .normalization
                 .unwrap_or(EmbeddingNormalization::L2),
-            send_dimensions: parameters.send_dimensions.unwrap_or(false),
+            send_dimensions: dimension.is_some(),
             query_prefix: parameters.query_prefix.unwrap_or_default(),
             document_prefix: parameters.document_prefix.unwrap_or_default(),
         };

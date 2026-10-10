@@ -50,7 +50,9 @@ pub struct EmbeddingProfile {
     pub provider_id: String,
     pub endpoint_id: String,
     pub model: String,
-    pub dimension: usize,
+    /// Omission follows the model default; batches always report a resolved dimension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_revision: Option<String>,
     #[serde(default)]
@@ -76,10 +78,18 @@ impl EmbeddingProfile {
                 )));
             }
         }
-        if self.dimension == 0 || self.dimension > MAX_EMBEDDING_DIMENSION {
+        if self
+            .dimension
+            .is_some_and(|n| n == 0 || n > MAX_EMBEDDING_DIMENSION)
+        {
             return Err(EmbeddingError::InvalidProfile(format!(
                 "dimension must be between 1 and {MAX_EMBEDDING_DIMENSION}"
             )));
+        }
+        if self.send_dimensions && self.dimension.is_none() {
+            return Err(EmbeddingError::InvalidProfile(
+                "sending dimensions requires an explicit dimension".to_owned(),
+            ));
         }
         if self
             .model_revision
@@ -100,6 +110,11 @@ impl EmbeddingProfile {
 
     pub fn vector_space_id(&self) -> Result<String, EmbeddingError> {
         self.validate()?;
+        if self.dimension.is_none() {
+            return Err(EmbeddingError::InvalidProfile(
+                "vector space identity requires a resolved dimension".to_owned(),
+            ));
+        }
         let canonical = serde_json::to_vec(self).map_err(EmbeddingError::SerializeProfile)?;
         Ok(format!(
             "momo-embedding-v1:{}",
@@ -355,6 +370,14 @@ fn validate_response(
             response.data.len()
         )));
     }
+    let dimension = profile
+        .dimension
+        .unwrap_or_else(|| response.data.first().map_or(0, |item| item.embedding.len()));
+    if dimension == 0 || dimension > MAX_EMBEDDING_DIMENSION {
+        return Err(EmbeddingError::InvalidResponse(
+            "invalid returned embedding dimension".to_owned(),
+        ));
+    }
     let mut ordered = vec![None; inputs.len()];
     for item in response.data {
         if item.index >= inputs.len() || ordered[item.index].is_some() {
@@ -373,13 +396,13 @@ fn validate_response(
             )));
         }
         let mut vector = item.embedding;
-        if vector.len() != profile.dimension
+        if vector.len() != dimension
             || vector.iter().any(|value| !value.is_finite())
             || vector.iter().all(|value| *value == 0.0)
         {
             return Err(EmbeddingError::InvalidResponse(format!(
                 "vector {} does not match dimension {} or contains invalid values",
-                item.index, profile.dimension
+                item.index, dimension
             )));
         }
         if profile.normalization == EmbeddingNormalization::L2 {
@@ -395,10 +418,12 @@ fn validate_response(
             vector: vector.expect("validated response covers every input index"),
         })
         .collect();
+    let mut resolved_profile = profile.clone();
+    resolved_profile.dimension = Some(dimension);
     Ok(EmbeddingBatch {
-        vector_space_id: profile.vector_space_id()?,
+        vector_space_id: resolved_profile.vector_space_id()?,
         model: response.model,
-        dimension: profile.dimension,
+        dimension,
         vectors,
         usage: response.usage,
     })
@@ -419,6 +444,13 @@ fn normalize_l2(vector: &mut [f64]) -> Result<(), EmbeddingError> {
 
 fn embedding_url(base_url: &str) -> Result<Url, url::ParseError> {
     let mut base = Url::parse(base_url)?;
+    let path = base.path().trim_end_matches('/');
+    let prefix = ["/responses", "/chat/completions", "/embeddings"]
+        .into_iter()
+        .find_map(|suffix| path.strip_suffix(suffix))
+        .unwrap_or(path)
+        .to_owned();
+    base.set_path(&prefix);
     if !base.path().ends_with('/') {
         let path = format!("{}/", base.path());
         base.set_path(&path);

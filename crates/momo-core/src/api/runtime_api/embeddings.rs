@@ -108,11 +108,6 @@ pub async fn rebuild_nsg_vector_index(
         .embedding
         .provider()
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    let vector_space_id = request
-        .embedding
-        .profile
-        .vector_space_id()
-        .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     let memory = runtime
         .core()
         .memory_for_space(scope_id)
@@ -123,6 +118,38 @@ pub async fn rebuild_nsg_vector_index(
         .embedding_documents()
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
 
+    let mut profile = request.embedding.profile.clone();
+    // Resolve the native dimension from an actual document, then pin that dimension
+    // for every subsequent batch. Nothing is persisted until all batches validate.
+    let discovered = if profile.dimension.is_none() {
+        let Some(document) = documents.first() else {
+            return Ok(
+                json!({"vector_space_id":null,"dimension":null,"node_count":0,
+                "embedded_count":0,"reused_count":0,"batch_count":0,
+                "mode":match request.mode {NsgIndexMode::Full=>"full",NsgIndexMode::Incremental=>"incremental"}}),
+            );
+        };
+        let batch = provider
+            .embed_batch(
+                &profile,
+                &[EmbeddingInput {
+                    id: document.node_id.clone(),
+                    text: document.content.clone(),
+                    purpose: EmbeddingPurpose::Document,
+                }],
+            )
+            .await
+            .map_err(|error| RuntimeApiError::upstream(error.to_string()))?;
+        profile.dimension = Some(batch.dimension);
+        Some(batch)
+    } else {
+        None
+    };
+    let dimension = profile.dimension.expect("explicit or discovered dimension");
+    let vector_space_id = profile
+        .vector_space_id()
+        .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
+
     let existing = runtime
         .core()
         .vector_store()
@@ -131,13 +158,41 @@ pub async fn rebuild_nsg_vector_index(
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
     let reusable = existing
         .into_iter()
-        .filter(|record| record.dimension == request.embedding.profile.dimension)
+        .filter(|record| record.dimension == dimension)
         .map(|record| ((record.node_id.clone(), record.source_hash.clone()), record))
         .collect::<HashMap<_, _>>();
     let mut records = Vec::with_capacity(documents.len());
     let mut pending = Vec::new();
     let mut reused_count = 0_usize;
+    let mut discovered = discovered;
+    let mut batch_count = usize::from(discovered.is_some());
+    let discovered_count = batch_count;
     for document in documents {
+        if let Some(batch) = discovered.take() {
+            if batch.vector_space_id != vector_space_id {
+                return Err(RuntimeApiError::upstream(
+                    "embedding discovery returned an unexpected vector space",
+                ));
+            }
+            let vector = batch.vectors.into_iter().next().ok_or_else(|| {
+                RuntimeApiError::upstream("embedding discovery returned no vector")
+            })?;
+            if vector.id != document.node_id {
+                return Err(RuntimeApiError::upstream(
+                    "embedding discovery returned an unexpected document",
+                ));
+            }
+            records.push(momo_storage::NsgVectorRecord {
+                scope_id,
+                node_id: document.node_id,
+                source_hash: document.source_hash,
+                vector_space_id: vector_space_id.clone(),
+                dimension,
+                vector: vector.vector,
+                created_at: chrono::Utc::now(),
+            });
+            continue;
+        }
         if matches!(request.mode, NsgIndexMode::Incremental)
             && let Some(record) =
                 reusable.get(&(document.node_id.clone(), document.source_hash.clone()))
@@ -149,7 +204,6 @@ pub async fn rebuild_nsg_vector_index(
         }
     }
 
-    let mut batch_count = 0_usize;
     for documents in pending.chunks(request.batch_size) {
         let inputs = documents
             .iter()
@@ -160,7 +214,7 @@ pub async fn rebuild_nsg_vector_index(
             })
             .collect::<Vec<_>>();
         let batch = provider
-            .embed_batch(&request.embedding.profile, &inputs)
+            .embed_batch(&profile, &inputs)
             .await
             .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
         if batch.vector_space_id != vector_space_id {
@@ -179,7 +233,7 @@ pub async fn rebuild_nsg_vector_index(
                 node_id: document.node_id.clone(),
                 source_hash: document.source_hash.clone(),
                 vector_space_id: vector_space_id.clone(),
-                dimension: request.embedding.profile.dimension,
+                dimension,
                 vector: vector.vector,
                 created_at: chrono::Utc::now(),
             });
@@ -196,9 +250,9 @@ pub async fn rebuild_nsg_vector_index(
 
     Ok(json!({
         "vector_space_id": vector_space_id,
-        "dimension": request.embedding.profile.dimension,
+        "dimension": dimension,
         "node_count": records.len(),
-        "embedded_count": pending.len(),
+        "embedded_count": pending.len() + discovered_count,
         "reused_count": reused_count,
         "batch_count": batch_count,
         "mode": match request.mode {

@@ -200,8 +200,14 @@ impl MomoApiService {
         if let Some(selection) = request.embedding
             && let Some(config) = routed.resolve_embedding_selection(&selection)?
         {
-            let defaults = json!({"normalization":"l2","send_dimensions":false,"query_prefix":"","document_prefix":""}).as_object().expect("object").clone();
-            let effective = json!({"normalization":config.profile.normalization,"send_dimensions":config.profile.send_dimensions,"query_prefix":config.profile.query_prefix,"document_prefix":config.profile.document_prefix}).as_object().expect("object").clone();
+            let defaults = json!({"encoding_format":"float"})
+                .as_object()
+                .expect("object")
+                .clone();
+            let mut effective = defaults.clone();
+            if let Some(dimension) = config.profile.dimension {
+                effective.insert("dimensions".into(), json!(dimension));
+            }
             let overrides = effective
                 .iter()
                 .filter(|(key, value)| defaults.get(*key) != Some(*value))
@@ -209,7 +215,7 @@ impl MomoApiService {
                 .collect();
             purposes.insert("embedding".into(), ModelRequestConfiguration {
                     defaults, effective, overrides,
-                    constraints: json!({"normalization":["none","l2"],"prefix_max_bytes":4096,"send_dimensions":"model support required"}),
+                    constraints: json!({"dimensions":{"min":1,"max":crate::embedding::MAX_EMBEDDING_DIMENSION,"default":"model","requires":"provider/model support"},"encoding_format":["float"]}),
                     ignored: Vec::new(),
                 });
         }

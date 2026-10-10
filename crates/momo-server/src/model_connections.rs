@@ -155,7 +155,12 @@ impl ModelConnections {
             .cloned()
             .ok_or_else(|| invalid("provider does not exist"))?;
         let mut url = reqwest::Url::parse(&provider.base_url).map_err(invalid)?;
-        let prefix = url.path().trim_end_matches('/').to_owned();
+        let path = url.path().trim_end_matches('/');
+        let prefix = ["/responses", "/chat/completions"]
+            .into_iter()
+            .find_map(|suffix| path.strip_suffix(suffix))
+            .unwrap_or(path)
+            .to_owned();
         url.set_path(&format!("{prefix}/models"));
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -166,7 +171,6 @@ impl ModelConnections {
         if let Some(key) = provider.api_key.filter(|k| !k.is_empty()) {
             request = match provider.protocol {
                 ProviderProtocol::Anthropic => request.header("x-api-key", key),
-                ProviderProtocol::Gemini => request.header("x-goog-api-key", key),
                 _ => request.bearer_auth(key),
             };
         }

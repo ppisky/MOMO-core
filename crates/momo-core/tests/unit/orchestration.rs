@@ -62,10 +62,27 @@ async fn configured_embedding_validates_kind_dimension_and_keeps_compatibility_o
             .unwrap(),
         original
     );
-    for dimension in [None, Some(0), Some(8193)] {
+    for dimension in [Some(0), Some(8193)] {
         selection.dimension = dimension;
         assert!(service.resolve_embedding_selection(&selection).is_err());
     }
+    selection.dimension = None;
+    let native = service
+        .resolve_embedding_selection(&selection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(native.profile.dimension, None);
+    assert!(!native.profile.send_dimensions);
+    selection.parameters = Some(serde_json::from_value(json!({"dimensions":4})).unwrap());
+    let custom = service
+        .resolve_embedding_selection(&selection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(custom.profile.dimension, Some(4));
+    assert!(custom.profile.send_dimensions);
+    selection.dimension = Some(3);
+    assert!(service.resolve_embedding_selection(&selection).is_err());
+    selection.parameters = None;
     selection.dimension = Some(3);
     let mut wrong_kind = connection;
     wrong_kind.model.kind = crate::ModelKind::Chat;
@@ -257,7 +274,7 @@ async fn embedding_purpose_parameters_change_compatibility_and_reset_without_cha
         defaults.profile.vector_space_id().unwrap(),
         custom.profile.vector_space_id().unwrap()
     );
-    assert_eq!(custom.profile.dimension, 3);
+    assert_eq!(custom.profile.dimension, Some(3));
     let reset = service
         .resolve_embedding_selection(&selection(json!({})))
         .unwrap()

@@ -57,13 +57,84 @@ fn optional_context_is_preserved_without_accepting_zero_or_invalid_output() {
     configuration.models[0].max_output_tokens = Some(0);
     assert!(configuration.validate().is_err());
 }
+
+#[test]
+fn chat_is_default_and_google_protocol_is_rejected() {
+    assert_eq!(ProviderProtocol::default(), ProviderProtocol::Openai);
+    assert!(serde_json::from_value::<ProviderProtocol>(json!("gemini")).is_err());
+}
+
+#[tokio::test]
+async fn compatible_and_explicit_responses_connections_use_responses_http_and_sse() {
+    for mode in 0..3 {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app=Router::new().route("/v1/responses",post(move|Json(body):Json<Value>|{
+            captured.lock().unwrap().push(body.clone()); async move {
+                let final_value=json!({"id":"responses-direct","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"完整回复"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}});
+                if body["stream"]!=true { return Json(final_value).into_response(); }
+                ([(header::CONTENT_TYPE,"text/event-stream")],format!("data: {}\n\ndata: {}\n\n",
+                    json!({"type":"response.output_text.delta","delta":"完整回复"}),
+                    json!({"type":"response.completed","response":final_value}))).into_response()
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut c = connection(
+            if mode == 2 {
+                ProviderProtocol::OpenaiResponses
+            } else {
+                ProviderProtocol::Openai
+            },
+            format!("http://{address}/v1"),
+        );
+        if mode == 0 {
+            c.provider.api_path = "/responses".into();
+        } else {
+            c.provider.base_url.push_str("/responses");
+        }
+        assert_eq!(c.effective_protocol(), ProviderProtocol::OpenaiResponses);
+        let text = "引号\"、换行\n与反斜杠\\";
+        let messages = [GatewayMessage {
+            role: GatewayMessageRole::User,
+            content: Some(text.into()),
+            tool_call_id: None,
+            tool_calls: vec![],
+        }];
+        let parameters = ChatParameters {
+            temperature: None,
+            request_parameters: serde_json::Map::from_iter([("max_tokens".into(), json!(300))]),
+        };
+        assert_eq!(
+            c.complete(&messages, parameters.clone())
+                .await
+                .unwrap()
+                .content,
+            "完整回复"
+        );
+        let mut output = String::new();
+        c.stream(&messages, parameters, |event| {
+            output.push_str(&event.delta);
+            true
+        })
+        .await
+        .unwrap();
+        assert_eq!(output, "完整回复");
+        for body in seen.lock().unwrap().iter() {
+            assert_eq!(body["input"][0]["content"][0]["text"], text);
+            assert_eq!(body["max_output_tokens"], 300);
+            assert!(body.get("max_tokens").is_none() && body.get("messages").is_none());
+        }
+        server.abort();
+    }
+}
 #[tokio::test]
 async fn native_protocols_convert_requests_and_stream_text_with_terminal_checks() {
     for protocol in [
         ProviderProtocol::Openai,
         ProviderProtocol::OpenaiResponses,
         ProviderProtocol::Anthropic,
-        ProviderProtocol::Gemini,
     ] {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let captured = seen.clone();
@@ -71,19 +142,17 @@ async fn native_protocols_convert_requests_and_stream_text_with_terminal_checks(
         let address = listener.local_addr().unwrap();
         let app=Router::new().route("/*path",post(move|headers:HeaderMap,Json(body):Json<Value>|{
             captured.lock().unwrap().push((headers,body.clone()));async move {
-                let stream=protocol==ProviderProtocol::Gemini || body["stream"]==true;
+                let stream=body["stream"]==true;
                 let final_value=match protocol{
                     ProviderProtocol::Openai=>json!({"id":"upstream","choices":[{"message":{"content":"你好"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}),
                     ProviderProtocol::OpenaiResponses=>json!({"id":"upstream","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"你好"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}),
                     ProviderProtocol::Anthropic=>json!({"id":"upstream","content":[{"type":"text","text":"你好"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}),
-                    ProviderProtocol::Gemini=>json!({"responseId":"upstream","candidates":[{"content":{"parts":[{"text":"你好"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}})
                 };
                 if !stream{return Json(final_value).into_response();}
                 let values=match protocol{
                     ProviderProtocol::Openai=>vec![json!({"id":"upstream","choices":[{"delta":{"content":"你"}}]}),json!({"choices":[{"delta":{"content":"好"},"finish_reason":"stop"}]}),json!({"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}})],
                     ProviderProtocol::OpenaiResponses=>vec![json!({"type":"response.output_text.delta","delta":"你"}),json!({"type":"response.output_text.delta","delta":"好"}),json!({"type":"response.completed","response":final_value})],
                     ProviderProtocol::Anthropic=>vec![json!({"type":"message_start","message":{"id":"upstream","content":[],"usage":{"input_tokens":3}}}),json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你"}}),json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}),json!({"type":"content_block_stop","index":0}),json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),json!({"type":"message_stop"})],
-                    ProviderProtocol::Gemini=>vec![json!({"candidates":[{"content":{"parts":[{"text":"你"}]}}]}),json!({"responseId":"upstream","candidates":[{"content":{"parts":[{"text":"好"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}})]
                 };
                 let mut data=values.iter().map(|v|format!("data: {v}\n\n")).collect::<String>();if protocol==ProviderProtocol::Openai{data.push_str("data: [DONE]\n\n");}
                 ([(header::CONTENT_TYPE,"text/event-stream")],data).into_response()
@@ -131,11 +200,6 @@ async fn native_protocols_convert_requests_and_stream_text_with_terminal_checks(
                 assert_eq!(body["max_tokens"], 300);
                 assert_eq!(body["system"][0]["text"], "system");
             }
-            ProviderProtocol::Gemini => {
-                assert_eq!(headers["x-goog-api-key"], "fixture-secret");
-                assert_eq!(body["generationConfig"]["maxOutputTokens"], 300);
-                assert_eq!(body["systemInstruction"]["parts"][0]["text"], "system");
-            }
             _ => assert_eq!(headers["authorization"], "Bearer fixture-secret"),
         }
         assert!(body.get("temperature").is_none());
@@ -157,10 +221,6 @@ fn rejects_unterminated_or_inconsistent_native_streams_and_preserves_function_ca
         (
             ProviderProtocol::Anthropic,
             json!({"stop_reason":"tool_use","content":[{"type":"tool_use","id":"call1","name":"weather","input":{"city":"Paris"}}]}),
-        ),
-        (
-            ProviderProtocol::Gemini,
-            json!({"candidates":[{"finishReason":"STOP","content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Paris"}}}]}}]}),
         ),
     ] {
         let result = protocol::completion(protocol, &value).unwrap();

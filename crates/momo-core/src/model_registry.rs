@@ -7,13 +7,13 @@ mod transport;
 mod vision;
 pub(crate) use vision::ConfiguredVisionAdapter;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderProtocol {
+    #[default]
     Openai,
     OpenaiResponses,
     Anthropic,
-    Gemini,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +27,7 @@ pub enum ModelKind {
 pub struct ModelProvider {
     pub id: uuid::Uuid,
     pub name: String,
+    #[serde(default)]
     pub protocol: ProviderProtocol,
     pub base_url: String,
     #[serde(default)]
@@ -73,6 +74,27 @@ pub struct ModelConfiguration {
 pub struct ModelConnection {
     pub provider: ModelProvider,
     pub model: ConfiguredModel,
+}
+
+impl ModelConnection {
+    pub(crate) fn effective_protocol(&self) -> ProviderProtocol {
+        if self.provider.protocol == ProviderProtocol::Openai {
+            let path = if self.provider.api_path.is_empty() {
+                url::Url::parse(&self.provider.base_url)
+                    .ok()
+                    .map(|url| url.path().to_owned())
+                    .unwrap_or_default()
+            } else {
+                self.provider.api_path.clone()
+            };
+            if path.trim_end_matches('/').ends_with("/responses")
+                || path.trim_matches('/') == "responses"
+            {
+                return ProviderProtocol::OpenaiResponses;
+            }
+        }
+        self.provider.protocol
+    }
 }
 
 /// Host-owned connection lookup. Resolvers must retain immutable references for replay.
@@ -141,18 +163,6 @@ fn validate(c: &ModelConfiguration) -> Result<(), GovernanceError> {
             })
         {
             return Err(invalid("invalid model definition"));
-        }
-        if c.providers
-            .iter()
-            .any(|p| p.id == m.provider_id && p.protocol == ProviderProtocol::Gemini)
-        {
-            let name = m.model_id.strip_prefix("models/").unwrap_or(&m.model_id);
-            if name.is_empty()
-                || name.contains(['/', '\\', '?', '#', '%'])
-                || matches!(name, "." | "..")
-            {
-                return Err(invalid("invalid Gemini model name"));
-            }
         }
     }
     Ok(())

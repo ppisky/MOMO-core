@@ -23,34 +23,26 @@ impl ModelConnection {
             model: self.model.model_id.clone(),
         }
     }
-    pub(crate) fn request_url(&self, stream: bool) -> Result<String, GatewayError> {
+    pub(crate) fn request_url(&self, _stream: bool) -> Result<String, GatewayError> {
         let mut url = url::Url::parse(&self.provider.base_url)?;
-        let default = match self.provider.protocol {
+        let default = match self.effective_protocol() {
             ProviderProtocol::Openai => "chat/completions",
             ProviderProtocol::OpenaiResponses => "responses",
             ProviderProtocol::Anthropic => "messages",
-            ProviderProtocol::Gemini => "",
-        };
-        let path = if !self.provider.api_path.is_empty() {
-            self.provider.api_path.clone()
-        } else if self.provider.protocol == ProviderProtocol::Gemini {
-            format!(
-                "models/{}:{}",
-                self.model.model_id.trim_start_matches("models/"),
-                if stream {
-                    "streamGenerateContent"
-                } else {
-                    "generateContent"
-                }
-            )
-        } else {
-            default.to_owned()
         };
         let prefix = url.path().trim_end_matches('/').to_owned();
-        url.set_path(&format!("{prefix}/{}", path.trim_start_matches('/')));
-        if stream && self.provider.protocol == ProviderProtocol::Gemini {
-            url.set_query(Some("alt=sse"));
+        // An explicit generation endpoint is already a complete URL.
+        if self.provider.api_path.is_empty()
+            && (prefix.ends_with("/responses") || prefix.ends_with("/chat/completions"))
+        {
+            return Ok(url.to_string());
         }
+        let path = if self.provider.api_path.is_empty() {
+            default
+        } else {
+            &self.provider.api_path
+        };
+        url.set_path(&format!("{prefix}/{}", path.trim_start_matches('/')));
         Ok(url.to_string())
     }
     pub(crate) async fn complete(
@@ -61,7 +53,7 @@ impl ModelConnection {
         parameters
             .request_parameters
             .retain(|key, _| !key.starts_with("momo_"));
-        if self.provider.protocol == ProviderProtocol::Openai {
+        if self.effective_protocol() == ProviderProtocol::Openai {
             return OpenAiGateway::from_client(provider_client()?)
                 .with_completion_endpoint(self.request_url(false)?)
                 .complete_messages(&self.endpoint(), messages, parameters)
@@ -79,7 +71,7 @@ impl ModelConnection {
         parameters
             .request_parameters
             .retain(|key, _| !key.starts_with("momo_"));
-        if self.provider.protocol == ProviderProtocol::Openai {
+        if self.effective_protocol() == ProviderProtocol::Openai {
             return OpenAiGateway::from_client(provider_client()?)
                 .with_completion_endpoint(self.request_url(true)?)
                 .stream_messages(&self.endpoint(), messages, parameters, on_delta)
@@ -99,13 +91,12 @@ impl ModelConnection {
         let client = provider_client()?;
         let mut request = client.post(self.request_url(stream)?).json(&body);
         if let Some(key) = self.provider.api_key.as_ref().filter(|k| !k.is_empty()) {
-            request = match self.provider.protocol {
+            request = match self.effective_protocol() {
                 ProviderProtocol::Anthropic => request.header("x-api-key", key),
-                ProviderProtocol::Gemini => request.header("x-goog-api-key", key),
                 _ => request.bearer_auth(key),
             };
         }
-        if self.provider.protocol == ProviderProtocol::Anthropic {
+        if self.effective_protocol() == ProviderProtocol::Anthropic {
             request = request.header("anthropic-version", "2023-06-01");
         }
         let response = request.send().await?;
@@ -119,7 +110,7 @@ impl ModelConnection {
         let mut size = 0usize;
         let mut decoder = crate::gateway::SseDecoder::new();
         let mut body = Vec::new();
-        let mut state = StreamState::new(self.provider.protocol);
+        let mut state = StreamState::new(self.effective_protocol());
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk?;
             size = size.saturating_add(chunk.len());
@@ -142,11 +133,11 @@ impl ModelConnection {
                 {
                     return Err(GatewayError::Cancelled);
                 }
-                if state.done && self.provider.protocol != ProviderProtocol::Gemini {
+                if state.done {
                     break;
                 }
             }
-            if state.done && self.provider.protocol != ProviderProtocol::Gemini {
+            if state.done {
                 break;
             }
         }
@@ -154,9 +145,9 @@ impl ModelConnection {
             if !state.done {
                 return Err(GatewayError::IncompleteStream);
             }
-            protocol::completion(self.provider.protocol, &state.value)?
+            protocol::completion(self.effective_protocol(), &state.value)?
         } else {
-            protocol::completion(self.provider.protocol, &serde_json::from_slice(&body)?)?
+            protocol::completion(self.effective_protocol(), &serde_json::from_slice(&body)?)?
         };
         if completion
             .tool_calls
@@ -284,37 +275,7 @@ impl StreamState {
                 Some("message_stop") => self.done = true,
                 _ => {}
             },
-            ProviderProtocol::Gemini => {
-                if self.value.get("candidates").is_none() {
-                    self.value = json!({"candidates":[{"content":{"parts":[]}}]});
-                }
-                if let Some(parts) = v
-                    .pointer("/candidates/0/content/parts")
-                    .and_then(Value::as_array)
-                {
-                    for part in parts {
-                        if part["thought"] != true {
-                            if let Some(text) = part["text"].as_str() {
-                                delta.push_str(text);
-                            }
-                            self.value["candidates"][0]["content"]["parts"]
-                                .as_array_mut()
-                                .expect("initialized parts")
-                                .push(part.clone());
-                        }
-                    }
-                }
-                if let Some(reason) = v.pointer("/candidates/0/finishReason") {
-                    self.value["candidates"][0]["finishReason"] = reason.clone();
-                    self.done = true;
-                }
-                if let Some(usage) = v.get("usageMetadata") {
-                    self.value["usageMetadata"] = usage.clone();
-                }
-                if let Some(id) = v.get("responseId") {
-                    self.value["responseId"] = id.clone();
-                }
-            }
+
             ProviderProtocol::Openai => unreachable!(),
         }
         self.text.push_str(&delta);

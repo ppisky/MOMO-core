@@ -630,7 +630,8 @@ pub struct RequestModelRoute {
 pub struct ResponseEmbeddingSelection {
     /// None explicitly disables embeddings; omission of the selection preserves gateway routing.
     pub model: Option<String>,
-    /// Declared output size for compatibility checks, not an upstream dimension override.
+    /// Omission follows the model default; an explicit value requests upstream dimensions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimension: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<EmbeddingRequestParameters>,
@@ -639,6 +640,10 @@ pub struct ResponseEmbeddingSelection {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddingRequestParameters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalization: Option<crate::EmbeddingNormalization>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
