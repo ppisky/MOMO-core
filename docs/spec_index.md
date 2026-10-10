@@ -32,6 +32,7 @@ sources remain where needed to explain actual compatibility.
 | DMW | [`Dual-Mem_Wiki_v2.md`](../Dual-Mem_Wiki_v2.md) | Implemented normative v2 |
 | NSG | [`Narrative_Semantic_Graph_v2.md`](../Narrative_Semantic_Graph_v2.md) | Implemented normative v2 |
 | MO State | [`MO_State_v2.md`](../MO_State_v2.md) | Implemented v2 baseline |
+| MO State management | [`mo_state_management.zh-CN.md`](mo_state_management.zh-CN.md) | Bounded read-only local administration view and captured response diagnostics |
 | Memory provenance and identity | [`memory_provenance_runtime.md`](memory_provenance_runtime.md) | Implemented working-tree local profile 1; awaiting review |
 | Activity-driven memory lifecycle | [`memory_lifecycle_runtime.md`](memory_lifecycle_runtime.md) | Implemented native MO State profile; replaces calendar aging on native/HTTP paths |
 | MOC | [`MOMO_Container_v3.md`](../MOMO_Container_v3.md) | Implemented v3 |

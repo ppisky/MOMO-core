@@ -487,6 +487,12 @@ fn mo_state_input_audit_binds_projection_without_exposing_bodies() {
     assert_eq!(audit["scope"], "retrieved_subset");
     assert_eq!(audit["memory_count"], 1);
     assert_eq!(audit["source_space_ids"], json!(["s1"]));
+    assert_eq!(
+        audit["records"],
+        json!([{"id":"m1", "kind":"memory", "space_id":"s1", "state_eligible":true}])
+    );
+    let ineligible = state_input_audit(&[json!({"id":"external", "memory_space":{"id":"s1"}, "provenance":{"state_eligible":false}})], &[], "ok").unwrap();
+    assert_eq!(ineligible["records"][0]["state_eligible"], false);
     assert_eq!(audit["fingerprint_sha256"].as_str().unwrap().len(), 64);
     assert!(!audit.to_string().contains("secret body"));
 

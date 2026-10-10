@@ -171,6 +171,7 @@ fn api_routes() -> Router<AppState> {
             get(get_managed_ddm_profile).delete(reset_managed_ddm_profile),
         )
         .route("/mo-state/runtime", get(get_mo_state_runtime))
+        .route("/mo-state/management", get(get_mo_state_management))
         .route("/memory/retrieve-scoped", post(retrieve_scoped_memory))
         .route("/memory/maintenance", post(run_memory_maintenance))
         .route("/memory/recovery", get(memory_recovery_status))

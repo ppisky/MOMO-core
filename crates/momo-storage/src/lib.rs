@@ -204,6 +204,19 @@ pub struct MoStateRuntimeStatus {
     pub current_snapshot: Option<MoStateSnapshot>,
 }
 
+/// A scoped diagnostic record. Raw response JSON stays inside the Core boundary.
+#[derive(Debug, Clone)]
+pub struct MoStateManagementRecord {
+    pub operation_id: String,
+    pub event_type: String,
+    pub phase: String,
+    pub snapshot: Option<MoStateSnapshot>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub response_json: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ControlOperation {
     pub operation_key: String,

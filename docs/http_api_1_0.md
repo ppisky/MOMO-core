@@ -91,6 +91,13 @@ snapshot. Before a Space has handled an autonomous MO State event it returns
 `status: "not_initialized"`. This route is observational and does not start or
 advance a scene.
 
+`GET /v1/mo-state/management?space_id=<uuid>` is a bounded read-only local
+management view: the runtime status and latest 20 state operations, with
+minimal diagnostics linked to their completed responses. It reports actual
+state injection from the saved response audit, including final context-budget
+truncation or omission. Legacy operations have no response link and retain
+unknown injection status. See [MO State management](mo_state_management.zh-CN.md).
+
 The direct deletion routes in this profile are trusted administrative actions.
 They intentionally do not accept `momo.control/1.0` request IDs. End-user
 workflows must use the structured control route so that action identity,

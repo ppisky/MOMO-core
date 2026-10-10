@@ -398,10 +398,11 @@ impl LocalStore {
         }
         if let Some(operation_id) = mo_state_operation_id {
             let changed = sqlx::query(
-                "UPDATE mo_state_operations SET phase='completed', error=NULL, updated_at=? \
+                "UPDATE mo_state_operations SET phase='completed', error=NULL, updated_at=?, response_request_id=? \
                  WHERE operation_id=? AND phase IN ('projected', 'completed')",
             )
             .bind(Utc::now().to_rfc3339())
+            .bind(request_id)
             .bind(operation_id)
             .execute(&mut *transaction)
             .await?

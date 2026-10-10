@@ -85,6 +85,7 @@ state contract GET/PUT/DELETE 按 Space 管理 YAML 覆盖，经校验、CAS 和
 | `GET,PUT,DELETE` | `/v1/mo-state/contract` | 本机管理/发现 |
 | `GET,DELETE` | `/v1/mo-state/ddm-profile` | 本机管理/发现 |
 | `GET` | `/v1/mo-state/runtime` | 本机管理/发现 |
+| `GET` | `/v1/mo-state/management` | 本机管理/发现：最近 20 次处理、快照及实际注入审计 |
 | `POST` | `/v1/memory/retrieve-scoped` | 本机管理/发现 |
 | `POST` | `/v1/memory/maintenance` | 本机管理/发现 |
 | `GET` | `/v1/memory/recovery` | 本机管理/发现 |

@@ -621,6 +621,55 @@ fn mo_state_observation(operation_id: &str, event_fingerprint: &str) -> MoStateO
 }
 
 #[tokio::test]
+async fn mo_state_management_is_bounded_scoped_read_only_and_keeps_legacy_snapshots() {
+    let store = LocalStore::in_memory().await.unwrap();
+    let mut last_snapshot = None;
+    for index in 0..23 {
+        let observation = mo_state_observation(&format!("management-{index:02}"), "evidence");
+        store
+            .observe_mo_state_operation(&observation)
+            .await
+            .unwrap();
+        last_snapshot = Some(
+            store
+                .publish_mo_state_snapshot(
+                    &observation.operation_id,
+                    r#"{"context":"old constraints","audit":{}}"#,
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let scope = mo_state_observation("", "").space_id;
+    let before = store
+        .mo_state_runtime_status(&scope)
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = store.mo_state_management_records(&scope).await.unwrap();
+    assert_eq!(rows.len(), 20);
+    assert_eq!(rows[0].snapshot, last_snapshot);
+    assert!(rows.iter().all(|row| row.response_json.is_none()));
+    assert!(
+        store
+            .mo_state_management_records(&Uuid::new_v4().to_string())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let after = store
+        .mo_state_runtime_status(&scope)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.snapshot_revision, after.snapshot_revision);
+    assert_eq!(before.current_snapshot, after.current_snapshot);
+}
+
+#[tokio::test]
 async fn mo_state_runtime_versions_sources_and_replays_snapshots() {
     let store = LocalStore::in_memory().await.expect("store");
     let mut observation = mo_state_observation("state-operation-1", "event-a");
@@ -1209,6 +1258,15 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
             .expect("completed state operation")
             .phase,
         "completed"
+    );
+    let management = store
+        .mo_state_management_records(&scope_id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(management.len(), 1);
+    assert_eq!(
+        management[0].response_json.as_deref(),
+        Some(r#"{"status":"completed"}"#)
     );
 
     let retry = Message {

@@ -158,3 +158,61 @@ pub async fn mo_state_runtime_status(
     value["memory_lifecycle"] = lifecycle;
     Ok(value)
 }
+
+/// Read-only control view; never returns a completed reply or provider settings.
+pub async fn mo_state_management(
+    runtime: &MomoRuntime,
+    space_id: String,
+) -> Result<serde_json::Value, RuntimeApiError> {
+    let space_id = uuid::Uuid::parse_str(&space_id)
+        .map_err(|e| RuntimeApiError::invalid(e.to_string()))?
+        .to_string();
+    let records = runtime
+        .core()
+        .store()
+        .mo_state_management_records(&space_id)
+        .await
+        .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+    let mut operations = Vec::with_capacity(records.len());
+    for record in records {
+        let response = record
+            .response_json
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .map_err(|e| RuntimeApiError::internal(e.to_string()))?;
+        let diagnostic = response.as_ref().map(|response| {
+            let state_section = response
+                .pointer("/momo/request_audit/text_context/sections")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|sections| {
+                    sections
+                        .iter()
+                        .find(|section| section["section"] == "state")
+                });
+            json!({
+                "request_id": response["momo"]["request_id"],
+                "conversation_id": response["momo"]["conversation_id"],
+                "injection_status": response["momo"]["state_audit"]["injection_status"],
+                "state_section": state_section,
+                "warnings": response["momo"]["warnings"],
+            })
+        });
+        operations.push(json!({
+            "operation_id": record.operation_id,
+            "event_type": record.event_type,
+            "phase": record.phase,
+            "snapshot": record.snapshot,
+            "error": record.error,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "response": diagnostic,
+        }));
+    }
+    Ok(json!({
+        "version": 1,
+        "space_id": space_id,
+        "runtime": mo_state_runtime_status(runtime, space_id.clone()).await?,
+        "operations": operations,
+    }))
+}

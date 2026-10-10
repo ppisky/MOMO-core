@@ -862,6 +862,13 @@ pub(super) fn state_input_audit(
         "memory_count": memory.len(),
         "nsg_count": nsg.len(),
         "source_space_ids": source_spaces,
+        "records": memory.iter().map(|item| json!({
+            "id": item["id"], "kind": "memory", "space_id": item["memory_space"]["id"],
+            "state_eligible": item.pointer("/provenance/state_eligible").and_then(Value::as_bool) != Some(false),
+        })).chain(nsg.iter().map(|item| json!({
+            "id": item["id"], "kind": "nsg", "space_id": item["memory_space"]["id"],
+            "state_eligible": true,
+        }))).collect::<Vec<_>>(),
     }))
 }
 

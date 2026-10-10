@@ -397,6 +397,49 @@ async fn automatic_ddm_is_cached_scoped_regenerated_and_does_not_edit_character_
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(second["usage"]["total_tokens"], 10);
+    let (status, _, management) = send_json(
+        &app,
+        Method::GET,
+        &format!("/v1/mo-state/management?space_id={space}"),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(management["version"], 1);
+    assert_eq!(management["space_id"], json!(space));
+    assert_eq!(management["operations"].as_array().unwrap().len(), 2);
+    let latest = &management["operations"][0];
+    assert_eq!(latest["phase"], "completed");
+    assert_eq!(latest["response"]["request_id"], "generated-second");
+    assert_eq!(
+        latest["response"]["conversation_id"],
+        second["momo"]["conversation_id"]
+    );
+    assert_eq!(
+        latest["response"]["injection_status"],
+        second["momo"]["state_audit"]["injection_status"]
+    );
+    assert_eq!(
+        latest["snapshot"]["snapshot_id"],
+        second["momo"]["state_audit"]["runtime_snapshot"]["snapshot_id"]
+    );
+    assert!(latest["response"].get("output_text").is_none());
+    assert!(!management.to_string().contains("USER_PRIVATE_DESCRIPTION"));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "management must not generate a profile"
+    );
+    let (_, _, empty) = send_json(
+        &app,
+        Method::GET,
+        &format!("/v1/mo-state/management?space_id={}", uuid::Uuid::now_v7()),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(empty["operations"], json!([]));
     assert!(
         runtime_api::character_ddm_profile(&runtime, character.id.to_string())
             .await

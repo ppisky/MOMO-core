@@ -2,6 +2,38 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 impl LocalStore {
+    /// Read the bounded state journal without observing sources or running work.
+    pub async fn mo_state_management_records(
+        &self,
+        space_id: &str,
+    ) -> Result<Vec<MoStateManagementRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT o.operation_id, o.event_type, o.phase, o.snapshot_json, o.error, \
+             o.created_at, o.updated_at, r.response_json \
+             FROM mo_state_operations o LEFT JOIN response_operations r \
+             ON r.request_id=o.response_request_id \
+             WHERE o.space_id=? ORDER BY o.updated_at DESC, o.operation_id LIMIT 20",
+        )
+        .bind(space_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let snapshot: Option<String> = row.try_get("snapshot_json")?;
+                Ok(MoStateManagementRecord {
+                    operation_id: row.try_get("operation_id")?,
+                    event_type: row.try_get("event_type")?,
+                    phase: row.try_get("phase")?,
+                    snapshot: snapshot.as_deref().map(serde_json::from_str).transpose()?,
+                    error: row.try_get("error")?,
+                    created_at: parse_timestamp(row.try_get("created_at")?)?,
+                    updated_at: parse_timestamp(row.try_get("updated_at")?)?,
+                    response_json: row.try_get("response_json")?,
+                })
+            })
+            .collect()
+    }
+
     /// Observes source identities and preserves the original per-request projection on replay.
     pub async fn observe_mo_state_operation(
         &self,

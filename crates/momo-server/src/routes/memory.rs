@@ -261,6 +261,19 @@ pub(crate) async fn get_mo_state_runtime(
     )
 }
 
+pub(crate) async fn get_mo_state_management(
+    State(state): State<AppState>,
+    Query(request): Query<SpaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    json_result(
+        runtime_api::mo_state_management(
+            state.runtime.as_ref(),
+            validate_space_id(request.space_id)?,
+        )
+        .await,
+    )
+}
+
 pub(crate) async fn retrieve_scoped_memory(
     State(state): State<AppState>,
     Json(request): Json<RetrieveScopedMemoryRequest>,
