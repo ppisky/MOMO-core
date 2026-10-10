@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 
 #[derive(Debug)]
 struct EmbeddingFixtureResolver(crate::ModelConnection);
@@ -26,6 +27,7 @@ async fn configured_embedding_validates_kind_dimension_and_keeps_compatibility_o
     let mut selection = crate::ResponseEmbeddingSelection {
         model: Some("configured_fixture".into()),
         dimension: Some(3),
+        parameters: None,
     };
     let config = service
         .resolve_embedding_selection(&selection)
@@ -116,6 +118,160 @@ async fn uuid_spelling_does_not_change_response_identity_or_cancellation() {
     let _operation = service.coordination.enter_operation(&key, space);
     assert!(service.cancel(&space.to_uppercase(), "request"));
     assert!(service.coordination.ensure_active(&key).is_err());
+}
+
+#[tokio::test]
+async fn purpose_defaults_overrides_reset_and_captured_policy_are_independent_of_dialogue() {
+    let runtime = test_runtime().await;
+    let provider = uuid::Uuid::now_v7();
+    let connection = serde_json::from_value(json!({
+        "provider":{"id":provider,"name":"Fixture","protocol":"openai","base_url":"http://127.0.0.1:9/v1","api_key":"secret"},
+        "model":{"id":uuid::Uuid::now_v7(),"provider_id":provider,"model_id":"vision","name":"Vision","kind":"vision","context_window":16384,"max_output_tokens":8192}
+    })).unwrap();
+    let mut service = MomoApiService::new(
+        runtime.clone(),
+        "http://127.0.0.1:9/v1",
+        None,
+        reqwest::Client::new(),
+    )
+    .with_model_connections(Arc::new(EmbeddingFixtureResolver(connection)));
+    let space = uuid::Uuid::now_v7();
+    let resolve = |service: &MomoApiService, routes: Value| {
+        service.resolve_model_requests(
+            serde_json::from_value(json!({"personal_space_id":space,"model_routes":routes}))
+                .unwrap(),
+        )
+    };
+    let defaults = resolve(&service, json!({"vision":{"model":"configured_fixture"},"memory_distillation":{"model":"configured_fixture"},"semantic_graph_governance":{"model":"configured_fixture"}})).unwrap();
+    assert_eq!(
+        defaults["purposes"]["vision"]["effective"]["max_output_tokens"],
+        1024
+    );
+    assert_eq!(
+        defaults["purposes"]["memory_distillation"]["effective"]["max_output_tokens"],
+        4096
+    );
+    assert_eq!(
+        defaults["purposes"]["semantic_graph_governance"]["effective"]["temperature"],
+        0.0
+    );
+    assert!(!defaults.to_string().contains("secret"));
+    let ignored = resolve(
+        &service,
+        json!({"vision":{"model":"configured_fixture","temperature":0.5}}),
+    )
+    .unwrap();
+    assert_eq!(
+        ignored["purposes"]["vision"]["effective"]["temperature"],
+        0.0
+    );
+    assert_eq!(
+        ignored["purposes"]["vision"]["ignored"],
+        json!(["temperature"])
+    );
+    let mut policy = runtime.runtime_settings();
+    policy.request_overrides.sampling = crate::OverrideMode::Allow;
+    policy
+        .request_overrides
+        .allowed_parameters
+        .insert("top_p".into());
+    runtime
+        .replace_runtime_settings(None, policy.clone(), None)
+        .unwrap();
+    service.model_routes = serde_json::from_value(json!({"vision":{"model":"configured_fixture","temperature":0.5,"top_p":0.75,"max_output_tokens":512}})).unwrap();
+    let first = service
+        .route_parameters("vision", &space.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.temperature, Some(0.5));
+    assert_eq!(first.request_parameters["max_tokens"], 512);
+    let captured = ResolvedResponseInput {
+        purpose_parameters: BTreeMap::from([("vision".into(), first.clone())]),
+        ..Default::default()
+    };
+    let captured: ResolvedResponseInput =
+        serde_json::from_str(&serde_json::to_string(&captured).unwrap()).unwrap();
+    service.purpose_parameters = captured.purpose_parameters;
+    policy.request_overrides.sampling = crate::OverrideMode::Reject;
+    runtime
+        .replace_runtime_settings(None, policy, None)
+        .unwrap();
+    assert_eq!(
+        service
+            .route_parameters("vision", &space.to_string())
+            .unwrap(),
+        Some(first)
+    );
+    service.purpose_parameters.clear();
+    assert!(
+        service
+            .route_parameters("vision", &space.to_string())
+            .is_err()
+    );
+    let reset = resolve(
+        &service,
+        json!({"vision":{"model":"configured_fixture","temperature":0.0,"max_output_tokens":1024}}),
+    )
+    .unwrap();
+    assert_eq!(reset["purposes"]["vision"]["overrides"], json!({}));
+    assert_eq!(reset["purposes"]["vision"]["effective"]["temperature"], 0.0);
+    assert!(
+        resolve(
+            &service,
+            json!({"vision":{"model":"configured_fixture","parameters":{"stream":true}}})
+        )
+        .is_err()
+    );
+    assert!(
+        resolve(
+            &service,
+            json!({"vision":{"model":"configured_fixture","max_output_tokens":9000}})
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn embedding_purpose_parameters_change_compatibility_and_reset_without_changing_selection() {
+    let provider = uuid::Uuid::now_v7();
+    let connection = serde_json::from_value(json!({"provider":{"id":provider,"name":"Fixture","protocol":"openai","base_url":"http://127.0.0.1:9/v1"},"model":{"id":uuid::Uuid::now_v7(),"provider_id":provider,"model_id":"embedding","name":"Embedding","kind":"embedding"}})).unwrap();
+    let service = MomoApiService::new(
+        test_runtime().await,
+        "http://127.0.0.1:9/v1",
+        None,
+        reqwest::Client::new(),
+    )
+    .with_model_connections(Arc::new(EmbeddingFixtureResolver(connection)));
+    let selection = |parameters: Value| {
+        serde_json::from_value::<crate::ResponseEmbeddingSelection>(
+            json!({"model":"configured_fixture","dimension":3,"parameters":parameters}),
+        )
+        .unwrap()
+    };
+    let defaults = service
+        .resolve_embedding_selection(&selection(json!({})))
+        .unwrap()
+        .unwrap();
+    let custom = service.resolve_embedding_selection(&selection(json!({"normalization":"none","send_dimensions":true,"query_prefix":"query: ","document_prefix":"doc: "}))).unwrap().unwrap();
+    assert_ne!(
+        defaults.profile.vector_space_id().unwrap(),
+        custom.profile.vector_space_id().unwrap()
+    );
+    assert_eq!(custom.profile.dimension, 3);
+    let reset = service
+        .resolve_embedding_selection(&selection(json!({})))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        defaults.profile.vector_space_id().unwrap(),
+        reset.profile.vector_space_id().unwrap()
+    );
+    assert!(
+        serde_json::from_value::<crate::ResponseEmbeddingSelection>(
+            json!({"model":"configured_fixture","dimension":3,"parameters":{"temperature":0.5}})
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]

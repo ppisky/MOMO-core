@@ -84,7 +84,15 @@ impl MomoApiService {
             self.coordination.ensure_active(operation_key)?;
             let input = json!({"character_definition":definition, "previous_output_error":error})
                 .to_string();
-            let output_tokens = capability.max_output_tokens.min(4096);
+            let defaults = self.purpose_chat_parameters(
+                "memory_distillation",
+                space_id,
+                capability.context_window,
+                capability.max_output_tokens,
+            )?;
+            let output_tokens = defaults.request_parameters["max_tokens"]
+                .as_u64()
+                .expect("output budget") as usize;
             let tokens = momo_memory::ConservativeTokenCounter.count(&input)
                 + momo_memory::ConservativeTokenCounter.count(&prompt.content);
             if tokens.saturating_add(output_tokens) > capability.context_window {
@@ -112,7 +120,7 @@ impl MomoApiService {
                             tool_call_id: None,
                         },
                     ],
-                    temperature: Some(0.0),
+                    temperature: defaults.temperature,
                     request_parameters: json!({"max_tokens":output_tokens,"momo_hop":1})
                         .as_object()
                         .expect("object")

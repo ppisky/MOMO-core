@@ -4,7 +4,7 @@ use std::fmt;
 
 use futures_util::{FutureExt, StreamExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, json};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -45,6 +45,7 @@ pub struct GatewayVisionAdapter {
     client: reqwest::Client,
     gateway: OpenAiGateway,
     endpoint: ProviderEndpoint,
+    parameters: ChatParameters,
 }
 
 impl GatewayVisionAdapter {
@@ -63,7 +64,16 @@ impl GatewayVisionAdapter {
                 api_key,
                 model: route.into(),
             },
+            parameters: crate::orchestration::purpose_parameters::generation_defaults(
+                "vision", 8192, 1024,
+            ),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_parameters(mut self, parameters: ChatParameters) -> Self {
+        self.parameters = parameters;
+        self
     }
 }
 
@@ -75,6 +85,7 @@ impl VisionDescriptionAdapter for GatewayVisionAdapter {
         let gateway = self.gateway.clone();
         let client = self.client.clone();
         let endpoint = self.endpoint.clone();
+        let parameters = self.parameters.clone();
         async move {
             ensure_gateway_vision_capability(&client, &endpoint).await?;
             let VisionDescriptionRequest {
@@ -88,6 +99,7 @@ impl VisionDescriptionAdapter for GatewayVisionAdapter {
                 let endpoint = endpoint.clone();
                 let prompt = prompt.clone();
                 let request_id = request_id.clone();
+                let parameters = parameters.clone();
                 async move {
                     describe_one(
                         &gateway,
@@ -97,6 +109,7 @@ impl VisionDescriptionAdapter for GatewayVisionAdapter {
                         &request_id,
                         index,
                         image_count,
+                        parameters,
                     )
                     .await
                 }
@@ -142,6 +155,7 @@ async fn describe_one(
     request_id: &str,
     index: usize,
     image_count: usize,
+    parameters: ChatParameters,
 ) -> Result<SingleDescription, VisionError> {
     let messages = [
         GatewayMessage {
@@ -167,8 +181,7 @@ async fn describe_one(
             tool_calls: Vec::new(),
         },
     ];
-    let mut request_parameters = Map::new();
-    request_parameters.insert("max_tokens".to_owned(), json!(1024));
+    let mut request_parameters = parameters.request_parameters;
     request_parameters.insert("momo_hop".to_owned(), json!(1));
     request_parameters.insert(
         "momo_request_id".to_owned(),
@@ -182,7 +195,7 @@ async fn describe_one(
             endpoint,
             &messages,
             ChatParameters {
-                temperature: Some(0.0),
+                temperature: parameters.temperature,
                 request_parameters,
             },
         )

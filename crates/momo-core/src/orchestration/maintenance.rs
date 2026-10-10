@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 
 use super::{MaintenanceKind, MomoApiError, MomoApiService};
 use crate::{
-    ChatParameters, GatewayMessage, GatewayMessageContent, GatewayMessageRole, OpenAiGateway,
-    PromptSpaceId, ProviderEndpoint,
+    GatewayMessage, GatewayMessageContent, GatewayMessageRole, OpenAiGateway, PromptSpaceId,
+    ProviderEndpoint,
 };
 
 fn maintenance_batch_key(scope_id: &str, kind: &str, request_ids: &[String]) -> String {
@@ -385,6 +385,10 @@ impl MomoApiService {
                     routed.model_routes =
                         serde_json::from_str(routes).map_err(MomoApiError::internal)?;
                 }
+                if let Some(parameters) = evidence.configuration.get("purpose_parameters") {
+                    routed.purpose_parameters =
+                        serde_json::from_str(parameters).map_err(MomoApiError::internal)?;
+                }
                 provenance.evidence.push(evidence);
             }
         }
@@ -524,15 +528,7 @@ impl MomoApiService {
                 serde_json::to_string(&config).map_err(MomoApiError::internal)?,
             );
             let system = prompt.content;
-            let maintenance_max_tokens = routed
-                .gateway_generation_capability(route)
-                .await
-                .ok()
-                .map(|capability| capability.max_output_tokens);
-            let mut maintenance_parameters = json!({"momo_hop": 1});
-            if let Some(max_tokens) = maintenance_max_tokens {
-                maintenance_parameters["max_tokens"] = json!(max_tokens);
-            }
+            let maintenance_capability = routed.gateway_generation_capability(route).await.ok();
             let mut reconcile_attempts = 0;
             let generated_patch = loop {
                 reconcile_attempts += 1;
@@ -573,15 +569,19 @@ impl MomoApiService {
                         tool_calls: Vec::new(),
                     },
                 ];
-                let parameters = routed
-                    .route_parameters(route, scope_id)?
-                    .unwrap_or_else(|| ChatParameters {
-                        temperature: None,
-                        request_parameters: maintenance_parameters
-                            .as_object()
-                            .cloned()
-                            .expect("object"),
-                    });
+                let mut parameters = routed.purpose_chat_parameters(
+                    route,
+                    scope_id,
+                    maintenance_capability
+                        .as_ref()
+                        .map_or(8192, |c| c.context_window),
+                    maintenance_capability
+                        .as_ref()
+                        .map_or(1024, |c| c.max_output_tokens),
+                )?;
+                parameters
+                    .request_parameters
+                    .insert("momo_hop".into(), json!(1));
                 let completion = if let Some(connection) = &connection {
                     connection.complete(&messages, parameters).await
                 } else {

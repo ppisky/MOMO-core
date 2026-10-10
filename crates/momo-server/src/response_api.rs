@@ -32,6 +32,18 @@ use super::{
 
 const RESPONSE_STREAM_BUFFER: usize = 64;
 
+pub(super) async fn resolve_model_requests(
+    State(state): State<AppState>,
+    payload: Result<Json<momo_core::ModelRequestConfigurationRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Json(request) = payload.map_err(|error| ApiError::bad_request(error.body_text()))?;
+    state
+        .momo_api
+        .resolve_model_requests(request)
+        .map(Json)
+        .map_err(momo_api_error)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CancelResponseRequest {

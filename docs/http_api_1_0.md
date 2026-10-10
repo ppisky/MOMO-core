@@ -1,7 +1,7 @@
 # MOMO Core HTTP boundary 1.0
 
 **Status:** normative local transport contract
-**Updated:** 2026-10-02
+**Updated:** 2026-10-10
 
 `momo-server` is a loopback-oriented transport for MOMO Core. This document
 defines which parts of its `/v1` surface carry the MOMO 1.0 compatibility
@@ -53,6 +53,8 @@ idempotency collision are distinguished by HTTP status and the envelope's
 machine-readable `code`; callers must not parse human-readable messages.
 
 ## Local administration profile
+
+`POST /v1/momo/model-requests/resolve` is a local configuration resolver, not a new stable response wire. It accepts `personal_space_id` (UUID), optional `model_routes` and optional `embedding`, using the same route/selection shapes as response creation. All supplied models must be immutable configured references. It returns `{ "version": 1, "purposes": { "<purpose>": { "defaults": {}, "effective": {}, "overrides": {}, "constraints": {}, "ignored": [] } } }`; purpose keys are `vision`, `memory_distillation`, `semantic_graph_governance` and `embedding`. Only supplied selections appear. Invalid types, parameters, budgets or rejected overrides fail; ignored overrides are reported separately. It makes no model request, writes no configuration or assets, and exposes no credentials. Hosts must authorize the Space and adapt this route through their own same-origin boundary. See [purpose request configuration](model_purpose_request_configuration.md).
 
 All other `/v1` routes are supported local administration APIs, not independent
 1.0 compatibility surfaces. They expose character and conversation CRUD,

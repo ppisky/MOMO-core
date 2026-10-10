@@ -632,6 +632,21 @@ pub struct ResponseEmbeddingSelection {
     pub model: Option<String>,
     /// Declared output size for compatibility checks, not an upstream dimension override.
     pub dimension: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<EmbeddingRequestParameters>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingRequestParameters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalization: Option<crate::EmbeddingNormalization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_dimensions: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

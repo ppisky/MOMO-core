@@ -61,6 +61,36 @@ impl MomoApiService {
     }
     pub(super) fn validate_model_routes(&self) -> Result<(), MomoApiError> {
         for (alias, route) in &self.model_routes {
+            const RESERVED: [&str; 19] = [
+                "model",
+                "messages",
+                "input",
+                "stream",
+                "tools",
+                "tool_choice",
+                "momo",
+                "metadata",
+                "api_key",
+                "base_url",
+                "url",
+                "headers",
+                "temperature",
+                "max_tokens",
+                "max_output_tokens",
+                "context_window",
+                "momo_hop",
+                "momo_request_id",
+                "top_p",
+            ];
+            if route
+                .parameters
+                .keys()
+                .any(|key| RESERVED.contains(&key.as_str()))
+            {
+                return Err(MomoApiError::bad_request(
+                    "route parameter is managed by a dedicated field or Core",
+                ));
+            }
             if !matches!(
                 alias.as_str(),
                 "vision" | "memory_distillation" | "semantic_graph_governance"
@@ -98,7 +128,7 @@ impl MomoApiService {
         alias: &str,
         scope: &str,
     ) -> Result<Option<ChatParameters>, MomoApiError> {
-        let Some(route) = self.model_routes.get(alias) else {
+        let Some(_route) = self.model_routes.get(alias) else {
             return Ok(None);
         };
         let connection = self
@@ -110,32 +140,9 @@ impl MomoApiService {
                 c.model.max_output_tokens.unwrap_or(1024),
             )
         });
-        let mut values = route.parameters.clone();
-        if let Some(p) = route.top_p {
-            values.insert("top_p".into(), json!(p));
-        }
-        let governed = self
-            .config_for_space(scope)
-            .govern(
-                context,
-                output,
-                crate::RequestedOverrides {
-                    context_window: None,
-                    max_output_tokens: route.max_output_tokens,
-                    temperature: route.temperature,
-                    instructions: None,
-                    visual_description_prompt: None,
-                    parameters: &values,
-                    tool_configuration_requested: false,
-                },
-            )
-            .map_err(MomoApiError::bad_request)?;
-        let mut parameters = governed.parameters;
-        parameters.insert("max_tokens".into(), json!(governed.max_output_tokens));
-        Ok(Some(ChatParameters {
-            temperature: governed.temperature,
-            request_parameters: parameters,
-        }))
+        Ok(Some(
+            self.purpose_chat_parameters(alias, scope, context, output)?,
+        ))
     }
     pub(super) async fn generate_response_completion(
         &self,
@@ -432,7 +439,7 @@ impl MomoApiService {
         selection: &crate::response::ResponseEmbeddingSelection,
     ) -> Result<Option<crate::api::runtime_api::EmbeddingRequestConfig>, MomoApiError> {
         let Some(reference) = &selection.model else {
-            if selection.dimension.is_some() {
+            if selection.dimension.is_some() || selection.parameters.is_some() {
                 return Err(MomoApiError::bad_request(
                     "disabled embedding cannot declare dimension",
                 ));
@@ -458,6 +465,12 @@ impl MomoApiService {
                 "configured embedding requires an OpenAI-compatible provider",
             ));
         }
+        let parameters = self
+            .embedding_parameters
+            .as_ref()
+            .or(selection.parameters.as_ref())
+            .cloned()
+            .unwrap_or_default();
         let profile = EmbeddingProfile {
             provider_id: connection.provider.id.to_string(),
             endpoint_id: connection.provider.id.to_string(),
@@ -466,10 +479,12 @@ impl MomoApiService {
                 .dimension
                 .ok_or_else(|| MomoApiError::bad_request("embedding dimension is required"))?,
             model_revision: None,
-            normalization: EmbeddingNormalization::L2,
-            send_dimensions: false,
-            query_prefix: String::new(),
-            document_prefix: String::new(),
+            normalization: parameters
+                .normalization
+                .unwrap_or(EmbeddingNormalization::L2),
+            send_dimensions: parameters.send_dimensions.unwrap_or(false),
+            query_prefix: parameters.query_prefix.unwrap_or_default(),
+            document_prefix: parameters.document_prefix.unwrap_or_default(),
         };
         profile.validate().map_err(MomoApiError::bad_request)?;
         Ok(Some(crate::api::runtime_api::EmbeddingRequestConfig {

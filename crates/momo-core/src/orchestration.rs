@@ -6,6 +6,8 @@ mod execution;
 mod generation;
 mod history;
 mod maintenance;
+pub(crate) mod purpose_parameters;
+pub use purpose_parameters::{ModelRequestConfiguration, ModelRequestConfigurationRequest};
 mod response;
 mod state;
 
@@ -127,9 +129,11 @@ pub struct MomoApiService {
     coordination: Arc<coordination::ResponseCoordination>,
     model_connections: Option<Arc<dyn crate::ModelConnectionResolver>>,
     model_routes: std::collections::BTreeMap<String, crate::response::RequestModelRoute>,
+    purpose_parameters: std::collections::BTreeMap<String, crate::ChatParameters>,
+    embedding_parameters: Option<crate::response::EmbeddingRequestParameters>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 struct ResolvedResponseInput {
     text: String,
     /// User-authored text to append to conversation history. Tool-only
@@ -145,6 +149,10 @@ struct ResolvedResponseInput {
     vision_usage: ChatUsage,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     vision_upstream_request_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    purpose_parameters: std::collections::BTreeMap<String, crate::ChatParameters>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    embedding_parameters: Option<crate::response::EmbeddingRequestParameters>,
 }
 
 impl ResolvedResponseInput {
@@ -198,6 +206,8 @@ impl MomoApiService {
             vision_adapter,
             model_routes: Default::default(),
             model_connections: None,
+            purpose_parameters: Default::default(),
+            embedding_parameters: None,
         }
     }
 

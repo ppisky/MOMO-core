@@ -91,7 +91,8 @@ pub use momo_moc;
 pub use momo_storage;
 pub use momo_storage::{DEFAULT_NSG_VECTOR_TOP_K, MAX_NSG_VECTOR_TOP_K, NsgVectorStatus};
 pub use orchestration::{
-    MaintenanceKind, MomoApiError, MomoApiErrorKind, MomoApiService, MomoResponseEventSink,
+    MaintenanceKind, ModelRequestConfiguration, ModelRequestConfigurationRequest, MomoApiError,
+    MomoApiErrorKind, MomoApiService, MomoResponseEventSink,
 };
 pub use portable::{
     ConflictMode, HostMocModule, ImportReport, MocCharacterSelection, MocCompatibility,
@@ -105,10 +106,10 @@ pub use prompt_spaces::{
     PromptSpaces, PromptSpacesError,
 };
 pub use response::{
-    MAX_GATEWAY_HOPS, MAX_RESPONSE_ID_BYTES, MAX_RESPONSE_IMAGE_REFERENCE_BYTES,
-    MAX_RESPONSE_IMAGES, MAX_RESPONSE_INPUT_BYTES, MAX_RESPONSE_INSTRUCTIONS_BYTES,
-    MAX_RESPONSE_REQUEST_BYTES, MAX_RESPONSE_SSE_EVENT_BYTES, MAX_RESPONSE_STREAM_BYTES,
-    MAX_RESPONSE_TOOL_ARGUMENT_BYTES, MAX_RESPONSE_TOOL_OUTPUT_BYTES,
+    EmbeddingRequestParameters, MAX_GATEWAY_HOPS, MAX_RESPONSE_ID_BYTES,
+    MAX_RESPONSE_IMAGE_REFERENCE_BYTES, MAX_RESPONSE_IMAGES, MAX_RESPONSE_INPUT_BYTES,
+    MAX_RESPONSE_INSTRUCTIONS_BYTES, MAX_RESPONSE_REQUEST_BYTES, MAX_RESPONSE_SSE_EVENT_BYTES,
+    MAX_RESPONSE_STREAM_BYTES, MAX_RESPONSE_TOOL_ARGUMENT_BYTES, MAX_RESPONSE_TOOL_OUTPUT_BYTES,
     MAX_RESPONSE_TOOL_SCHEMA_BYTES, MAX_RESPONSE_TOOLS, MOMO_RESPONSE_SCHEMA, MomoResponse,
     MomoResponseExtension, MomoResponseMetadata, MomoResponseRequest, RequestModelRoute,
     ResponseContentBlock, ResponseContractError, ResponseEmbeddingSelection, ResponseError,

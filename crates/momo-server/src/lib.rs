@@ -22,7 +22,7 @@ use http_error::ApiError;
 use http_error::sanitize_error_message;
 #[cfg(test)]
 use response_api::model_api_error;
-use response_api::{cancel_response, create_response};
+use response_api::{cancel_response, create_response, resolve_model_requests};
 
 use axum::http::StatusCode;
 use axum::{
@@ -126,6 +126,7 @@ fn api_routes() -> Router<AppState> {
         .route("/messages", post(create_message))
         .route("/messages/:id", put(update_message).delete(delete_message))
         .route("/momo/responses", post(create_response))
+        .route("/momo/model-requests/resolve", post(resolve_model_requests))
         .route("/momo/responses/:request_id/cancel", post(cancel_response))
         .route("/prompt-spaces", get(list_prompt_spaces))
         .route(

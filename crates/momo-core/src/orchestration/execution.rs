@@ -51,8 +51,15 @@ impl MomoApiService {
         let mut routed = self.clone();
         routed.model_routes = request.momo.model_routes.clone();
         routed.validate_model_routes()?;
-        if let Some(selection) = &request.momo.embedding {
-            routed.resolve_embedding_selection(selection)?;
+        if let Some(selection) = &request.momo.embedding
+            && let Some(config) = routed.resolve_embedding_selection(selection)?
+        {
+            routed.embedding_parameters = Some(crate::EmbeddingRequestParameters {
+                normalization: Some(config.profile.normalization),
+                send_dimensions: Some(config.profile.send_dimensions),
+                query_prefix: Some(config.profile.query_prefix),
+                document_prefix: Some(config.profile.document_prefix),
+            });
         }
         // Validate configured foreground references before writing an operation or user turn.
         if let Some(connection) = self
@@ -62,25 +69,6 @@ impl MomoApiService {
         {
             return Err(MomoApiError::bad_request(
                 "embedding models cannot generate responses",
-            ));
-        }
-        if let Some(connection) = routed
-            .configured_connection(DEFAULT_VISION_ROUTE)
-            .map_err(MomoApiError::bad_request)?
-        {
-            let parameters = routed
-                .route_parameters(DEFAULT_VISION_ROUTE, personal_space_id)?
-                .unwrap_or_default();
-            routed.vision_adapter = Arc::new(crate::model_registry::ConfiguredVisionAdapter {
-                connection,
-                parameters,
-            });
-        } else if let Some(route) = routed.model_routes.get(DEFAULT_VISION_ROUTE) {
-            routed.vision_adapter = Arc::new(crate::GatewayVisionAdapter::new(
-                self.gateway_client.clone(),
-                self.gateway_origin.clone(),
-                self.gateway_api_key.clone(),
-                &route.model,
             ));
         }
         routed
@@ -101,7 +89,7 @@ impl MomoApiService {
     }
 
     async fn execute_active(
-        &self,
+        mut self,
         request: &MomoResponseRequest,
         request_id: &str,
         operation_key: &str,
@@ -144,6 +132,47 @@ impl MomoApiService {
                 return serde_json::from_str(response_json)
                     .map_err(|error| MomoApiError::internal(error.to_string()));
             }
+            if let Some(snapshot) = operation.resolved_input_json.as_deref() {
+                let captured: ResolvedResponseInput =
+                    serde_json::from_str(snapshot).map_err(MomoApiError::internal)?;
+                if !captured.purpose_parameters.is_empty() {
+                    self.purpose_parameters = captured.purpose_parameters;
+                }
+                if captured.embedding_parameters.is_some() {
+                    self.embedding_parameters = captured.embedding_parameters;
+                }
+            }
+        }
+        for alias in self.model_routes.keys().cloned().collect::<Vec<_>>() {
+            if let Some(parameters) = self.route_parameters(&alias, &personal_id.to_string())? {
+                self.purpose_parameters.insert(alias, parameters);
+            }
+        }
+        if let Some(connection) = self
+            .configured_connection(DEFAULT_VISION_ROUTE)
+            .map_err(MomoApiError::bad_request)?
+        {
+            self.vision_adapter = Arc::new(crate::model_registry::ConfiguredVisionAdapter {
+                connection,
+                parameters: self
+                    .route_parameters(DEFAULT_VISION_ROUTE, &personal_id.to_string())?
+                    .unwrap_or_else(|| {
+                        super::purpose_parameters::generation_defaults("vision", 8192, 1024)
+                    }),
+            });
+        } else if let Some(route) = self.model_routes.get(DEFAULT_VISION_ROUTE) {
+            self.vision_adapter = Arc::new(
+                crate::GatewayVisionAdapter::new(
+                    self.gateway_client.clone(),
+                    self.gateway_origin.clone(),
+                    self.gateway_api_key.clone(),
+                    &route.model,
+                )
+                .with_parameters(
+                    self.route_parameters(DEFAULT_VISION_ROUTE, &personal_id.to_string())?
+                        .unwrap_or_default(),
+                ),
+            );
         }
         let mut conversation_guard =
             if let Some(conversation_id) = request.momo.conversation_id.as_deref() {
@@ -243,7 +272,7 @@ impl MomoApiService {
             governed.audit["visual_description_prompt_revision"] = json!(prompt_space.revision);
             governed.visual_description_prompt = Some(prompt_space.content);
         }
-        let resolved_input = self
+        let mut resolved_input = self
             .resolve_response_input(
                 request,
                 operation_key,
@@ -252,6 +281,8 @@ impl MomoApiService {
                 capability.supports_images,
             )
             .await?;
+        resolved_input.purpose_parameters = self.purpose_parameters.clone();
+        resolved_input.embedding_parameters = self.embedding_parameters.clone();
         if resolved_input.image_handling == ImageInputHandling::DirectMultimodal {
             governed.visual_description_prompt = None;
             governed.audit["visual_description_prompt_source"] =
@@ -459,6 +490,8 @@ impl MomoApiService {
                 visual_input_count: 0,
                 vision_usage: ChatUsage::default(),
                 vision_upstream_request_ids: Vec::new(),
+                purpose_parameters: Default::default(),
+                embedding_parameters: None,
             });
         }
         if chat_supports_images {
@@ -479,6 +512,8 @@ impl MomoApiService {
                 visual_input_count: image_count,
                 vision_usage: ChatUsage::default(),
                 vision_upstream_request_ids: Vec::new(),
+                purpose_parameters: Default::default(),
+                embedding_parameters: None,
             });
         }
         let prompt = governed
@@ -511,6 +546,8 @@ impl MomoApiService {
             visual_input_count: batch.descriptions.len(),
             vision_usage: batch.usage,
             vision_upstream_request_ids: batch.upstream_request_ids,
+            purpose_parameters: Default::default(),
+            embedding_parameters: None,
         })
     }
 }
