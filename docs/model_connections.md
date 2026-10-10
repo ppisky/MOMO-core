@@ -12,6 +12,8 @@ The base URL includes the API version prefix. A custom path is appended to it. H
 
 ## Response routing
 
+2026-10-10 follow-up requirement: Core-owned recommended requests for background purposes, explicit overrides and reset semantics are documented in [purpose request configuration](model_purpose_request_configuration.md). This is a pending design, not an implemented defaults resource. Existing routing support below must not be presented as that completed capability.
+
 `model` may be an immutable configured reference. An unknown reference or embedding model fails before response admission writes user content. Old gateway aliases remain supported. Configured endpoints receive their actual provider model ID; internal `momo_*` gateway metadata is removed.
 
 An optional `momo.model_routes` map extends the response request. Allowed keys are `vision`, `memory_distillation`, and `semantic_graph_governance`. Each entry contains `model` and nullable `temperature`, `top_p`, `max_output_tokens`. The host resolves “follow conversation” to the originating request's model/parameters before sending it. It freezes that selection under the request ID; editing host groups changes new requests only. These fields participate in Core's request fingerprint. Empty maps are omitted from serialization, preserving existing request fingerprints.
