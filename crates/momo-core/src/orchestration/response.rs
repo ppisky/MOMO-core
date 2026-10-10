@@ -87,16 +87,65 @@ impl MomoApiService {
             .memory_sources
             .iter()
             .any(|source| source.semantic_graph);
-        let query_embedding = if include_semantic_graph {
-            match self.generate_query_embedding(input).await {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    warnings.push(format!("embedding degraded: {error}"));
-                    None
+        let configured_embedding = request
+            .momo
+            .embedding
+            .as_ref()
+            .map(|selection| self.resolve_embedding_selection(selection))
+            .transpose()?
+            .flatten();
+        let embedding_enabled = request
+            .momo
+            .embedding
+            .as_ref()
+            .is_none_or(|selection| selection.model.is_some());
+        let embedding_work = async {
+            if let Some(embedding) = &configured_embedding {
+                for source in request
+                    .momo
+                    .memory_sources
+                    .iter()
+                    .filter(|source| source.semantic_graph)
+                {
+                    if let Err(error) = runtime_api::rebuild_nsg_vector_index(
+                        self.runtime(),
+                        source.space_id.clone(),
+                        runtime_api::RebuildNsgIndexRequest {
+                            embedding: embedding.clone(),
+                            mode: runtime_api::NsgIndexMode::Incremental,
+                            batch_size: 64,
+                        },
+                    )
+                    .await
+                    {
+                        warnings.push(format!("embedding index degraded: {error}"));
+                    }
                 }
             }
-        } else {
-            None
+            if include_semantic_graph && embedding_enabled {
+                match self
+                    .generate_query_embedding(input, configured_embedding.as_ref())
+                    .await
+                {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        warnings.push(format!("embedding degraded: {error}"));
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
+        let cancelled = self
+            .runtime()
+            .register_cancellation(operation_key.to_owned());
+        self.coordination
+            .ensure_active(operation_key)
+            .map_err(|_| MomoApiError::cancelled())?;
+        let query_embedding = tokio::select! {
+            value = embedding_work => value,
+            () = cancelled.notified() => return Err(MomoApiError::cancelled()),
         };
         let retrieval_enabled = !request.momo.memory_sources.is_empty();
         let (retrieved, source_observations, retrieval_status) = if retrieval_enabled

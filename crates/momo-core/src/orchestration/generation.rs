@@ -78,7 +78,9 @@ impl MomoApiService {
                 .model_connection(&route.model)
                 .map_err(MomoApiError::bad_request)?
             {
-                if connection.model.kind == crate::ModelKind::Embedding {
+                if connection.model.kind == crate::ModelKind::Embedding
+                    || (alias == "vision" && connection.model.kind != crate::ModelKind::Vision)
+                {
                     return Err(MomoApiError::bad_request(
                         "model kind is incompatible with route",
                     ));
@@ -356,7 +358,28 @@ impl MomoApiService {
     pub(super) async fn generate_query_embedding(
         &self,
         input: &str,
+        configured: Option<&crate::api::runtime_api::EmbeddingRequestConfig>,
     ) -> Result<(String, Vec<f64>), String> {
+        if let Some(embedding) = configured {
+            let batch = crate::api::runtime_api::generate_embeddings(
+                crate::api::runtime_api::GenerateEmbeddingsRequest {
+                    embedding: embedding.clone(),
+                    inputs: vec![EmbeddingInput {
+                        id: "query".into(),
+                        text: input.into(),
+                        purpose: EmbeddingPurpose::Query,
+                    }],
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let vector = batch
+                .vectors
+                .into_iter()
+                .next()
+                .ok_or_else(|| "embedding provider returned no query vector".to_owned())?;
+            return Ok((batch.vector_space_id, vector.vector));
+        }
         let discovery = self.gateway_model_detail("embedding").await?;
         let metadata: GatewayEmbeddingProfile = serde_json::from_value(
             discovery
@@ -402,6 +425,61 @@ impl MomoApiService {
             .next()
             .ok_or_else(|| "embedding provider returned no query vector".to_owned())?;
         Ok((batch.vector_space_id, vector.vector))
+    }
+
+    pub(super) fn resolve_embedding_selection(
+        &self,
+        selection: &crate::response::ResponseEmbeddingSelection,
+    ) -> Result<Option<crate::api::runtime_api::EmbeddingRequestConfig>, MomoApiError> {
+        let Some(reference) = &selection.model else {
+            if selection.dimension.is_some() {
+                return Err(MomoApiError::bad_request(
+                    "disabled embedding cannot declare dimension",
+                ));
+            }
+            return Ok(None);
+        };
+        let connection = self
+            .model_connection(reference)
+            .map_err(MomoApiError::bad_request)?
+            .ok_or_else(|| {
+                MomoApiError::bad_request("embedding requires a configured reference")
+            })?;
+        if connection.model.kind != crate::ModelKind::Embedding {
+            return Err(MomoApiError::bad_request(
+                "embedding requires an embedding-kind model",
+            ));
+        }
+        if !matches!(
+            connection.provider.protocol,
+            crate::ProviderProtocol::Openai | crate::ProviderProtocol::OpenaiResponses
+        ) {
+            return Err(MomoApiError::bad_request(
+                "configured embedding requires an OpenAI-compatible provider",
+            ));
+        }
+        let profile = EmbeddingProfile {
+            provider_id: connection.provider.id.to_string(),
+            endpoint_id: connection.provider.id.to_string(),
+            model: connection.model.model_id,
+            dimension: selection
+                .dimension
+                .ok_or_else(|| MomoApiError::bad_request("embedding dimension is required"))?,
+            model_revision: None,
+            normalization: EmbeddingNormalization::L2,
+            send_dimensions: false,
+            query_prefix: String::new(),
+            document_prefix: String::new(),
+        };
+        profile.validate().map_err(MomoApiError::bad_request)?;
+        Ok(Some(crate::api::runtime_api::EmbeddingRequestConfig {
+            endpoint: EmbeddingEndpoint {
+                base_url: connection.provider.base_url,
+                api_key: connection.provider.api_key,
+            },
+            profile,
+            timeout_seconds: 120,
+        }))
     }
 }
 

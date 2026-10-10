@@ -1,5 +1,93 @@
 use super::*;
 
+#[derive(Debug)]
+struct EmbeddingFixtureResolver(crate::ModelConnection);
+impl crate::ModelConnectionResolver for EmbeddingFixtureResolver {
+    fn resolve(&self, reference: &str) -> Result<Option<crate::ModelConnection>, String> {
+        Ok((reference == "configured_fixture").then(|| self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn configured_embedding_validates_kind_dimension_and_keeps_compatibility_outside_credentials()
+{
+    let provider_id = uuid::Uuid::now_v7();
+    let connection: crate::ModelConnection = serde_json::from_value(json!({
+        "provider": { "id": provider_id, "name": "Fixture", "protocol": "openai", "base_url": "http://127.0.0.1:9/v1", "api_key": "private-one" },
+        "model": { "id": uuid::Uuid::now_v7(), "provider_id": provider_id, "model_id": "embed", "name": "Embed", "kind": "embedding" }
+    })).unwrap();
+    let service = MomoApiService::new(
+        test_runtime().await,
+        "http://127.0.0.1:1/v1",
+        None,
+        reqwest::Client::new(),
+    )
+    .with_model_connections(Arc::new(EmbeddingFixtureResolver(connection.clone())));
+    let mut selection = crate::ResponseEmbeddingSelection {
+        model: Some("configured_fixture".into()),
+        dimension: Some(3),
+    };
+    let config = service
+        .resolve_embedding_selection(&selection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.endpoint.api_key.as_deref(), Some("private-one"));
+    assert_eq!(config.profile.model, "embed");
+    let original = config.profile.vector_space_id().unwrap();
+    let mut changed = connection.clone();
+    changed.provider.api_key = Some("private-two".into());
+    let changed_service = service
+        .clone()
+        .with_model_connections(Arc::new(EmbeddingFixtureResolver(changed)));
+    assert_eq!(
+        changed_service
+            .resolve_embedding_selection(&selection)
+            .unwrap()
+            .unwrap()
+            .profile
+            .vector_space_id()
+            .unwrap(),
+        original
+    );
+    selection.dimension = Some(4);
+    assert_ne!(
+        service
+            .resolve_embedding_selection(&selection)
+            .unwrap()
+            .unwrap()
+            .profile
+            .vector_space_id()
+            .unwrap(),
+        original
+    );
+    for dimension in [None, Some(0), Some(8193)] {
+        selection.dimension = dimension;
+        assert!(service.resolve_embedding_selection(&selection).is_err());
+    }
+    selection.dimension = Some(3);
+    let mut wrong_kind = connection;
+    wrong_kind.model.kind = crate::ModelKind::Chat;
+    assert!(
+        service
+            .clone()
+            .with_model_connections(Arc::new(EmbeddingFixtureResolver(wrong_kind)))
+            .resolve_embedding_selection(&selection)
+            .is_err()
+    );
+    selection.model = Some("configured_missing".into());
+    assert!(service.resolve_embedding_selection(&selection).is_err());
+    selection.model = None;
+    selection.dimension = None;
+    assert!(
+        service
+            .resolve_embedding_selection(&selection)
+            .unwrap()
+            .is_none()
+    );
+    selection.dimension = Some(3);
+    assert!(service.resolve_embedding_selection(&selection).is_err());
+}
+
 #[tokio::test]
 async fn uuid_spelling_does_not_change_response_identity_or_cancellation() {
     let space = "abcdefab-1234-4567-89ab-abcdefabcdef";

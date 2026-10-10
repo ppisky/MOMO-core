@@ -627,6 +627,15 @@ pub struct RequestModelRoute {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct ResponseEmbeddingSelection {
+    /// None explicitly disables embeddings; omission of the selection preserves gateway routing.
+    pub model: Option<String>,
+    /// Declared output size for compatibility checks, not an upstream dimension override.
+    pub dimension: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MomoResponseExtension {
     pub schema: String,
     #[serde(default)]
@@ -651,6 +660,8 @@ pub struct MomoResponseExtension {
     pub stream: bool,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_routes: std::collections::BTreeMap<String, RequestModelRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<ResponseEmbeddingSelection>,
 }
 
 impl Default for MomoResponseExtension {
@@ -668,6 +679,7 @@ impl Default for MomoResponseExtension {
             mo_state: true,
             stream: false,
             model_routes: Default::default(),
+            embedding: None,
         }
     }
 }

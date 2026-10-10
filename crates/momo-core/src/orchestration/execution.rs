@@ -51,6 +51,9 @@ impl MomoApiService {
         let mut routed = self.clone();
         routed.model_routes = request.momo.model_routes.clone();
         routed.validate_model_routes()?;
+        if let Some(selection) = &request.momo.embedding {
+            routed.resolve_embedding_selection(selection)?;
+        }
         // Validate configured foreground references before writing an operation or user turn.
         if let Some(connection) = self
             .model_connection(&request.model)

@@ -29,7 +29,7 @@ not repeat the schema. Unknown request fields are rejected. The frozen examples
 under `contracts/1.0` are regression fixtures, while the Rust wire types remain
 the executable definition of every field and limit.
 
-The optional `momo.model_routes` extension and configured model references are
+The optional `momo.model_routes` and `momo.embedding` extensions and configured model references are
 defined in [local model connections](model_connections.md). Existing requests
 without the extension retain their serialization and gateway routing behavior.
 

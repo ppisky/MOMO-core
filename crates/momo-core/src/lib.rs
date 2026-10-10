@@ -111,9 +111,9 @@ pub use response::{
     MAX_RESPONSE_TOOL_ARGUMENT_BYTES, MAX_RESPONSE_TOOL_OUTPUT_BYTES,
     MAX_RESPONSE_TOOL_SCHEMA_BYTES, MAX_RESPONSE_TOOLS, MOMO_RESPONSE_SCHEMA, MomoResponse,
     MomoResponseExtension, MomoResponseMetadata, MomoResponseRequest, RequestModelRoute,
-    ResponseContentBlock, ResponseContractError, ResponseError, ResponseImageInput, ResponseInput,
-    ResponseInputItem, ResponseMessageContent, ResponseOutputContent, ResponseOutputItem,
-    ResponseTool, ResponseUsage,
+    ResponseContentBlock, ResponseContractError, ResponseEmbeddingSelection, ResponseError,
+    ResponseImageInput, ResponseInput, ResponseInputItem, ResponseMessageContent,
+    ResponseOutputContent, ResponseOutputItem, ResponseTool, ResponseUsage,
 };
 pub use runtime::{MomoRuntime, RuntimeSettingsResource, runtime_settings_description};
 pub use vision::{
