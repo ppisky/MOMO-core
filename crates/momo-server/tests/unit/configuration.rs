@@ -1,4 +1,126 @@
 use super::*;
+use momo_core::momo_domain;
+
+#[tokio::test]
+async fn conversation_archive_routes_are_scoped_idempotent_and_preserve_history() {
+    let (_directory, runtime, app) = isolated_app("http://127.0.0.1:9/v1").await;
+    let space = uuid::Uuid::now_v7();
+    let now = chrono::Utc::now();
+    // Missing archived_at remains compatible with existing serialized records.
+    let conversation: momo_domain::Conversation = serde_json::from_value(json!({
+        "id":uuid::Uuid::now_v7(),"space_id":space,"character_id":null,
+        "title":"Archived story","created_at":now,"updated_at":now,
+    }))
+    .unwrap();
+    runtime
+        .core()
+        .store()
+        .save_conversation(&conversation)
+        .await
+        .unwrap();
+    let message = momo_domain::Message {
+        id: uuid::Uuid::now_v7(),
+        conversation_id: conversation.id,
+        role: momo_domain::MessageRole::Assistant,
+        content: "Opening evidence".into(),
+        created_at: now,
+    };
+    runtime
+        .core()
+        .store()
+        .append_message(&message)
+        .await
+        .unwrap();
+    let path = format!("/v1/conversations/{}/archive", conversation.id);
+    let request = json!({"space_id":space,"archived":true});
+    let (status, _, archived) = send_json(&app, Method::POST, &path, request.clone(), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(archived["archived_at"].is_string());
+    assert_eq!(archived["updated_at"], json!(now));
+    assert_eq!(
+        send_json(&app, Method::POST, &path, request, None).await.2,
+        archived
+    );
+    let (status, _, _) = send_json(
+        &app,
+        Method::POST,
+        &path,
+        json!({"space_id":uuid::Uuid::now_v7(),"archived":false}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    for (suffix, expected) in [("", 1), ("&archived=true", 1), ("&archived=false", 0)] {
+        let (status, _, items) = send_json(
+            &app,
+            Method::GET,
+            &format!("/v1/conversations?space_id={space}{suffix}"),
+            json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(items.as_array().unwrap().len(), expected);
+    }
+    let mut stale = serde_json::to_value(&conversation).unwrap();
+    stale["title"] = json!("Renamed while archived");
+    let (status, _, renamed) = send_json(
+        &app,
+        Method::PUT,
+        &format!("/v1/conversations/{}", conversation.id),
+        stale,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed["archived_at"], archived["archived_at"]);
+    let (status, _, restored) = send_json(
+        &app,
+        Method::POST,
+        &path,
+        json!({"space_id":space,"archived":false}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(restored["id"], archived["id"]);
+    assert!(restored["archived_at"].is_null());
+    assert_eq!(restored["title"], renamed["title"]);
+    assert_eq!(
+        runtime
+            .core()
+            .store()
+            .list_messages(conversation.id)
+            .await
+            .unwrap(),
+        vec![message]
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"space_id":space,"archived":true,"title":"Injected"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        runtime
+            .core()
+            .store()
+            .conversation_for_scope(space, conversation.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none()
+    );
+}
 
 async fn isolated_app(origin: &str) -> (tempfile::TempDir, Arc<MomoRuntime>, Router) {
     let directory = tempfile::tempdir().unwrap();

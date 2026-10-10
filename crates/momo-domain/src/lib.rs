@@ -86,6 +86,8 @@ pub struct Conversation {
     pub scope_id: Uuid,
     pub character_id: Option<Uuid>,
     pub title: String,
+    #[serde(default)]
+    pub archived_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

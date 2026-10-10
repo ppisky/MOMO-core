@@ -1467,6 +1467,9 @@ async fn import_conversations(
         }
         if existing_conversations.contains(&conversation.id) {
             core.store().stage_conversation_update(conversation).await?;
+            core.store()
+                .restore_conversation_archive(scope_id, conversation.id, conversation.archived_at)
+                .await?;
         } else {
             core.store().stage_conversation(conversation).await?;
         }

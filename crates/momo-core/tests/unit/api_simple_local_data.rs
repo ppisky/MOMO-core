@@ -47,6 +47,7 @@ async fn conversation_update_cannot_replace_the_bound_character() {
         scope_id,
         character_id: None,
         title: "Before".to_owned(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -54,6 +55,12 @@ async fn conversation_update_cannot_replace_the_bound_character() {
         .save_conversation(&conversation)
         .await
         .expect("save conversation");
+    let archived = core
+        .store()
+        .set_conversation_archived(scope_id, conversation.id, true)
+        .await
+        .unwrap()
+        .unwrap();
     let submitted = momo_domain::Conversation {
         character_id: Some(momo_domain::new_id()),
         title: "After".to_owned(),
@@ -67,6 +74,7 @@ async fn conversation_update_cannot_replace_the_bound_character() {
     assert_eq!(updated.character_id, None);
     assert_eq!(updated.created_at, conversation.created_at);
     assert_eq!(updated.title, "After");
+    assert_eq!(updated.archived_at, archived.archived_at);
     let stored = core
         .store()
         .conversation_for_scope(scope_id, conversation.id)

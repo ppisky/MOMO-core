@@ -24,6 +24,7 @@ async fn seed(core: &MomoCore, space: Uuid) -> (CharacterCard, Conversation, Mes
         scope_id: space,
         character_id: Some(character.id),
         title: "Story".into(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -111,6 +112,12 @@ async fn moves_owned_assets_preserving_ids_scope_provenance_and_replays_receipt(
     let source = Uuid::now_v7();
     let target = Uuid::now_v7();
     let (character, conversation, message) = seed(&core, source).await;
+    let archived = core
+        .store
+        .set_conversation_archived(source, conversation.id, true)
+        .await
+        .unwrap()
+        .unwrap();
     add_memory(&core, source, character.id, conversation.id);
     core.store.stage_message_delete(message.id).await.unwrap();
     let before = core.space_assets(source).await.unwrap();
@@ -153,6 +160,15 @@ async fn moves_owned_assets_preserving_ids_scope_provenance_and_replays_receipt(
         target
     );
     let memory = core.memory_for_space(target).unwrap();
+    assert_eq!(
+        core.store
+            .conversation_for_scope(target, conversation.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .archived_at,
+        archived.archived_at
+    );
     let document = memory.read_document_by_id("promise").unwrap();
     assert_eq!(
         document.metadata.injection_conversation_id,

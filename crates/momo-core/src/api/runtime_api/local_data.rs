@@ -242,6 +242,40 @@ pub async fn local_conversations(
     Ok(conversations)
 }
 
+pub async fn local_conversations_by_archive(
+    runtime: &MomoRuntime,
+    scope_id: String,
+    archived: bool,
+) -> Result<Vec<momo_domain::Conversation>, RuntimeApiError> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id)
+        .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
+    runtime
+        .core()
+        .store()
+        .list_conversations_for_scope_by_archive(scope_id, archived)
+        .await
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))
+}
+
+pub async fn set_conversation_archived(
+    runtime: &MomoRuntime,
+    scope_id: String,
+    conversation_id: String,
+    archived: bool,
+) -> Result<momo_domain::Conversation, RuntimeApiError> {
+    let scope_id = uuid::Uuid::parse_str(&scope_id)
+        .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
+    let conversation_id = uuid::Uuid::parse_str(&conversation_id)
+        .map_err(|error| RuntimeApiError::invalid(error.to_string()))?;
+    runtime
+        .core()
+        .store()
+        .set_conversation_archived(scope_id, conversation_id, archived)
+        .await
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?
+        .ok_or_else(|| RuntimeApiError::not_found("conversation does not belong to scope"))
+}
+
 pub async fn stage_message(
     runtime: &MomoRuntime,
     scope_id: String,
@@ -471,6 +505,7 @@ pub async fn stage_conversation(
         scope_id,
         character_id: Some(character_id),
         title,
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -531,7 +566,11 @@ async fn stage_conversation_update_for_core(
         .stage_conversation_update(&conversation)
         .await
         .map_err(|error| RuntimeApiError::internal(error.to_string()))?;
-    Ok(conversation)
+    core.store()
+        .conversation_for_scope(scope_id, conversation.id)
+        .await
+        .map_err(|error| RuntimeApiError::internal(error.to_string()))?
+        .ok_or_else(|| RuntimeApiError::not_found("conversation does not belong to scope"))
 }
 
 pub async fn stage_conversation_delete(

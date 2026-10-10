@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             scope_id,
             character_id: Some(character_id),
             title: "Dual-Mem 明确关系测试".to_owned(),
+            archived_at: None,
             created_at,
             updated_at: created_at,
         })

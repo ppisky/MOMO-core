@@ -1,6 +1,193 @@
 use super::*;
 
 #[tokio::test]
+async fn conversation_archive_preserves_history_and_survives_stale_writers_and_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("archive.sqlite3");
+    let store = LocalStore::open(&path).await.unwrap();
+    let now = Utc::now();
+    let original = Conversation {
+        id: new_id(),
+        scope_id: new_id(),
+        character_id: None,
+        title: "Story".into(),
+        archived_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    store.save_conversation(&original).await.unwrap();
+    let message = Message {
+        id: new_id(),
+        conversation_id: original.id,
+        role: MessageRole::User,
+        content: "Keep this evidence".into(),
+        created_at: now,
+    };
+    store.append_message(&message).await.unwrap();
+    let archived = store
+        .set_conversation_archived(original.scope_id, original.id, true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(archived.archived_at.is_some());
+    assert_eq!(archived.updated_at, original.updated_at);
+    assert_eq!(archived.character_id, original.character_id);
+    assert_eq!(
+        store
+            .set_conversation_archived(original.scope_id, original.id, true)
+            .await
+            .unwrap(),
+        Some(archived.clone())
+    );
+    assert!(
+        store
+            .set_conversation_archived(new_id(), original.id, false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .list_conversations_for_scope_by_archive(original.scope_id, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .list_conversations_for_scope_by_archive(original.scope_id, true)
+            .await
+            .unwrap(),
+        vec![archived.clone()]
+    );
+    assert_eq!(
+        store
+            .list_conversations_for_scope(original.scope_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let stale = Conversation {
+        title: "Renamed".into(),
+        archived_at: Some(now + chrono::Duration::days(1)),
+        ..original.clone()
+    };
+    store.stage_conversation_update(&stale).await.unwrap();
+    store
+        .save_conversation(&Conversation {
+            archived_at: None,
+            ..stale
+        })
+        .await
+        .unwrap();
+    let reply = Message {
+        id: new_id(),
+        role: MessageRole::Assistant,
+        content: "Completed reply".into(),
+        created_at: now + chrono::Duration::seconds(1),
+        ..message.clone()
+    };
+    store.append_message(&reply).await.unwrap();
+    let saved = store
+        .conversation_for_scope(original.scope_id, original.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.archived_at, archived.archived_at);
+    assert_eq!(saved.title, "Renamed");
+    assert_eq!(saved.updated_at, reply.created_at);
+    let messages = store.list_messages(original.id).await.unwrap();
+    assert_eq!(messages, vec![message, reply]);
+    store.pool().close().await;
+    let reopened = LocalStore::open(&path).await.unwrap();
+    assert_eq!(
+        reopened
+            .conversation_for_scope(original.scope_id, original.id)
+            .await
+            .unwrap(),
+        Some(saved.clone())
+    );
+    let restored = reopened
+        .set_conversation_archived(original.scope_id, original.id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(restored.archived_at.is_none());
+    assert_eq!(restored.updated_at, saved.updated_at);
+    assert_eq!(
+        reopened
+            .set_conversation_archived(original.scope_id, original.id, false)
+            .await
+            .unwrap(),
+        Some(restored)
+    );
+    assert_eq!(reopened.list_messages(original.id).await.unwrap(), messages);
+    let deleted_snapshot = reopened
+        .set_conversation_archived(original.scope_id, original.id, true)
+        .await
+        .unwrap()
+        .unwrap();
+    reopened
+        .stage_conversation_delete(original.id)
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .restore_recently_deleted("conversation", original.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        reopened
+            .conversation_for_scope(original.scope_id, original.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .archived_at,
+        deleted_snapshot.archived_at
+    );
+    assert_eq!(reopened.list_messages(original.id).await.unwrap(), messages);
+    reopened
+        .set_conversation_archived(original.scope_id, original.id, false)
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .list_conversations_for_scope_by_archive(original.scope_id, true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn conversation_archive_migration_keeps_preexisting_records_active() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::raw_sql("CREATE TABLE conversations (id TEXT PRIMARY KEY, scope_id TEXT, character_id TEXT, title TEXT, created_at TEXT, updated_at TEXT); INSERT INTO conversations VALUES ('existing','scope',NULL,'Keep me','2026-10-10T00:00:00Z','2026-10-10T00:00:00Z');").execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/0030_conversation_archive.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let row = sqlx::query("SELECT * FROM conversations WHERE id='existing'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.try_get::<String, _>("title").unwrap(), "Keep me");
+    assert_eq!(
+        row.try_get::<Option<String>, _>("archived_at").unwrap(),
+        None
+    );
+    assert_eq!(
+        row.try_get::<String, _>("updated_at").unwrap(),
+        "2026-10-10T00:00:00Z"
+    );
+}
+
+#[tokio::test]
 async fn history_window_loads_recent_complete_turns_and_pending_user_only() {
     let store = LocalStore::in_memory().await.expect("store");
     let now = Utc::now();
@@ -9,6 +196,7 @@ async fn history_window_loads_recent_complete_turns_and_pending_user_only() {
         scope_id: new_id(),
         character_id: None,
         title: "Long session".into(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -78,6 +266,7 @@ async fn history_window_evicts_assistant_continuations_with_their_user_turn() {
         scope_id: new_id(),
         character_id: None,
         title: "Tool continuations".into(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -132,6 +321,7 @@ async fn message_context_survives_delete_restore_and_invalid_replace_rolls_back(
         scope_id: new_id(),
         character_id: None,
         title: "Evidence".into(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -850,6 +1040,7 @@ async fn response_user_message_and_phase_marker_commit_atomically() {
             scope_id,
             character_id: None,
             title: "idempotency".to_owned(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -916,6 +1107,7 @@ async fn response_completion_commits_assistant_maintenance_and_replay_once() {
             scope_id,
             character_id: None,
             title: "atomic completion".to_owned(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -1077,6 +1269,7 @@ async fn response_evidence_uses_typed_capture_and_rolls_back_identity_mismatch()
             scope_id: space,
             character_id: None,
             title: "typed evidence".into(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -1452,6 +1645,7 @@ async fn persists_conversation_messages() {
         scope_id: new_id(),
         character_id: None,
         title: "测试会话".to_owned(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -1503,6 +1697,7 @@ async fn message_edits_deletes_and_restores_are_local_only() {
         scope_id: new_id(),
         character_id: None,
         title: "Editable messages".to_owned(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -1595,6 +1790,7 @@ async fn messages_are_immutable_idempotent_and_scope_isolated() {
         scope_id,
         character_id: None,
         title: "Immutable messages".to_owned(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -1678,6 +1874,7 @@ async fn conversation_updates_cannot_replace_the_bound_character() {
         scope_id,
         character_id: Some(original_character_id),
         title: "Original".to_owned(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -1730,6 +1927,7 @@ async fn stages_character_and_conversation_as_local_operations() {
         scope_id,
         character_id: Some(card.id),
         title: "Offline conversation".to_owned(),
+        archived_at: None,
         created_at: now,
         updated_at: now,
     };

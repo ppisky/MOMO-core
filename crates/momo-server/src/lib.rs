@@ -123,6 +123,7 @@ fn api_routes() -> Router<AppState> {
             put(update_conversation).delete(delete_conversation),
         )
         .route("/conversations/:id/messages", get(list_messages))
+        .route("/conversations/:id/archive", post(archive_conversation))
         .route("/messages", post(create_message))
         .route("/messages/:id", put(update_message).delete(delete_message))
         .route("/momo/responses", post(create_response))

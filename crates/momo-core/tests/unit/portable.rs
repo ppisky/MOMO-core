@@ -7,6 +7,12 @@ async fn conversation_evidence_round_trips_and_rebinds_scope() {
     let source = MomoCore::initialize(directory.path()).await.unwrap();
     let scope = new_id();
     let (_, conversation_id) = seed_character_conversation(&source, scope).await;
+    let archived = source
+        .store()
+        .set_conversation_archived(scope, conversation_id, true)
+        .await
+        .unwrap()
+        .unwrap();
     let contexts = [
         (
             MessageRole::User,
@@ -73,6 +79,38 @@ async fn conversation_evidence_round_trips_and_rebinds_scope() {
         .message_contexts_for_scope(target_scope, &ids)
         .await
         .unwrap();
+    assert_eq!(
+        target
+            .store()
+            .conversation_for_scope(target_scope, conversation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .archived_at,
+        archived.archived_at
+    );
+    target
+        .store()
+        .set_conversation_archived(target_scope, conversation_id, false)
+        .await
+        .unwrap();
+    import_moc(
+        &target,
+        &path,
+        &test_import_plan(scope, target_scope, ConflictMode::Replace),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        target
+            .store()
+            .conversation_for_scope(target_scope, conversation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .archived_at,
+        archived.archived_at
+    );
     assert_eq!(restored.len(), 2);
     for (id, (_, payload)) in ids.iter().zip(&contexts) {
         assert_eq!(
@@ -172,6 +210,7 @@ async fn seed_character_conversation(core: &MomoCore, scope_id: Uuid) -> (Uuid, 
             scope_id,
             character_id: Some(character_id),
             title: "Portable conversation".to_owned(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -223,6 +262,7 @@ async fn round_trips_selected_moc_modules_and_rebinds_scope() {
             scope_id: original_scope,
             character_id: Some(character_id),
             title: "Portable".to_owned(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -614,6 +654,7 @@ name = "Tester"
             scope_id: space_id,
             character_id: Some(character_id),
             title: "Preflight".to_owned(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         }])
@@ -774,6 +815,7 @@ async fn preflight_rejects_cross_space_conversation_conflicts_before_importing_c
             scope_id: existing_space,
             character_id: None,
             title: "Existing elsewhere".to_owned(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -923,6 +965,7 @@ async fn preflight_rejects_message_ids_owned_by_another_conversation() {
             scope_id: existing_space,
             character_id: None,
             title: "Existing conversation".to_owned(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -994,6 +1037,7 @@ async fn imports_conversation_only_moc_without_missing_character_foreign_key() {
             scope_id,
             character_id: Some(character_id),
             title: "Conversation without exported card".to_owned(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })

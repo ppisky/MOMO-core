@@ -37,6 +37,7 @@ sources remain where needed to explain actual compatibility.
 | MOC | [`MOMO_Container_v3.md`](../MOMO_Container_v3.md) | Implemented v3 |
 | Runtime settings and Space overrides | [`runtime_config_0_1.md`](runtime_config_0_1.md) | Persisted local administration API with PATCH and revision/CAS |
 | Space asset inventory and removal | [`space_lifecycle.zh-CN.md`](space_lifecycle.zh-CN.md) | Local administration profile with durable migration/deletion and replay |
+| Conversation archive | [`conversation_archive.zh-CN.md`](conversation_archive.zh-CN.md) | Persisted local administration profile with scoped lists and idempotent archive/restore |
 | Configuration and control inventory | [`configuration_controls.zh-CN.md`](configuration_controls.zh-CN.md) | Complete current route/method inventory and configuration boundaries |
 | Prompt Spaces | [`maintenance_prompts.en.md`](maintenance_prompts.en.md) | Implemented local administration API |
 | LSB carrier | [`momo_lsb_carrier_v1.md`](momo_lsb_carrier_v1.md) | Implemented carrier v1 |

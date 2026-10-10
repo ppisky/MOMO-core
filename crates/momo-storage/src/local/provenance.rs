@@ -268,6 +268,7 @@ mod tests {
                 scope_id: space,
                 character_id: None,
                 title: "history".into(),
+                archived_at: None,
                 created_at: now,
                 updated_at: now,
             })

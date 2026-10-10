@@ -18,6 +18,20 @@ pub(crate) struct CreateConversationRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ConversationsRequest {
+    pub(crate) space_id: String,
+    pub(crate) archived: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ArchiveConversationRequest {
+    pub(crate) space_id: String,
+    pub(crate) archived: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateMessageRequest {
     pub(crate) space_id: String,
     pub(crate) conversation_id: String,

@@ -2,12 +2,29 @@ use super::super::*;
 
 pub(crate) async fn list_conversations(
     State(state): State<AppState>,
-    Query(query): Query<SpaceRequest>,
+    Query(query): Query<ConversationsRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    json_result(
-        runtime_api::local_conversations(
+    let scope_id = validate_space_id(query.space_id)?;
+    json_result(match query.archived {
+        Some(archived) => {
+            runtime_api::local_conversations_by_archive(state.runtime.as_ref(), scope_id, archived)
+                .await
+        }
+        None => runtime_api::local_conversations(state.runtime.as_ref(), scope_id).await,
+    })
+}
+
+pub(crate) async fn archive_conversation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ArchiveConversationRequest>,
+) -> Result<Json<Value>, ApiError> {
+    scoped_json_result(
+        runtime_api::set_conversation_archived(
             state.runtime.as_ref(),
-            validate_space_id(query.space_id)?,
+            validate_space_id(request.space_id)?,
+            id,
+            request.archived,
         )
         .await,
     )

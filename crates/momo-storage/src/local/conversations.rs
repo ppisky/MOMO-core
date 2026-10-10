@@ -7,8 +7,8 @@ impl LocalStore {
         }
         sqlx::query(
             r#"INSERT INTO conversations
-            (id, scope_id, character_id, title, created_at, updated_at)
-            VALUES (?,?,?,?,?,?)
+            (id, scope_id, character_id, title, created_at, updated_at, archived_at)
+            VALUES (?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET scope_id=excluded.scope_id,
               character_id=excluded.character_id, title=excluded.title,
               updated_at=excluded.updated_at"#,
@@ -19,6 +19,7 @@ impl LocalStore {
         .bind(&conversation.title)
         .bind(conversation.created_at.to_rfc3339())
         .bind(conversation.updated_at.to_rfc3339())
+        .bind(conversation.archived_at.map(|value| value.to_rfc3339()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -35,10 +36,11 @@ impl LocalStore {
             return Ok(());
         }
         let mut transaction = self.pool.begin().await?;
-        let inserted = sqlx::query("INSERT OR IGNORE INTO conversations (id,scope_id,character_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+        let inserted = sqlx::query("INSERT OR IGNORE INTO conversations (id,scope_id,character_id,title,created_at,updated_at,archived_at) VALUES (?,?,?,?,?,?,?)")
             .bind(conversation.id.to_string()).bind(conversation.scope_id.to_string())
             .bind(conversation.character_id.map(|id| id.to_string())).bind(&conversation.title)
             .bind(conversation.created_at.to_rfc3339()).bind(conversation.updated_at.to_rfc3339())
+            .bind(conversation.archived_at.map(|value| value.to_rfc3339()))
             .execute(&mut *transaction).await?.rows_affected() == 1;
         if inserted && let Some(content) = opening.filter(|value| !value.trim().is_empty()) {
             insert_message_immutable(
@@ -88,6 +90,65 @@ impl LocalStore {
             .fetch_optional(&self.pool)
             .await?;
         row.as_ref().map(conversation_from_row).transpose()
+    }
+
+    /// Change visibility without writing a stale title, character or activity time.
+    /// Repeated archive requests retain the original timestamp.
+    pub async fn set_conversation_archived(
+        &self,
+        scope_id: Uuid,
+        conversation_id: Uuid,
+        archived: bool,
+    ) -> Result<Option<Conversation>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE conversations SET archived_at=CASE WHEN ? THEN COALESCE(archived_at,?) ELSE NULL END WHERE id=? AND scope_id=?",
+        )
+        .bind(archived)
+        .bind(Utc::now().to_rfc3339())
+        .bind(conversation_id.to_string())
+        .bind(scope_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        let row = sqlx::query("SELECT * FROM conversations WHERE id=? AND scope_id=?")
+            .bind(conversation_id.to_string())
+            .bind(scope_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let result = row.as_ref().map(conversation_from_row).transpose()?;
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn list_conversations_for_scope_by_archive(
+        &self,
+        scope_id: Uuid,
+        archived: bool,
+    ) -> Result<Vec<Conversation>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM conversations WHERE scope_id=? AND (archived_at IS NOT NULL)=? ORDER BY updated_at DESC, id",
+        )
+        .bind(scope_id.to_string())
+        .bind(archived)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(conversation_from_row).collect()
+    }
+
+    /// Portable restore supplies the stored timestamp instead of generating a new one.
+    pub async fn restore_conversation_archive(
+        &self,
+        scope_id: Uuid,
+        conversation_id: Uuid,
+        archived_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE conversations SET archived_at=? WHERE id=? AND scope_id=?")
+            .bind(archived_at.map(|value| value.to_rfc3339()))
+            .bind(conversation_id.to_string())
+            .bind(scope_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn stage_conversation(

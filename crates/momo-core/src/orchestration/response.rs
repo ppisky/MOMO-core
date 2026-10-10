@@ -991,6 +991,7 @@ impl MomoApiService {
                     .title
                     .clone()
                     .unwrap_or_else(|| "MOMO response".to_owned()),
+                archived_at: None,
                 created_at: now,
                 updated_at: now,
             };

@@ -93,11 +93,12 @@ impl LocalStore {
                 let conversation = snapshot.conversation;
                 sqlx::query(
                     r#"INSERT INTO conversations
-                    (id, scope_id, character_id, title, created_at, updated_at)
-                    VALUES (?,?,?,?,?,?)
+                    (id, scope_id, character_id, title, created_at, updated_at, archived_at)
+                    VALUES (?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET scope_id=excluded.scope_id,
                       character_id=excluded.character_id, title=excluded.title,
-                      created_at=excluded.created_at, updated_at=excluded.updated_at"#,
+                      created_at=excluded.created_at, updated_at=excluded.updated_at,
+                      archived_at=excluded.archived_at"#,
                 )
                 .bind(conversation.id.to_string())
                 .bind(conversation.scope_id.to_string())
@@ -105,6 +106,7 @@ impl LocalStore {
                 .bind(&conversation.title)
                 .bind(conversation.created_at.to_rfc3339())
                 .bind(conversation.updated_at.to_rfc3339())
+                .bind(conversation.archived_at.map(|value| value.to_rfc3339()))
                 .execute(&mut *transaction)
                 .await?;
                 for message in snapshot.messages {

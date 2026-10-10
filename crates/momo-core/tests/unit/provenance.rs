@@ -334,6 +334,7 @@ async fn staged_native_maintenance_commits_evidence_and_retrieves_only_for_captu
             scope_id: space,
             character_id: None,
             title: "evidence".into(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })

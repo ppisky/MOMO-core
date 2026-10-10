@@ -54,6 +54,12 @@ machine-readable `code`; callers must not parse human-readable messages.
 
 ## Local administration profile
 
+Conversation visibility is persisted by Core. `GET /v1/conversations?space_id=<UUID>`
+continues to list all conversations; optional `archived=true|false` filters the list.
+`POST /v1/conversations/<UUID>/archive` accepts only `space_id` and boolean `archived`,
+returns the complete conversation, and changes no messages or memory. See
+[conversation archive](conversation_archive.zh-CN.md) for restore and ownership semantics.
+
 `POST /v1/momo/model-requests/resolve` is a local configuration resolver, not a new stable response wire. It accepts `personal_space_id` (UUID), optional `model_routes` and optional `embedding`, using the same route/selection shapes as response creation. All supplied models must be immutable configured references. It returns `{ "version": 1, "purposes": { "<purpose>": { "defaults": {}, "effective": {}, "overrides": {}, "constraints": {}, "ignored": [] } } }`; purpose keys are `vision`, `memory_distillation`, `semantic_graph_governance` and `embedding`. Only supplied selections appear. Invalid types, parameters, budgets or rejected overrides fail; ignored overrides are reported separately. It makes no model request, writes no configuration or assets, and exposes no credentials. Hosts must authorize the Space and adapt this route through their own same-origin boundary. See [purpose request configuration](model_purpose_request_configuration.md).
 
 All other `/v1` routes are supported local administration APIs, not independent

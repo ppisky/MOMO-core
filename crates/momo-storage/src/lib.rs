@@ -485,11 +485,13 @@ fn character_from_row(row: &SqliteRow) -> Result<CharacterCard, StorageError> {
 
 fn conversation_from_row(row: &SqliteRow) -> Result<Conversation, StorageError> {
     let character_id: Option<String> = row.try_get("character_id")?;
+    let archived_at: Option<&str> = row.try_get("archived_at")?;
     Ok(Conversation {
         id: Uuid::parse_str(row.try_get("id")?)?,
         scope_id: Uuid::parse_str(row.try_get("scope_id")?)?,
         character_id: character_id.map(|id| Uuid::parse_str(&id)).transpose()?,
         title: row.try_get("title")?,
+        archived_at: archived_at.map(parse_timestamp).transpose()?,
         created_at: parse_timestamp(row.try_get("created_at")?)?,
         updated_at: parse_timestamp(row.try_get("updated_at")?)?,
     })
