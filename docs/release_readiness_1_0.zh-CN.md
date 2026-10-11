@@ -1,6 +1,6 @@
 # 1.0.0-rc.6 发布候选（2026-10-11）
 
-下一次发布前须补齐[发布版本嵌入与 health 查询](release_version_metadata.md)，目前待实现。RC6 仅报告内部包版本，不能从 health 响应识别预发布渠道。
+当前源码已实现[编译时 Git 信息与 health 查询](release_version_metadata.md)；下一次发布须验证实际二进制的提交信息。已发布 RC6 仅报告内部包版本，不能从其 health 响应识别预发布渠道。
 
 RC6 汇总 RC5 后的产品接入能力，Core 和界面宿主保持独立。开发与 CI 固定 Rust 1.99.0；双圆图标及简化版单独以 CC BY-SA 4.0 发布。发布须通过完整本机检查以及精确提交的 Linux、Windows、安全 CI；详见 [RC6 说明](release_notes_1_0_0_rc6.md)。下面保留此前稳定版门槛及历史证据，旧检查不代替 RC6 验收。
 

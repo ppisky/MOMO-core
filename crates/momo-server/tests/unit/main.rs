@@ -602,6 +602,12 @@ async fn http_core_contract_and_character_round_trip() {
     .expect("health JSON");
     assert_eq!(health["ok"], true);
     assert_eq!(health["service"], "momo-server");
+    assert_eq!(
+        health["build_info"],
+        serde_json::to_value(runtime_api::build_info()).unwrap()
+    );
+    assert_eq!(health["response_schema"], momo_core::MOMO_RESPONSE_SCHEMA);
+    assert_eq!(health["control_schema"], momo_core::MOMO_CONTROL_SCHEMA);
 
     let response = app
         .clone()

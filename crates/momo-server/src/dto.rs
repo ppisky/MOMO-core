@@ -5,6 +5,9 @@ pub(crate) struct HealthResponse {
     pub(crate) ok: bool,
     pub(crate) service: &'static str,
     pub(crate) core_version: String,
+    pub(crate) build_info: runtime_api::BuildInfo,
+    pub(crate) response_schema: &'static str,
+    pub(crate) control_schema: &'static str,
     pub(crate) data_dir: String,
 }
 

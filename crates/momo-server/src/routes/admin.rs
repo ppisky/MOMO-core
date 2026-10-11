@@ -179,6 +179,9 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<HealthResponse
         ok: true,
         service: "momo-server",
         core_version: runtime_api::core_version(),
+        build_info: runtime_api::build_info(),
+        response_schema: momo_core::MOMO_RESPONSE_SCHEMA,
+        control_schema: momo_core::MOMO_CONTROL_SCHEMA,
         data_dir: state.runtime.data_dir().to_string_lossy().into_owned(),
     })
 }

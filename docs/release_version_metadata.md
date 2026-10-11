@@ -1,25 +1,23 @@
-# 发布版本信息 / Release version metadata
+# 编译版本信息 / Build identity
 
-状态：下一次发布前待实现。本文是发布要求，不表示当前二进制或 HTTP 接口已提供这些信息。
+Core 在编译时读取当前仓库的完整 Git 提交 SHA、该提交上的精确标签和已跟踪文件的修改状态，并嵌入二进制。请求期间不读取 Git，不查询远端最新版本。
 
-## 当前行为
+`GET /health` 返回：
 
-`runtime_api::core_version()` 使用编译时 `CARGO_PKG_VERSION`，`GET /health` 将其作为 `core_version` 返回。RC6 的 workspace 包版本是 `1.0.0`，只有 Git 发布标签带有 `-rc.6`。仅访问当前接口的客户端无法区分正式版与预发布版本。
+- `build_info.git_revision`：实际编译提交的完整 SHA。
+- `build_info.git_tag`：当前提交的精确标签；无标签为 null，不使用附近标签冒充版本。
+- `build_info.dirty`：构建时已跟踪文件是否有未提交修改。
+- `response_schema`、`control_schema`：独立的请求接口标准，与构建提交无关。
+- `core_version`：保留的内部 Cargo 包兼容值，不作为实际发布版本展示。
 
-## 下一次发布要求
+只有源码没有 `.git` 元数据时，三个 build_info 字段全部为 null。存在 Git 元数据但 Git 工具不可用、仓库不可读或没有提交时，构建明确失败，不伪报“未提供”。支持普通仓库及 linked worktree。Cargo 监听 Git 引用和已跟踪文件，提交变化、打标签和源文件变化都会重新写入构建身份；运行已经生成的二进制不会随仓库变化。
 
-- 编译产物嵌入完整发布版本，保留 SemVer 预发布部分；候选版不能只报告稳定包版本。
-- 版本信息与发布标签由同一份发布元数据校验，标签和实际嵌入值不一致时阻止发布。若内部包版本继续独立维护，必须与产品发布版本明确区分。
-- `/health` 提供实际编译产物的完整发布版本及可判定的发布渠道；可用时携带源码 revision。具体新增字段在实现时同步 HTTP 文档及客户端校验，保持现有字段兼容。
-- 从源码压缩包构建时也能取得发布版本，不依赖运行时读取 `.git` 或访问 GitHub。无法确认的 revision 或发布渠道明确为未知，不能伪装成正式版。
-- 普通开发构建应与官方发布产物可区分；不能把附近标签或当前最新 Release 当成该二进制版本。
-- 网页从服务响应显示完整版本和发布渠道；旧服务缺少发布信息时保留其报告值，并承认渠道未知，不用网页自身版本代替。
-- 发布验收覆盖候选版、正式版、开发构建和无 Git 元数据的源码包；检查真实二进制的 health 响应与发布元数据一致。
+网页显示实际提交、精确标签和修改状态，并单独展示请求接口标准。旧服务没有 build_info 时提示升级；明确的无 Git 构建才显示“未提供”。已发布 RC6 不追溯修改，必须重新编译并运行新二进制才能查询这些字段。
 
-现有 RC6 标签和已发布二进制保持不变；新增信息需要构建并运行具备该能力的新版本。
+验证：`python scripts/test-build-metadata.py` 覆盖提交与标签、未提交修改、仅提交变化的增量构建、无 Git 源码及 linked worktree。服务 HTTP 测试检查实际 health 序列化；发布还需比对实际二进制响应与目标 Git 提交。
 
 ## English
 
-**Planned for the next release; not implemented yet.** The current health endpoint reports the Cargo package version. RC6 packages use `1.0.0`, while the prerelease suffix exists only in the release tag, so a client cannot identify the release channel from this response.
+Core embeds the full Git commit, an exact tag (if present), and tracked modification status at compile time. Health responses expose these as `build_info.git_revision`, `git_tag`, and `dirty`. Requests never inspect the runtime checkout. Missing Git metadata produces null fields; a broken checkout or unavailable Git executable fails the build instead of pretending metadata is absent.
 
-Future builds must embed the full product version, including prerelease identifiers, and expose that information through health responses. Release metadata and tags must agree. Source archives must work without Git metadata or network access; unknown revisions and channels must remain unknown. Development builds must be distinguishable from official releases. Existing clients and health fields remain compatible, and acceptance checks must verify actual binaries rather than infer their versions from repository tags.
+Request schemas are exposed separately as `response_schema` and `control_schema`. The legacy `core_version` remains an internal package compatibility value, not the product build identity. Cargo tracks refs and source changes, including linked worktrees. Existing RC6 binaries do not acquire these fields without rebuilding and restarting.

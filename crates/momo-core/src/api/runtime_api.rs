@@ -1,4 +1,5 @@
 mod assets;
+mod build_info;
 mod capabilities;
 mod character_compat;
 mod chat;
@@ -14,6 +15,7 @@ mod provenance;
 mod state_runtime;
 
 pub use assets::*;
+pub use build_info::*;
 pub use capabilities::*;
 pub use character_compat::*;
 pub use chat::*;

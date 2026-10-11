@@ -12,6 +12,15 @@ promise and which parts are local administration facilities.
 allow a host to enforce its supported Core version range; it is not a product
 data or orchestration endpoint.
 
+`core_version` is retained as the internal Cargo package compatibility value, not
+an exact release identity or a wire schema version. `build_info` identifies the
+compiled Core with `git_revision` (full SHA), `git_tag` (an exact tag, or null),
+and `dirty` (tracked modifications at build time). All three are null only when
+the source was built without its Git metadata. An older server may omit this
+object. These values are embedded during compilation; requests do not access Git.
+`response_schema` and `control_schema` separately report `momo.responses/1.0`
+and `momo.control/1.0`. See [build identity](release_version_metadata.md).
+
 ## Stable product wire
 
 The following routes are the versioned product wire contract:

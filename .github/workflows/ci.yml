@@ -61,6 +61,8 @@ jobs:
       - name: MORP offline evaluation contracts (Unix)
         if: runner.os != 'Windows'
         run: bash scripts/test-morp.sh
+      - name: Test compile-time Git metadata
+        run: python scripts/test-build-metadata.py
       - name: MORP offline evaluation contracts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
