@@ -3,6 +3,11 @@ Copyright 2026 ppisky and MOMO Core contributors
 
 This product is licensed under the Apache License, Version 2.0.
 
+The MOMO overlapping-circle logo and simplified variant in assets/brand/ are
+separately licensed under Creative Commons Attribution-ShareAlike 4.0
+International (CC BY-SA 4.0). Attribution: MOMO project (ppisky and contributors).
+See assets/brand/README.md and LICENSES/CC-BY-SA-4.0.txt.
+
 This product uses the official Turso Rust database library, distributed under
 the MIT License: https://github.com/tursodatabase/turso
 

@@ -25,7 +25,7 @@ MOMO Core 是面向 AI 角色体验的本地优先 Rust 基础系统。角色数
 
 ## 快速本地烟测
 
-需要 Rust `1.96.1`（仓库已通过 `rust-toolchain.toml` 固定）以及可用的 C/C++ 构建工具链。
+需要 Rust `1.99.0`（仓库已通过 `rust-toolchain.toml` 固定）以及可用的 C/C++ 构建工具链。
 以下命令只启动本地服务并验证健康端点，不会调用模型：
 
 ```powershell
@@ -135,9 +135,10 @@ usage 会持久化，保持 request ID 重放的确定性。MOMO 的 `momo.respo
 `v1.0.0` 发布门槛。详见
 [1.0.0 发布契约](docs/roadmap_1_0_0.md)。
 已发布的 rc.4 保持上述契约冻结，同时收紧编排边界，并让每个 Space 的检索 Workspace 在请求间
-持续复用。rc.5 候选完成实例级运行时协调、类型化 Rust 应用 API 和可恢复的记忆维护提交。
-后续稳定化在现有架构边界内处理具体缺陷并积累发布证据。发布事实以 GitHub 公开 tag 和
-Release 为准。变更见 [rc.5 说明](docs/release_notes_1_0_0_rc5.md)。历史记录见
+持续复用。rc.6 候选补充按空间管理的资产配置/生命周期、模型连接与独立用途请求配置、
+对话归档/恢复及 MO State 管理诊断。Core 和图形界面宿主保持独立仓库，通过原生 HTTP/SSE
+接入，宿主负责界面和访问控制。发布事实以 GitHub 公开 tag 和 Release 为准。
+变更见 [rc.6 说明](docs/release_notes_1_0_0_rc6.md)。历史记录见 [rc.5 说明](docs/release_notes_1_0_0_rc5.md)、
 [rc.4 发布说明](docs/release_notes_1_0_0_rc4.md)；已发布的
 [rc.3 发布说明](docs/release_notes_1_0_0_rc3.md)继续保留。
 DDM 的实现边界与剩余实验性限制见 [DDM 状态报告](docs/ddm_implementation_status.zh-CN.md)。
@@ -189,3 +190,5 @@ Issue 讨论。参与前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 ## 许可证
 
 Apache License 2.0。参见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
+
+`assets/brand/` 内的双圆重合图标及简化版单独采用 [CC BY-SA 4.0](assets/brand/README.md)。

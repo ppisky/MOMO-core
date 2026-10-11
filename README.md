@@ -26,7 +26,7 @@ local HTTP interface in one workspace.
 
 ## Quick local smoke test
 
-Install Rust `1.96.1` (pinned by `rust-toolchain.toml`) and a working C/C++
+Install Rust `1.99.0` (pinned by `rust-toolchain.toml`) and a working C/C++
 build toolchain. The following starts the local server and checks its health
 endpoint without calling a model:
 
@@ -180,11 +180,13 @@ and MORP coverage remains the stable `v1.0.0` gate. See the
 [1.0.0 release contract](docs/roadmap_1_0_0.md).
 The published rc.4 keeps those contracts frozen while tightening orchestration
 boundaries and making per-Space retrieval workspaces persistent across requests.
-The rc.5 candidate completes instance-owned runtime coordination, typed Rust
-application APIs and recoverable maintenance commits. Subsequent stabilization
-focuses on concrete defects and release evidence within these architecture
-boundaries. GitHub public tags and Releases are the release source of truth.
-See the [rc.5 notes](docs/release_notes_1_0_0_rc5.md) and the
+The rc.6 candidate adds scoped asset configuration and lifecycle controls,
+configured Chat Completions/Responses and embedding routes, independent purpose
+request defaults, conversation archive/restore, and MO State management diagnostics.
+Core and graphical hosts remain independently maintained repositories; Core ships
+the native HTTP/SSE API, while hosts own their interface and access controls.
+GitHub public tags and Releases are the release source of truth.
+See the [rc.6 notes](docs/release_notes_1_0_0_rc6.md), [rc.5 notes](docs/release_notes_1_0_0_rc5.md), and the
 [rc.4 release notes](docs/release_notes_1_0_0_rc4.md); the published rc.3 notes
 remain [available here](docs/release_notes_1_0_0_rc3.md).
 DDM's implementation boundary and remaining experimental limitations are in
@@ -256,3 +258,6 @@ are also open; substantial changes should preferably begin with an Issue. Read
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+The MOMO overlapping-circle logo and its simplified variant in `assets/brand/`
+are separately licensed under [CC BY-SA 4.0](assets/brand/README.md).

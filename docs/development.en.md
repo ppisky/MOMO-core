@@ -13,7 +13,7 @@ Skipping the security audit must be reported as an incomplete release gate.
 
 ## Requirements
 
-- Rust `1.96.1`, pinned by `rust-toolchain.toml`
+- Rust `1.99.0`, pinned by `rust-toolchain.toml`
 - a C/C++ build toolchain for native dependencies
 - network access on a fresh machine to populate the Cargo cache
 
