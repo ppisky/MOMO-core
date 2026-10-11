@@ -1,6 +1,6 @@
 # MOMO Core 1.0.0-rc.6
 
-RC6 integrates the Core capabilities required by the graphical host while preserving independent repositories and the frozen `momo.responses/1.0` and `momo.control/1.0` product wire. This remains a prerelease. As with previous RC builds, internal workspace package versions remain `1.0.0`; the release tag is `v1.0.0-rc.6`.
+RC6 adds conversation archives, model-purpose request configuration and MO State management while preserving the frozen `momo.responses/1.0` and `momo.control/1.0` product wire. This remains a prerelease. As with previous RC builds, internal workspace package versions remain `1.0.0`; the release tag is `v1.0.0-rc.6`.
 
 ## Changes / 变更
 
@@ -24,7 +24,7 @@ Runtime policy and Prompt Space overrides persist locally. Model-account storage
 
 ## Boundaries / 边界
 
-The server binds to loopback by default and has no end-user authentication layer. Hosts must authorize Spaces and whitelist local management APIs. This release does not claim complete multi-module MOC import crash atomicity, multi-process writes, provider quality improvements, or desktop-runtime/browser compatibility. DDM remains experimental; optional profiling is a development feature, not an application dependency.
+The server binds to loopback by default and has no end-user authentication layer. Hosts must authorize Spaces and whitelist local management APIs. This release does not claim complete multi-module MOC import crash atomicity, multi-process writes, provider quality improvements. DDM remains experimental; optional profiling is a development feature, not an application dependency.
 
 See [HTTP boundaries](http_api_1_0.md), [model connections](model_connections.md), [purpose requests](model_purpose_request_configuration.md), [conversation archives](conversation_archive.zh-CN.md), [MO State management](mo_state_management.zh-CN.md), and [logo licensing](../assets/brand/README.md).
 
