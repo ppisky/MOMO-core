@@ -1,6 +1,6 @@
 # MOMO 图标 / MOMO logos
 
-双圆重合图标及简化版按用户明确授权，以 **Creative Commons Attribution-ShareAlike 4.0 International（CC BY-SA 4.0）** 发布。
+双圆重合图标及简化版以 **Creative Commons Attribution-ShareAlike 4.0 International（CC BY-SA 4.0）** 发布。
 
 | 文件 | 说明 |
 | --- | --- |
